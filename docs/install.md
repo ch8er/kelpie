@@ -304,6 +304,9 @@ docker compose exec kelpie kelpie doctor --prometheus http://prometheus:9090
 
 `/metrics` and `/healthz` have no authentication. Keep the port on a loopback or private
 address, or put an authenticating proxy in front of it (see [SECURITY.md](../SECURITY.md)).
+Every listener has a header deadline, a cap on connections not yet admitted, per-read and
+whole-body timeouts and a body size limit ([`[server]`](configuration.md#server),
+[security](security.md#listeners)), so a slow or flooding client cannot hold its threads.
 
 ## OTLP token and the exposure check
 

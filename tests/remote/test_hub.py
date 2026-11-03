@@ -412,13 +412,13 @@ def test_deep_bodies_are_refused(server: HubServer) -> None:
 
 def wait_unauthenticated(server: HubServer, n: int) -> None:
     deadline = time.monotonic() + 5
-    while server.unauthenticated() != n and time.monotonic() < deadline:
+    while server.pending() != n and time.monotonic() < deadline:
         time.sleep(0.01)
-    assert server.unauthenticated() == n
+    assert server.pending() == n
 
 
 def test_strangers_cannot_lock_agents_out(server: HubServer, clock: Clock) -> None:
-    server.max_connections = 3
+    server.limits = replace(server.limits, max_connections=3)
     port = server.server_address[1]
     # Idle strangers from several addresses fill every unauthenticated slot...
     idle = [
@@ -434,12 +434,8 @@ def test_strangers_cannot_lock_agents_out(server: HubServer, clock: Clock) -> No
     wait_unauthenticated(server, 0)
 
 
-def test_one_address_gets_at_most_its_share(
-    server: HubServer, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    import kelpie.remote.hub as hub_module
-
-    monkeypatch.setattr(hub_module, "MAX_PER_PEER", 2)
+def test_one_address_gets_at_most_its_share(server: HubServer) -> None:
+    server.limits = replace(server.limits, max_per_address=2)
     port = server.server_address[1]
     idle = [socket.create_connection(("127.0.0.1", port)) for _ in range(2)]
     wait_unauthenticated(server, 2)
@@ -451,7 +447,7 @@ def test_one_address_gets_at_most_its_share(
 
 
 def test_peers_count_by_address_or_ipv6_64() -> None:
-    from kelpie.remote.hub import _peer_key
+    from kelpie.httpguard import peer_key as _peer_key
 
     assert _peer_key("192.0.2.7") == "192.0.2.7"
     assert _peer_key("2001:db8:1:2:aaaa::1") == _peer_key("2001:db8:1:2:bbbb::9")
@@ -547,12 +543,8 @@ def test_the_agent_drops_results_the_hub_refuses(clock: Clock) -> None:
     assert agent._unsent == []
 
 
-def test_a_slow_stranger_is_cut_at_the_deadline(
-    server: HubServer, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    import kelpie.remote.hub as hub_module
-
-    monkeypatch.setattr(hub_module, "PREAUTH_DEADLINE", 0.5)
+def test_a_slow_stranger_is_cut_at_the_deadline(server: HubServer) -> None:
+    server.limits = replace(server.limits, header_timeout=0.5)
     with socket.create_connection(("127.0.0.1", server.server_address[1]), timeout=5) as sock:
         sock.sendall(b"POST /v1/agent/report HTTP/1.1\r\n")
         started = time.monotonic()
@@ -565,14 +557,14 @@ def test_a_slow_stranger_is_cut_at_the_deadline(
         assert sock.recv(100) == b""
         assert time.monotonic() - started < 3
     deadline = time.monotonic() + 5
-    while server.unauthenticated() and time.monotonic() < deadline:
+    while server.pending() and time.monotonic() < deadline:
         time.sleep(0.01)
-    assert server.unauthenticated() == 0
+    assert server.pending() == 0
 
 
 def test_an_agent_frees_its_connection_slot(server: HubServer, clock: Clock) -> None:
     agent_for(server, BoardAdapter(), clock).report()
-    assert server.unauthenticated() == 0
+    assert server.pending() == 0
 
 
 def test_the_agent_refuses_an_oversized_reply(clock: Clock) -> None:

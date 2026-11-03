@@ -127,6 +127,7 @@ from kelpie.core.storage import (
     SqliteLedgerStore,
     SqliteSpanStore,
 )
+from kelpie.httpguard import Limits, load_server
 from kelpie.instructions.config import InstructionSettings, load_instructions, platform_sources
 from kelpie.instructions.watch import InstructionWatch
 from kelpie.metrics import Metrics
@@ -291,6 +292,7 @@ class Settings:
     agent: AgentSettings | None = None  # [agent]: this host runs ``kelpie agent``
     hub: HubSettings | None = None  # [hub]: ``kelpie serve`` takes reports from agents
     snooze: SnoozeSettings = field(default_factory=SnoozeSettings)  # [snooze]
+    server: Limits = field(default_factory=Limits)  # [server]: every listener's guards
 
     @property
     def spend(self) -> SpendConfig:
@@ -333,6 +335,7 @@ def load_settings(path: Path | None) -> Settings:
         "agent",
         "hub",
         "snooze",
+        "server",
     }
     if unknown:
         raise ConfigError(f"unknown config sections: {sorted(unknown)}")
@@ -374,6 +377,7 @@ def load_settings(path: Path | None) -> Settings:
         agent = load_agent(data.get("agent"))
         hub = load_hub(data.get("hub"))
         snooze = load_snooze(data.get("snooze"), report.tz)
+        server = load_server(data.get("server"))
     except ValueError as exc:
         raise ConfigError(str(exc)) from exc
     return Settings(
@@ -400,6 +404,7 @@ def load_settings(path: Path | None) -> Settings:
         agent=agent,
         hub=hub,
         snooze=snooze,
+        server=server,
     )
 
 
@@ -2003,7 +2008,7 @@ def _with_hub(app: App, hub: Hub | None, traces: TraceIngest | None = None) -> A
     if hub is None:
         return app
     try:
-        server = HubServer(hub, traces)
+        server = HubServer(hub, traces, app.settings.server)
     except (OSError, ValueError) as exc:
         app.close()
         raise ConfigError(

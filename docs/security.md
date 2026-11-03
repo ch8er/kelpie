@@ -21,6 +21,36 @@ on loopback, `[[traces.forward]]` with `headers_env`, `kelpie agent` on a privat
 are sent directly, never through `http_proxy`; https requests may use `https_proxy` through
 a CONNECT tunnel.
 
+## Listeners
+
+`kelpie serve` listens on the main port (`/v1/traces`, `/metrics`, `/healthz`; loopback by
+default) and, with `[hub]`, on the hub port. Both go through one set of connection guards
+(`kelpie.httpguard`, configured by [`[server]`](configuration.md#server)), so nobody needs
+a token to hold its threads:
+
+- **Header deadline.** From accept to the end of the headers (the hub's TLS handshake
+  included) a connection has `header_timeout` (3s) in all, however slowly it sends; then
+  its socket is shut down. A slowloris that drips header bytes is cut at the deadline.
+- **Connection cap.** Connections not yet admitted (an OTLP export or hub request until its
+  token checks out, a `GET` until it is answered) are capped per listener
+  (`[server] max_connections`, `[hub] max_connections`, 64 each) and per address
+  (`max_connections_per_address`, 16, per /64 for IPv6), checked before a thread starts.
+- **Slow-client cutoff.** When every slot is taken, the oldest connection still sending its
+  request line or headers is cut to make room, so a real client (which sends them at once)
+  still gets in. Someone with many addresses who opens connections faster than a client
+  sends its headers can still crowd it out; firewall the port to the networks that need
+  it where that matters.
+- **Bodies.** A body is read only after the token checks out, within `read_timeout` (30s)
+  per read and `body_timeout` (60s) for the whole body, and only up to the endpoint's
+  limit (`[traces] max_body_bytes`, `[hub] max_body_bytes`), checked before reading and
+  again after gzip. Ingest decodes at most `[traces] max_concurrent_requests` exports at
+  once; the hub holds a few requests per agent. One request per connection.
+
+These guards bound threads and memory; they do not stop a flood from a fast client, which
+is a firewall's job. `/metrics` and `/healthz` stay unauthenticated: keep the main port on
+loopback or a private network, or behind an authenticating proxy, when it carries anything
+you would not publish.
+
 ## Traces token
 
 The OTLP ingest token (`[traces] token_env`, `KELPIE_TRACES_TOKEN`) is the one secret the

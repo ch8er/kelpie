@@ -13,14 +13,10 @@ twice; a result that arrives late answers the retry.
 
 from __future__ import annotations
 
-import contextlib
 import hmac
-import ipaddress
 import json
 import logging
-import socket
 import ssl
-import sys
 import threading
 import time
 import uuid
@@ -30,11 +26,11 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from functools import partial
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Protocol
 
 from kelpie.core.actions import ActionKind
 from kelpie.core.model import Span
+from kelpie.httpguard import GuardedHandler, GuardedServer, Limits
 from kelpie.remote.config import HubSettings
 from kelpie.remote.protocol import (
     ACTIONS_PATH,
@@ -58,8 +54,6 @@ log = logging.getLogger(__name__)
 # How long an unanswered action keeps its id (and a late result waits to be claimed).
 PENDING_TTL = timedelta(hours=1)
 MAX_REPLY_BYTES = 512 * 1024  # of a poll reply (the agent reads at most 1 MiB)
-PREAUTH_DEADLINE = 3.0  # seconds from accept to a checked token; then the socket is shut
-MAX_PER_PEER = 16  # connections from one address (an IPv6 /64) not yet authenticated
 # Authenticated requests in flight per agent, by kind.
 IN_FLIGHT = {"report": 1, "poll": 2, "traces": 2}
 MAX_POLL_BYTES = 2 * 1024 * 1024  # a poll carries results only
@@ -421,121 +415,26 @@ class TraceSink(Protocol):
     ) -> Any: ...
 
 
-class HubServer(ThreadingHTTPServer):
-    daemon_threads = True
+class HubServer(GuardedServer):
+    """The hub's listener under :mod:`kelpie.httpguard`: a connection is pending until its
+    token checks out (an agent sends it at once, a stranger holding slots does not); agents'
+    own requests are then limited per agent."""
 
-    def __init__(self, hub: Hub, traces: TraceSink | None = None) -> None:
+    name = "hub"
+
+    def __init__(
+        self, hub: Hub, traces: TraceSink | None = None, limits: Limits | None = None
+    ) -> None:
         settings = hub.settings
         self.hub = hub
         self.traces = traces  # OTLP exports agents relay; None: refused (404)
-        self.tls = hub.tls or (server_context(settings) if settings.tls else None)
-        if ":" in settings.host:
-            self.address_family = socket.AF_INET6
-        # Connections not yet authenticated: at most max_connections (when full, the oldest
-        # is cut to make room: an agent sends its token at once, a stranger holding slots
-        # does not), MAX_PER_PEER from one address. A connection gives its slot back once
-        # its token checks out; agents' own requests are then limited per agent.
-        self.max_connections = settings.max_connections
-        self._slots_lock = threading.Lock()
-        self._unauthenticated: dict[int, tuple[str, Any]] = {}  # id(socket) -> peer, socket
-        self._per_peer: Counter[str] = Counter()
-        self._warned: dict[str, float] = {}
-        super().__init__((settings.host, settings.port), HubHandler)
-
-    def process_request(self, request: Any, client_address: Any) -> None:
-        # Over the per-peer cap a connection is closed before a thread is started for it.
-        peer = _peer_key(str(client_address[0]))
-        evicted = None
-        with self._slots_lock:
-            if self._per_peer[peer] >= MAX_PER_PEER:
-                self.shutdown_request(request)
-                return
-            if len(self._unauthenticated) >= self.max_connections:
-                oldest = next(iter(self._unauthenticated))
-                old_peer, evicted = self._unauthenticated.pop(oldest)
-                self._drop_peer(old_peer)
-            self._unauthenticated[id(request)] = (peer, request)
-            self._per_peer[peer] += 1
-        if evicted is not None:
-            _shut(evicted)
-        try:
-            super().process_request(request, client_address)
-        except BaseException:
-            self.release(request)
-            raise
-
-    def process_request_thread(self, request: Any, client_address: Any) -> None:
-        try:
-            super().process_request_thread(request, client_address)
-        finally:
-            self.release(request)
-
-    def release(self, request: Any) -> None:
-        """Give back the connection's unauthenticated slot (once)."""
-        with self._slots_lock:
-            entry = self._unauthenticated.pop(id(request), None)
-            if entry is not None:
-                self._drop_peer(entry[0])
-
-    def _drop_peer(self, peer: str) -> None:
-        self._per_peer[peer] -= 1
-        if not self._per_peer[peer]:
-            del self._per_peer[peer]
-
-    def unauthenticated(self) -> int:
-        with self._slots_lock:
-            return len(self._unauthenticated)
-
-    def warn_once(self, peer: str, message: str, *args: object) -> None:
-        """Log a refusal at most once a minute per peer (a scanner must not flood the log)."""
-        now = time.monotonic()
-        with self._slots_lock:
-            if now - self._warned.get(peer, -_LOG_EVERY) < _LOG_EVERY:
-                return
-            self._warned[peer] = now
-            if len(self._warned) > 10_000:
-                self._warned.clear()
-        log.warning(message, *args)
-
-    def get_request(self) -> tuple[Any, Any]:
-        sock, address = self.socket.accept()
-        if self.tls is not None:
-            # The handshake runs in the request's thread (HubHandler.setup), under its socket
-            # timeout: a client that stalls it cannot hold up accept().
-            sock = self.tls.wrap_socket(sock, server_side=True, do_handshake_on_connect=False)
-        return sock, address
-
-    def handle_error(self, request: Any, client_address: Any) -> None:
-        exc = sys.exc_info()[1]
-        if isinstance(exc, OSError):  # the peer went away, a TLS handshake failed, a timeout
-            log.debug("hub: connection from %s ended: %s", client_address[0], exc)
-        else:
-            log.exception("hub: request from %s failed", client_address[0])
+        limits = replace(limits or Limits(), max_connections=settings.max_connections)
+        tls = hub.tls or (server_context(settings) if settings.tls else None)
+        super().__init__((settings.host, settings.port), HubHandler, limits, tls)
 
     def shutdown(self) -> None:
         self.hub.close()  # release held polls first
         super().shutdown()
-
-
-def _shut(sock: Any) -> None:
-    """Shut a connection down under its handler, on the plain socket: an SSL socket's own
-    shutdown would leave the handler mid-handshake with a broken object (not an OSError)."""
-    with contextlib.suppress(OSError):
-        socket.socket.shutdown(sock, socket.SHUT_RDWR)
-
-
-def _peer_key(address: str) -> str:
-    """Who a connection counts against: the address, or its /64 for IPv6 (one host holds a
-    whole /64)."""
-    try:
-        ip = ipaddress.ip_address(address)
-    except ValueError:
-        return address
-    if isinstance(ip, ipaddress.IPv6Address):
-        if ip.ipv4_mapped is not None:
-            return str(ip.ipv4_mapped)
-        return str(ipaddress.ip_network(f"{ip}/64", strict=False))
-    return str(ip)
 
 
 class HubService:
@@ -578,33 +477,8 @@ def server_context(settings: HubSettings) -> ssl.SSLContext:
     return context
 
 
-class HubHandler(BaseHTTPRequestHandler):
+class HubHandler(GuardedHandler):
     server: HubServer
-    timeout = 30  # per socket read, the TLS handshake included
-    body_deadline = 60.0
-
-    def setup(self) -> None:
-        # Until its token checks out a connection has PREAUTH_DEADLINE in all, handshake,
-        # request line and headers included, however slowly it sends them.
-        self._guard = threading.Timer(PREAUTH_DEADLINE, self._cut)
-        self._guard.daemon = True
-        self._guard.start()
-        try:
-            self.request.settimeout(self.timeout)
-            if isinstance(self.request, ssl.SSLSocket):
-                self.request.do_handshake()
-            super().setup()
-        except BaseException:
-            self._guard.cancel()  # finish() does not run when setup() fails
-            raise
-
-    def _cut(self) -> None:
-        _shut(self.request)
-
-    def finish(self) -> None:
-        self._guard.cancel()
-        with contextlib.suppress(OSError):
-            super().finish()
 
     def do_GET(self) -> None:
         self.close_connection = True
@@ -619,14 +493,13 @@ class HubHandler(BaseHTTPRequestHandler):
         hub = self.server.hub
         agent = hub.identify(self.headers.get("Authorization"))  # before reading anything
         if agent is None:
-            peer = self._peer()
+            peer = self.peer()
             self.server.warn_once(
                 peer, "hub: refused a request without a valid token from %s", peer
             )
             self._json(401, {"error": "missing or invalid bearer token"})
             return
-        self._guard.cancel()
-        self.server.release(self.request)
+        self.admit()
         kinds = {REPORT_PATH: "report", ACTIONS_PATH: "poll", TRACES_PATH: "traces"}
         kind = kinds[path]
         try:
@@ -661,7 +534,7 @@ class HubHandler(BaseHTTPRequestHandler):
         try:
             reply = sink.handle(
                 self.headers,
-                self._read,
+                self.read_body,
                 authenticated=True,
                 rewrite=partial(namespace_span, agent),
             )
@@ -731,9 +604,9 @@ class HubHandler(BaseHTTPRequestHandler):
             self._json(415, {"error": "expected application/json, identity or gzip"})
             return None
         try:
-            data = self._read(length)
+            data = self.read_body(length)
         except OSError as exc:
-            log.info("hub: request from %s aborted: %s", self._peer(), exc)
+            log.info("hub: request from %s aborted: %s", self.peer(), exc)
             return None
         if len(data) != length:
             self._json(400, {"error": "body shorter than Content-Length"})
@@ -761,25 +634,6 @@ class HubHandler(BaseHTTPRequestHandler):
             return None
         return body
 
-    def _read(self, length: int) -> bytes:
-        deadline = time.monotonic() + self.body_deadline
-        chunks: list[bytes] = []
-        left = length
-        try:
-            while left > 0:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    raise TimeoutError("request body not received within the deadline")
-                self.connection.settimeout(min(self.timeout, remaining))
-                chunk = self.rfile.read1(min(left, 65536))
-                if not chunk:
-                    break
-                chunks.append(chunk)
-                left -= len(chunk)
-        finally:
-            self.connection.settimeout(self.timeout)
-        return b"".join(chunks)
-
     def _json(
         self, code: int, body: Mapping[str, Any], headers: Mapping[str, str] | None = None
     ) -> None:
@@ -792,9 +646,3 @@ class HubHandler(BaseHTTPRequestHandler):
         self.send_header("Connection", "close")
         self.end_headers()
         self.wfile.write(data)
-
-    def _peer(self) -> str:
-        return str(self.client_address[0]) if self.client_address else "?"
-
-    def log_message(self, format: str, *args: object) -> None:
-        log.debug(format, *args)
