@@ -227,7 +227,8 @@ Run one Kelpie per Hermes home, not one per board: two instances read the same s
 host, ingest the same spans twice and alert twice per disk. Run ids restart on every board,
 and an instance watching one board cannot tell the other board's spool lines from its own,
 so another board's run 42 counts as activity of its run 42 (a stuck run looks alive, and
-rule 10 can count another run's calls). Only one Kelpie may act on a board.
+rule 10 can count another run's calls). Only one Kelpie may act on a board, and this is
+enforced: see [one acting instance per board](security.md#one-acting-instance-per-board).
 
 ```toml
 [adapters.hermes]

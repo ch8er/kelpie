@@ -13,7 +13,7 @@ import sqlite3
 import threading
 import time
 import tomllib
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -63,6 +63,7 @@ from kelpie.connectors.human_tasks import (
 )
 from kelpie.connectors.llm_quotas import LlmQuotaSettings, load_llm_quotas
 from kelpie.core.actions import ActionKind
+from kelpie.core.actlock import ActLock, HeldLocks, acquire
 from kelpie.core.budgets import BudgetConfig, BudgetStatus, BudgetUnit, evaluate, load_budgets
 from kelpie.core.conditions import (
     Contribution,
@@ -93,6 +94,7 @@ from kelpie.core.ports import (
     ProviderReader,
     ResourceReader,
     SnapshotSource,
+    SupportsActLock,
     SupportsClose,
     SupportsReassign,
     SupportsStop,
@@ -2643,6 +2645,45 @@ def _refuse_unimplemented_actions(
             "these rules cannot run in act mode on this farm; use observe or suggest mode "
             f"(rules in act mode: {acting}; {why})"
         )
+
+
+def acting_rules(settings: Settings, loaded: LoadedRules) -> list[str]:
+    """The rules that act on a board here: in act mode, implemented, not under dry-run, with
+    an effect a platform adapter carries out (not only alerts, or cancelling CI builds)."""
+    if settings.engine.dry_run:
+        return []
+    on_boards = {
+        p.name for p in PLANNED if p.effects - {ActionKind.CANCEL_BUILD}
+    }  # what act_blockers calls a rule's platform effects
+    return sorted(
+        s.name
+        for s in loaded.statuses
+        if s.implemented and s.mode is Mode.ACT and s.name in on_boards
+    )
+
+
+def board_locks(adapters: Iterable[PlatformAdapter]) -> list[ActLock]:
+    """The act locks of ``adapters``' boards (audit M7)."""
+    return [lock for a in adapters if isinstance(a, SupportsActLock) for lock in a.act_locks()]
+
+
+def take_act_locks(locks: Sequence[ActLock]) -> HeldLocks:
+    """Hold ``locks`` for as long as this process acts; ActLockError (safe to print) when
+    another instance acts on one of the boards."""
+    held = acquire(locks)
+    if held.boards:
+        log.info("acting on board(s) %s: no other Kelpie may act on them", ", ".join(held.boards))
+    return held
+
+
+def serve_act_locks(settings: Settings) -> HeldLocks:
+    """``kelpie serve``'s act locks: one per board of its in-process adapters when any rule
+    acts, none when every rule observes or suggests (or under dry-run). With ``[hub]`` there
+    are no in-process adapters: each ``kelpie agent`` locks its own boards."""
+    loaded = load_rules(settings.engine)
+    if not acting_rules(settings, loaded) or settings.hub is not None:
+        return HeldLocks()
+    return take_act_locks(board_locks(build_adapters(settings)))
 
 
 def render_adapters(adapters: Sequence[PlatformAdapter]) -> list[str]:
