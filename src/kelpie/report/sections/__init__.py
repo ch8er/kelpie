@@ -41,6 +41,7 @@ from kelpie.core.model import Span
 from kelpie.core.spans import SpanKey, TokenUsage
 
 if TYPE_CHECKING:
+    from kelpie.report.attribution import CallOwners
     from kelpie.report.daily import ReportInputs
 
 log = logging.getLogger(__name__)
@@ -106,11 +107,12 @@ class SectionContext:
     """What a builder may read: the report's ``inputs``; the day (``start``, ``end``, its
     ``spans`` and ``spend``); ``counted``, the LLM spans whose tokens count (nested
     instrumentations left out) with the model to price them by; ``roles``, the role of each
-    session's owner; ``price``, which turns token usage into :class:`Spend`; and
-    ``config``, the section's own ``[report.sections.<name>]`` table (empty without one),
-    holding only the keys it registered (``register_section(name, keys=...)``); the
-    section checks the values and raises on bad ones. Read-only at the top level; nested
-    values are the builder's own copy."""
+    session's owner; ``price``, which turns token usage into :class:`Spend`; ``owners``,
+    which task and role a call belongs to, and ``outage_calls``, the calls an outage held
+    (#197 item 6); and ``config``, the section's own ``[report.sections.<name>]`` table
+    (empty without one), holding only the keys it registered (``register_section(name,
+    keys=...)``); the section checks the values and raises on bad ones. Read-only at the top
+    level; nested values are the builder's own copy."""
 
     inputs: ReportInputs
     start: datetime
@@ -121,6 +123,12 @@ class SectionContext:
     spend: Spend
     roles: Mapping[str, str]
     config: Mapping[str, Any] = field(default_factory=lambda: MappingProxyType({}))
+    # which task and role each call belongs to (kelpie.report.attribution); None: by the
+    # spans' own task ids and ``roles``
+    owners: CallOwners | None = None
+    # calls an outage's tasks made while it held them (#197 item 6): the outage's spend,
+    # under Outages, not the roles' own
+    outage_calls: frozenset[SpanKey] = frozenset()
 
 
 SectionBuilder = Callable[[SectionContext], "Section | None"]

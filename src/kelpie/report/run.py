@@ -151,6 +151,7 @@ def load_inputs(sources: ReportSources, day: date, board: Snapshot) -> ReportInp
         instructions_at=board.now if board.instruction_files else None,
         instruction_tokens=tokens,
         host_sleeps=sleeps,
+        usage=board.usage,
         agents=frozenset(a for t in board.tasks if (a := source_agent(t.source)) is not None),
     )
 
