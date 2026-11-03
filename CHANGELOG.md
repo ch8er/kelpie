@@ -10,6 +10,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ### Added
 
+- Known runners anywhere in a command (#197 part 2b): `[traces] known_runners` (OTLP) and
+  `KELPIE_KNOWN_RUNNERS` on agent hosts (the Hermes plugin, the Claude Code hook and the
+  OpenClaw hook, which also takes `knownRunners` in its config) name build and test runners
+  such as `ios_sim.sh`, `xcodebuild` or `npm test`. A command that names one anywhere
+  (after `cd … &&`, `export …`, `env …`, in a pipe, inside `bash -c`) records it
+  (`kelpie.tool.runners`, a spool line's `runners`: names from the list only, never the
+  command's words), and the largest tool outputs group the call by it. Empty by default:
+  nothing changes for farms that do not set it.
 - `kelpie ci-config`: rule 9's proposed CI configuration changes, printed as a diff of each
   GitHub Actions workflow file (concurrency with cancel-in-progress, `paths-ignore` for docs,
   skipping drafts). Read-only; it needs only the read token. `ci_economy` emits the

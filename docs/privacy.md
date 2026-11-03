@@ -8,11 +8,11 @@ keep less. It describes the code as it is; the files named below are the referen
 
 | Data | Kept | Not kept | Where | How long |
 | --- | --- | --- | --- | --- |
-| OTLP spans | ids, timing, model, token counts, tool name, outcome, allowlisted attributes, a hash of tool arguments, output size, a command prefix | message content, prompts, completions, reasoning, tool arguments and results, error messages, user identity | `kelpie.db`, table `spans` | `[traces] retention` (7 days), at most `max_rows` (1,000,000) |
-| Hermes hook records | tool name, ids, hash of arguments, a redacted command, outcome, duration, output size | raw arguments and results | spool file on the Hermes host | until rotated: one backup file at 20 MiB |
-| Claude Code hook records | session ids, start source, model and agent type, prompt source, turn errors, end reasons; tool name, ids, hash of arguments, a redacted command, outcome, duration, output size; task id, status and owner of `TaskUpdate` calls; skill name of `Skill` calls | prompts, tool arguments and results, messages, transcript path, working directory, task subjects and descriptions | spool file on the agent host | until rotated: one backup file at 20 MiB |
+| OTLP spans | ids, timing, model, token counts, tool name, outcome, allowlisted attributes, a hash of tool arguments, output size, a command prefix, known runner names | message content, prompts, completions, reasoning, tool arguments and results, error messages, user identity | `kelpie.db`, table `spans` | `[traces] retention` (7 days), at most `max_rows` (1,000,000) |
+| Hermes hook records | tool name, ids, hash of arguments, a redacted command, known runner names, outcome, duration, output size | raw arguments and results | spool file on the Hermes host | until rotated: one backup file at 20 MiB |
+| Claude Code hook records | session ids, start source, model and agent type, prompt source, turn errors, end reasons; tool name, ids, hash of arguments, a redacted command, known runner names, outcome, duration, output size; task id, status and owner of `TaskUpdate` calls; skill name of `Skill` calls | prompts, tool arguments and results, messages, transcript path, working directory, task subjects and descriptions | spool file on the agent host | until rotated: one backup file at 20 MiB |
 | Claude Code task lists | task id, subject (200 characters), status, owner, `blockedBy` | descriptions | read in place, not copied | |
-| OpenClaw hook records | session id, session key (the part naming a chat peer or group replaced by a keyed hash), agent id, run id, session end reasons, the session id a session resumed or was replaced by; tool name, call id, hash of arguments, a redacted command, failed or not, duration, output size; per run (with conversation access) provider, model, token counts, trigger, success | prompts, messages, tool arguments and results, error messages, assistant text | spool file on the Gateway host | until rotated: one backup file at 20 MiB |
+| OpenClaw hook records | session id, session key (the part naming a chat peer or group replaced by a keyed hash), agent id, run id, session end reasons, the session id a session resumed or was replaced by; tool name, call id, hash of arguments, a redacted command, known runner names, failed or not, duration, output size; per run (with conversation access) provider, model, token counts, trigger, success | prompts, messages, tool arguments and results, error messages, assistant text | spool file on the Gateway host | until rotated: one backup file at 20 MiB |
 | OpenClaw Workboard cards | card id, board, title (200 characters), notes (8000 characters), status, assignee, claim holder, labels, links, session key (reduced like the hook's) and run id, block reason (500 characters); every comment (2000 characters) and attempt error of the cards read is in memory for the tick, only the latest since a block is kept | claim tokens, attachments, proof, worker logs | read in place, not copied | |
 | Session owners, task labels | owner id and task id per session, labels per task | | `kelpie.db` | `[traces] retention` |
 | Instruction file sizes (optional, `[instructions]`) | per file: its path, when measured, size in bytes and characters, SHA-256, section count, whether a change only appended; in memory for one scan only, hashed word shingles per section and hashed `key: value` facts, to find copies | the files' text, headings and values | `kelpie.db`, table `instruction_sizes`: a row when a file is first measured and when its hash changes | the growth window (`[instructions] window`, 7 days) plus each file's last row before it; all rows of a file once it is no longer found |
@@ -105,7 +105,29 @@ commands = false
 With `commands = false` no `kelpie.tool.command_prefix` is stored for new spans (spans
 already stored keep theirs until retention removes them). `kelpie.tool.filter` (one of the
 filter names above) is still kept. Huge outputs from OTLP spans are then grouped by tool
-name instead of by command. Hook records have their own switch, below.
+name instead of by command. No `kelpie.tool.runners` is recorded either (spans already
+stored keep theirs until retention removes them). Hook records have their own switch, below.
+
+### Known runners
+
+With `[traces] known_runners` (OTLP spans) or `KELPIE_KNOWN_RUNNERS` on the agent hosts
+(hook spool lines; for OpenClaw also `knownRunners` in the plugin config), Kelpie also
+records which of those names a command names anywhere: after `cd … &&`, `export …`,
+`env …`, in a pipe, inside `bash -c '…'`, on any line (of its first 16 KiB). A word matches by its name without
+directory (`./scripts/ios_sim.sh` is `ios_sim.sh`), a runner of several words matches
+those words in a row (`npm test`). What is kept, in `kelpie.tool.runners` or a spool line's
+`runners`, is only names from the configured list (at most 8 per call), never a word of the
+command, so a value or a path cannot get in. Words of one runner never match across a
+separator (`;`, `&`, `|`, parentheses) or a line; a continued line (`npm \` then `test`)
+is not matched either. Agents can write the spool, so a reader keeps a line's name only as
+its command prefix (`npm test` stays, `mysql password x` becomes `mysql`): a forged line adds
+nothing a forged `command` could not. A runner of several words must therefore be one a
+prefix keeps (`npm test`, `make test`, `npm run build`); `[traces] known_runners` refuses
+others. A configured name also matches where the
+command only mentions it (`grep xcodebuild build.log`). Nothing is recorded without a
+configured list, or when commands are not recorded (`[traces] commands = false`, the hooks'
+`..._SPOOL_COMMANDS=0`, OpenClaw's `"commands": false`). Code: the `shared runners` block
+of [`src/kelpie/traces/command.py`](../src/kelpie/traces/command.py), copied into the hooks.
 
 ## Hermes hooks plugin
 
@@ -237,7 +259,8 @@ Code: [`src/kelpie/adapters/openclaw/plugin/`](../src/kelpie/adapters/openclaw/p
 
 The plugin runs inside the OpenClaw Gateway. For each forwarded hook it builds a reduced copy
 of the event in `index.js` and hands only that to `kelpie_hook.py` (a separate `python3`
-process that gets `PATH`, `HOME`, `LANG`, `LC_ALL`, `TMPDIR` and `SYSTEMROOT` of the Gateway's environment,
+process that gets `PATH`, `HOME`, `LANG`, `LC_ALL`, `TMPDIR` and `SYSTEMROOT` of the Gateway's environment
+(and `KELPIE_KNOWN_RUNNERS`, or the plugin's `knownRunners`),
 never its provider keys). Prompts, messages, tool results, error messages and assistant text
 are dropped in `index.js` and never leave the Gateway process; tool arguments go to the hook
 process only to be hashed and, for `exec`-like tools, reduced to a redacted command with the

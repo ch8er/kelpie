@@ -84,7 +84,7 @@ from kelpie.core.actions import ActionResult
 from kelpie.core.actlock import ActLock
 from kelpie.core.model import Owner, Session, Snapshot, Span, SpanKind, Status, Task
 from kelpie.core.ports import PlatformEvent, UnsupportedAction
-from kelpie.traces.command import redact_command
+from kelpie.traces.command import redact_command, spool_runners
 from kelpie.traces.hooks import (
     HOOKS,
     SESSION_END,
@@ -94,7 +94,7 @@ from kelpie.traces.hooks import (
     HookEvent,
     spans_from_hook_events,
 )
-from kelpie.traces.semconv import OUTPUT_CHARS_ATTRIBUTE
+from kelpie.traces.semconv import OUTPUT_CHARS_ATTRIBUTE, RUNNERS_ATTRIBUTE
 
 log = logging.getLogger(__name__)
 
@@ -181,6 +181,7 @@ class SpoolEvent:
     tool_call_id: str | None = None
     args_hash: str | None = None
     command: str | None = None
+    runners: tuple[str, ...] = ()  # known runners the command names (#197)
     outcome: str | None = None
     duration_ms: int = 0
     output_chars: int | None = None
@@ -231,6 +232,7 @@ def parse_line(line: str, cutoff: datetime, until: datetime | None = None) -> Sp
         command=redact_command(rec["command"][:MAX_COMMAND])
         if isinstance(rec.get("command"), str)
         else None,
+        runners=spool_runners(rec.get("runners")),
         outcome=outcome if outcome in ("ok", "error") else None,
         # Bounded: a forged huge duration must not overflow date arithmetic.
         duration_ms=min(_count(rec.get("duration_ms")) or 0, MAX_DURATION_MS),
@@ -496,6 +498,8 @@ class OpenClawAdapter:
             attributes: dict[str, Any] = {}
             if e.command is not None:
                 attributes["command"] = e.command
+            if e.runners:
+                attributes[RUNNERS_ATTRIBUTE] = list(e.runners)
             if e.output_chars is not None:
                 attributes[OUTPUT_CHARS_ATTRIBUTE] = e.output_chars
             hook_events.append(

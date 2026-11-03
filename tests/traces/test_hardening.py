@@ -263,12 +263,12 @@ def test_map_spans_never_raises(monkeypatch: pytest.MonkeyPatch) -> None:
     raw = otlp.decode(request([S(sid(1), attrs=CHAT), S(sid(2), attrs=CHAT)]), PROTOBUF).spans
     real = semconv._span
 
-    def flaky(r: otlp.RawSpan, task: str | None, session: str | None) -> Span | None:
+    def flaky(r: otlp.RawSpan, task: str | None, session: str | None, *rest: Any) -> Span | None:
         if r.span_id == sid(1):
             raise RuntimeError("unforeseen")
         if r.span_id == sid(2):
             raise OverflowError("date value out of range")
-        return real(r, task, session)
+        return real(r, task, session, *rest)
 
     monkeypatch.setattr(semconv, "_span", flaky)
     mapped = semconv.map_spans(raw)
