@@ -137,6 +137,7 @@ SIMULATOR_FREE = (
     "server.py",
     "metrics.py",
     "net.py",
+    "httpguard.py",
     "remote",
     "doctor.py",
     "why.py",
