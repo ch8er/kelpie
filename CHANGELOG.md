@@ -22,11 +22,6 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
   and a change a human turned down is not proposed again
   ([#237](https://github.com/ch8er/kelpie/pull/237)).
 
-### Safety
-
-- What Kelpie can write to GitHub, with the token each write needs:
-  [docs/security.md](docs/security.md#what-kelpie-can-write-to-github).
-
 ### Changed
 
 - Every outage kind in the report (#229, incident 20): a block storm's waits count under "a
@@ -85,6 +80,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
   an action's reason and cuts long params (audit L9); role and pre-work status labels on
   `/metrics` are cut to 64 characters and the 33rd role on is summed under `other` (audit
   L10) ([#329](https://github.com/ch8er/kelpie/pull/329)).
+- What Kelpie can write to GitHub, with the token each write needs:
+  [docs/security.md](docs/security.md#what-kelpie-can-write-to-github).
 
 ## [0.1.0a1] - 2026-11-03
 
