@@ -71,6 +71,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
   first 4000 characters, and the ledger stores at most 8000 of an action's reason (audit
   L9); role labels on `/metrics` are cut to 64 characters and the 33rd role on is summed
   under `other` (audit L10) (#PR_L9).
+
+
 - Agent text is bounded: task titles, comments, block, return and exit reasons and
   progress notes keep their first 8000 characters, and the ledger stores at most 16,000 of
   an action's reason and cuts long params (audit L9); role and pre-work status labels on
