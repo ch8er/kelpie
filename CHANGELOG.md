@@ -36,6 +36,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
   slowly the server answers, and a time budget for all the reads of one refresh
   (`[adapters.linear] tick_budget`, 30s), so a slow Linear cannot stall the control loop
   (audit M4, [#324](https://github.com/ch8er/kelpie/pull/324)).
+- Command redaction (all four copies: OTLP ingest, the Hermes plugin, the Claude Code hook
+  and the OpenClaw hook) no longer keeps a secret passed as a plain word to `echo`,
+  `printf` or `yes` (`echo pw | docker login --password-stdin` →
+  `echo *** | docker login --password-stdin`) or after a credential word such as `auth`
+  or `login` (`redis-cli auth pw` → `redis-cli auth ***`; `gh auth status` is now
+  `gh auth ***`), and an escaped blank no longer ends an argument
+  (`FOO_TOKEN=a\ b make` kept `b`; now `make`). Audit items L7 and L8
+  ([#275](https://github.com/ch8er/kelpie/issues/275)). Update the hooks on agent hosts.
+  `kelpie spool scrub` cleans the `echo` and credential-word leaks in spools written
+  before, but not a value an escaped blank already split off (an old `hunter2 make` reads
+  as an ordinary command): delete or rotate spools from farms that use such assignments.
 
 ## [0.1.0a1] - 2026-11-03
 

@@ -120,7 +120,8 @@ id, `args_hash` (the same hash as above), a redacted `command`, the outcome (`ok
 arguments, results and error messages are never written.
 
 The redacted `command` is a short prefix built from an allowlist (`redact_command`, one block
-kept byte-identical in `kelpie.traces.command`, the Hermes plugin and the Claude Code hook).
+kept byte-identical in `kelpie.traces.command`, the Hermes plugin, the Claude Code hook and
+the OpenClaw hook).
 Of the first line (its first 4096 characters), without leading `VAR=value` assignments, at
 most four arguments are kept, and only these:
 
@@ -132,13 +133,25 @@ most four arguments are kept, and only these:
 - a pipe or list separator and the next executable (`pytest -q | tail`), and the module after
   `python -m` from a short list (`pytest`, `pip`, `mypy`, ...);
 - after a wrapper that only runs another command (`sudo`, `env`, `nice`, `time`, `nohup`,
-  `command`, `exec`, `rtk`), its flag names, `NAME=***` for its assignments, and the wrapped
+  `command`, `exec`, `builtin`, `rtk`), its flag names, `NAME=***` for its assignments, and the wrapped
   executable, read like the first one: `sudo -u root make test` → `sudo -u *** make test`.
   These do not count against the four. A wrapper flag Kelpie does not know may take a value,
   so after one everything is masked (`sudo -X val make` → `sudo -X *** ***`).
 
-Arguments are split on spaces and tabs only, as the shell does; an argument with an escaped
-quote (`\"`) masks the rest of the line.
+Arguments are split on spaces and tabs only, as the shell does; an escaped blank
+(`FOO=a\ b`) does not end an argument, and an argument with an escaped quote (`\"`) masks
+the rest of the line.
+
+Two kinds of plain words are masked, since they are often a secret:
+
+- the arguments of `echo`, `printf` and `yes` (as the executable, or after a wrapper
+  above), which are data, often piped into a login:
+  `echo pw | docker login --password-stdin` → `echo *** | docker login --password-stdin`;
+- the words after a credential word (`auth`, `authtoken`, `login`, `signin`, `unlock`,
+  `password`, `passwd`, `pass`, `passphrase`, `token`, `tokens`, `secret`, `secrets`,
+  `apikey`, `api-key`, `api_key`, `credential`, `credentials`, `storepass`, `keypass`),
+  also as the executable (`passwd ***`): `redis-cli auth pw` → `redis-cli auth ***`,
+  `vault login tok` → `vault login ***` (and `gh auth status` → `gh auth ***`).
 
 Everything else becomes `***`: flag values, paths, URLs, hosts, `user:pass`, headers,
 environment assignments, quoted text, variables and substitutions. Once a flag or a masked
@@ -150,7 +163,10 @@ argument has appeared, later plain words are masked too, since they may be its v
 `gh pr checks 5`.
 
 What can still get through: a secret written as a plain lowercase word right after the
-executable, before any flag (`redis-cli auth hunter2`, `echo hunter2`). To
+executable, before any flag, when no credential word from the list comes before it
+(`tool hunter2`, `tool user pw`, `sshpass pw ssh host`),
+and the arguments of `echo` behind a launcher Kelpie does not read as a wrapper
+(`timeout 5 echo hunter2`, `xargs echo hunter2`). To
 record no command at all, set this in the environment of every Hermes process that loads the
 plugin:
 
