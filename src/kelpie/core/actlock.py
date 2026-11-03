@@ -44,8 +44,13 @@ class ActLock:
 
 
 def beside(path: Path) -> Path:
-    """The lock file next to ``path`` (a board's database or spool): ``<path>.kelpie-act.lock``."""
+    """The lock file next to ``path`` (a board's database or spool): ``<path>.kelpie-act.lock``,
+    next to the file a symlink at ``path`` points to, so every name of a board finds one lock."""
     path = Path(path).expanduser()
+    try:
+        path = path.resolve(strict=False)
+    except OSError:  # a link loop: the name as given
+        path = path.absolute()
     return path.with_name(path.name + SUFFIX)
 
 
@@ -90,13 +95,21 @@ def acquire(locks: Iterable[ActLock], pid: int | None = None) -> HeldLocks:
     lock file cannot be opened."""
     held = HeldLocks()
     seen: set[Path] = set()
+    files: set[tuple[int, int]] = set()  # one file under two names (a case-blind folder)
     try:
         for lock in locks:
             path = _canonical(lock.path)
             if path in seen:
                 continue
             seen.add(path)
-            held.held.append((lock, _take(lock, path, os.getpid() if pid is None else pid)))
+            fd = _open(lock, path)
+            st = os.fstat(fd)
+            if (st.st_dev, st.st_ino) in files:
+                os.close(fd)
+                continue
+            files.add((st.st_dev, st.st_ino))
+            held.held.append((lock, fd))  # released with the others if the lock fails
+            _take(lock, path, fd, os.getpid() if pid is None else pid)
     except BaseException:
         held.release()
         raise
@@ -111,7 +124,7 @@ def _canonical(path: Path) -> Path:
         return path.absolute()
 
 
-def _take(lock: ActLock, path: Path, pid: int) -> int:
+def _open(lock: ActLock, path: Path) -> int:
     if not path.parent.is_dir():
         if not lock.create_folder:
             raise ActLockError(
@@ -122,32 +135,54 @@ def _take(lock: ActLock, path: Path, pid: int) -> int:
             path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         except OSError as exc:
             raise ActLockError(_cannot(lock, path, exc)) from None
-    flags = os.O_RDWR | os.O_CREAT | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK
+    flags = os.O_CREAT | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK
     try:
-        fd = os.open(path, flags, 0o600)
+        # Readable by all (it holds a pid only), so an instance of another user can take the
+        # lock read-only and is refused while this one runs.
+        fd = os.open(path, flags | os.O_RDWR, 0o644)
+    except PermissionError:
+        try:  # left by another user (a run under sudo): flock needs no write access
+            fd = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK)
+        except OSError as exc:
+            raise ActLockError(
+                _cannot(lock, path, exc) + " (another user's file: remove it if no Kelpie runs)"
+            ) from None
     except OSError as exc:
         raise ActLockError(_cannot(lock, path, exc)) from None
+    if not stat.S_ISREG(os.fstat(fd).st_mode):  # a FIFO or device someone put there
+        os.close(fd)
+        raise ActLockError(
+            f"cannot take the act lock of board {lock.board}: {path} is not a regular file"
+        )
+    return fd
+
+
+def _take(lock: ActLock, path: Path, fd: int, pid: int) -> None:
     try:
-        if not stat.S_ISREG(os.fstat(fd).st_mode):  # a FIFO or device someone put there
-            raise ActLockError(
-                f"cannot take the act lock of board {lock.board}: {path} is not a regular file"
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as exc:
+        if exc.errno not in (errno.EWOULDBLOCK, errno.EAGAIN):
+            hint = (
+                " (a network file system? keep the board on a local disk)"
+                if exc.errno in (errno.ENOLCK, errno.ENOTSUP, errno.EOPNOTSUPP)
+                else ""
             )
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError as exc:
-            if exc.errno not in (errno.EWOULDBLOCK, errno.EAGAIN, errno.EACCES):
-                raise ActLockError(_cannot(lock, path, exc)) from None
-            raise ActLockError(
-                f"another Kelpie acts on board {lock.board}{_holder(fd)}: it holds {path}. "
-                "Only one instance may act on a board: stop the other one, or run this one "
-                "with every rule in observe or suggest (or dry_run = true)"
-            ) from None
+            raise ActLockError(_cannot(lock, path, exc) + hint) from None
+        raise ActLockError(
+            f"another Kelpie acts on board {lock.board}{_holder(fd)}: it holds {path}. "
+            "Only one instance may act on a board: stop the other one, or run this one "
+            "with every rule in observe or suggest (or dry_run = true)"
+        ) from None
+    st = os.fstat(fd)
+    # The pid is only a hint for the message. Write it only into a file that is ours alone:
+    # never through a hard link someone made to another file, never into another user's.
+    if st.st_nlink == 1 and st.st_uid == os.geteuid() and os.O_RDWR & _mode(fd):
         os.ftruncate(fd, 0)
         os.write(fd, f"{pid}\n".encode())
-        return fd
-    except BaseException:
-        os.close(fd)
-        raise
+
+
+def _mode(fd: int) -> int:
+    return fcntl.fcntl(fd, fcntl.F_GETFL) & os.O_ACCMODE
 
 
 def _holder(fd: int) -> str:

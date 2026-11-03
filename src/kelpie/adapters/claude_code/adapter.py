@@ -339,7 +339,9 @@ class ClaudeCodeAdapter:
         nothing can be stopped then."""
         if self.spool is None or self.stop_dir is None:
             return ()
-        return (ActLock(f"{self.name} ({self.spool})", actlock.beside(self.spool)),)
+        # The hook makes the spool's folder (0700) on its first line: a fresh host has none.
+        lock = ActLock(f"{self.name} ({self.spool})", actlock.beside(self.spool), True)
+        return (lock,)
 
     # --- status --------------------------------------------------------------------------
 

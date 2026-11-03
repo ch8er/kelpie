@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 
 from kelpie.adapters.claude_code import ClaudeCodeAdapter
+from kelpie.adapters.openclaw.adapter import OpenClawAdapter
 from kelpie.app import board_locks, build_adapters, load_settings, serve_act_locks
 from kelpie.cli import main
 from kelpie.core.actlock import ActLock, ActLockError, acquire, beside, keyed, state_dir
@@ -78,13 +79,53 @@ def test_the_same_file_twice_is_taken_once(tmp_path: Path) -> None:
         held.release()
 
 
-def test_lock_file_is_private_and_names_its_holder(tmp_path: Path) -> None:
+def test_lock_file_names_its_holder_and_only_its_owner_writes_it(tmp_path: Path) -> None:
     held = acquire([_lock(tmp_path)], pid=77)
     try:
         path = beside(tmp_path / "kanban.db")
         assert path.name == "kanban.db.kelpie-act.lock"
-        assert stat.S_IMODE(path.stat().st_mode) & 0o077 == 0
+        assert stat.S_IMODE(path.stat().st_mode) & 0o022 == 0
         assert path.read_text() == "77\n"
+    finally:
+        held.release()
+
+
+def test_a_hard_link_to_another_file_is_locked_but_never_written(tmp_path: Path) -> None:
+    victim = tmp_path / "precious"
+    victim.write_text("keep me")
+    lock = _lock(tmp_path)
+    os.link(victim, lock.path)
+    held = acquire([lock], pid=77)
+    try:
+        assert victim.read_text() == "keep me"
+        with pytest.raises(ActLockError):  # still a lock
+            acquire([lock])
+    finally:
+        held.release()
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root opens any file for writing")
+def test_a_lock_file_of_another_user_is_taken_read_only(tmp_path: Path) -> None:
+    lock = _lock(tmp_path)
+    lock.path.write_text("1\n")
+    lock.path.chmod(0o444)  # as a file another user left behind looks to us
+    held = acquire([lock], pid=77)
+    try:
+        assert lock.path.read_text() == "1\n"
+        with pytest.raises(ActLockError):
+            acquire([lock])
+    finally:
+        held.release()
+
+
+def test_a_board_reached_through_a_symlink_has_one_lock(tmp_path: Path) -> None:
+    (tmp_path / "kanban.db").write_text("")
+    (tmp_path / "alias.db").symlink_to(tmp_path / "kanban.db")
+    assert beside(tmp_path / "alias.db") == beside(tmp_path / "kanban.db")
+    held = acquire([ActLock("real", beside(tmp_path / "kanban.db"))])
+    try:
+        with pytest.raises(ActLockError):
+            acquire([ActLock("alias", beside(tmp_path / "alias.db"))])
     finally:
         held.release()
 
@@ -127,6 +168,36 @@ def test_adapters_lock_where_their_board_is(tmp_path: Path) -> None:
     assert [lk.path for lk in claude.act_locks()] == [tmp_path / "spool.jsonl.kelpie-act.lock"]
     assert ClaudeCodeAdapter(spool=tmp_path / "s", stop_dir=None).act_locks() == ()  # no stops
     assert ClaudeCodeAdapter(spool=None).act_locks() == ()
+    openclaw = OpenClawAdapter(state_dir=tmp_path, spool=tmp_path / "oc.jsonl")
+    assert [lk.path for lk in openclaw.act_locks()] == [tmp_path / "oc.jsonl.kelpie-act.lock"]
+    assert OpenClawAdapter(state_dir=tmp_path, stop_dir=None).act_locks() == ()
+
+
+def test_a_fresh_host_without_the_spool_folder_is_not_refused(tmp_path: Path) -> None:
+    """The hook makes the spool's folder on its first line; serve may start first."""
+    (lock,) = ClaudeCodeAdapter(spool=tmp_path / "kelpie" / "spool.jsonl").act_locks()
+    held = acquire([lock])
+    try:
+        assert stat.S_IMODE((tmp_path / "kelpie").stat().st_mode) == 0o700
+    finally:
+        held.release()
+
+
+def test_issue_boards_lock_per_repository_in_the_state_folder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    path = tmp_path / "kelpie.toml"
+    path.write_text(
+        '[connectors.github]\nrepos = ["example/one", "example/two"]\n[adapters.github_issues]\n'
+    )
+    monkeypatch.setenv("GITHUB_TOKEN", "x" * 40)
+    locks = board_locks(build_adapters(load_settings(path)))
+    assert [lk.board for lk in locks] == ["github-issues example/one", "github-issues example/two"]
+    assert all(
+        lk.create_folder and lk.path.parent == tmp_path / "state/kelpie/locks" for lk in locks
+    )
+    assert len({lk.path for lk in locks}) == 2
 
 
 def _config(tmp_path: Path, extra: str) -> Path:
@@ -160,6 +231,8 @@ def test_hermes_boards_each_get_a_lock(tmp_path: Path) -> None:
     ("extra", "locked"),
     [
         (ACTING, True),
+        # a rule in act that only alerts acts on no board
+        ('[engine]\ndry_run = false\n[engine.rules.ping_pong]\nmode = "act"\n', False),
         ('[engine]\ndry_run = false\n[engine.rules.loop_breaker]\nmode = "suggest"\n', False),
         ('[engine]\ndry_run = true\n[engine.rules.loop_breaker]\nmode = "act"\n', False),
     ],
