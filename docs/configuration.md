@@ -1627,7 +1627,7 @@ Nothing twice:
 
 - One open proposal per repository: while a pull request from any `kelpie/ci-config/...`
   branch of the repository is open (for this file or another), Kelpie proposes nothing
-  there. With more than 1000 open pull requests it cannot tell, and refuses.
+  there. With 1000 or more open pull requests it cannot tell, and refuses.
 - A change a closed proposal named is never proposed again for that file, alone or with
   others, whether or not the branch was deleted: closed without merging, a human turned it
   down ("turned down in #n" in later proposals); merged, it is in the file, or a human undid
@@ -1637,11 +1637,13 @@ Nothing twice:
 - A branch Kelpie could not take back after a failure (for example while rate limited) is
   carried on from when it has no commit of its own (fast-forwarded to the default branch's
   head if it fell behind), or one commit ahead holding exactly this change to this file
-  only.
+  only. If the default branch's copy of the file changed since that commit, the branch no
+  longer holds exactly this change and reads as someone else's: delete it by hand.
 - Any other branch of that name is someone else's, and Kelpie refuses (a human is told).
 
-Kelpie deletes only a branch it made in the same attempt, still at its own commit, and never
-one a pull request is open from (deleting it would close that pull request). The rule emits
+Kelpie deletes only a branch it made in the same attempt, still at its own commit, or the
+branch of an earlier merged or closed proposal still at that proposal's head, and never one
+a pull request is open from (deleting it would close that pull request). The rule emits
 a proposal once per `[engine] once_window` for the same changes. `kelpie ci-config` prints
 the same changes as a diff and writes nothing; it needs only the read token, with
 `Contents: read` on the repositories.

@@ -301,5 +301,7 @@ The steps above apply, with these differences
   branch, PR, event, re-run attempt, status) and the cancel request itself, including the
   token scopes, have not been tried on a live repository. Neither has `propose_ci_config`:
   creating the branch, the contents commit with the workflow permission, the draft pull
-  request, and the rendered workflow running as intended on GitHub.
+  request, the rendered workflow running as intended on GitHub, the `head=owner:branch`
+  filter still finding closed pull requests after their branch was deleted, and the
+  compare API's answer for a half-made branch.
 - Whether a read-only mount of the Hermes files is enough in Docker (see the quickstart).

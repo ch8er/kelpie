@@ -126,13 +126,14 @@ so it is kept for Kelpie's own user:
 Reading GitHub (pull requests, checks, Actions runs) needs only `[connectors.github]
 token_env`, a read-only token. Every write is off by default, runs only through the engine
 (so the rule's mode, `observe` by default, and the global `dry_run` apply; see
-[act-checklist.md](act-checklist.md)), is limited to an allow-list of repositories, and
-goes through a client with a token of its own:
+[act-checklist.md](act-checklist.md)) and is limited to an allow-list of repositories. The
+propose token is mandatory and must be a token of its own; the cancel token is recommended,
+and without it the read token does the cancel (and then needs Actions: write):
 
 | Write | Turned on by | Allow-list | Token (minimum permissions) | What it may touch |
 | --- | --- | --- | --- | --- |
-| `cancel_build` (rule 9) | `[connectors.github.ci] allow_cancel` | `cancel_repos` (and `cancel_workflows`, `cancel_branches`) | `cancel_token_env`: Actions: write | Cancels one Actions run its last scan offered as superseded, after a fresh re-check; never on the default branch |
-| `propose_ci_config` (rule 9) | `[engine.rules.ci_economy] propose_config` and `[connectors.github.ci] allow_propose` | `propose_repos` (required) | `propose_token_env` (required): Contents, Pull requests and Workflows: write on those repositories only | Creates the branch `kelpie/ci-config/<file>`, commits one file under `.github/workflows/` on it, opens a **draft** pull request; deletes only that branch when its own attempt failed |
+| `cancel_build` (rule 9) | `[connectors.github.ci] allow_cancel` | `cancel_repos` (and `cancel_workflows`, `cancel_branches`) | `cancel_token_env` (optional; else `token_env`): Actions: write | Cancels one Actions run its last scan offered as superseded, after a fresh re-check; never on the default branch |
+| `propose_ci_config` (rule 9) | `[engine.rules.ci_economy] propose_config` and `[connectors.github.ci] allow_propose` | `propose_repos` (required) | `propose_token_env` (required): Contents, Pull requests and Workflows: write on those repositories only | Creates the branch `kelpie/ci-config/<file>`, commits one file under `.github/workflows/` on it, opens a **draft** pull request; deletes only that branch: when its own attempt failed, or when it is still at the head of an earlier merged or closed proposal of Kelpie's |
 | Issues adapter actions | `[adapters.github_issues]` and the rule in `act` | the adapter's `repos` | `[adapters.github_issues] token_env`: Issues: write | Labels, assignees and signed comments on issues |
 
 For `propose_ci_config` in particular:

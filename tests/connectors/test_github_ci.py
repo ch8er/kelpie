@@ -688,6 +688,13 @@ def test_load_ci_defaults_and_values() -> None:
         ({"max_pages": 11}, "max_pages"),
         ({"max_requests_per_tick": 101}, "max_requests_per_tick"),
         ({"quota_reset_day": 31}, "quota_reset_day"),
+        ({"allow_propose": True}, "allow_propose needs propose_repos"),
+        ({"allow_propose": True, "propose_repos": [REPO]}, "propose_token_env"),
+        ({"allow_propose": True, "propose_token_env": "GH_PROPOSE"}, "propose_repos"),
+        ({"allow_propose": "yes"}, "true or false"),
+        ({"propose_repos": [OTHER]}, "not in the allowed"),
+        ({"propose_token_env": "A-B"}, "propose_token_env must be an environment"),
+        ({"propose_token_env": "GH_X", "cancel_token_env": "GH_X"}, "a token of its own"),
     ],
 )
 def test_load_ci_errors(section: Any, message: str) -> None:
@@ -744,3 +751,25 @@ def test_a_run_an_approval_or_concurrency_group_holds_is_held() -> None:
         builds = {b.id: b for b in ci(gh)(Snapshot(now=NOW)).builds}
     assert [b.held for _, b in sorted(builds.items())] == [True, True, False]
     assert {b.status for b in builds.values()} == {BuildStatus.QUEUED}
+
+
+def test_the_propose_token_is_its_own_and_never_shown() -> None:
+    on = CiSettings(
+        repos=(REPO,), allow_propose=True, propose_repos=(REPO,), propose_token_env="GH_P"
+    )
+    off = CiSettings(repos=(REPO,), propose_token_env="GH_P")  # allow_propose off
+    assert off.propose_token({"GH_P": "ghp_secret"}) is None
+    assert on.propose_token({"GH_P": " ghp_secret "}) == "ghp_secret"
+    with pytest.raises(ValueError, match=r"\$GH_P is not set") as unset:
+        on.propose_token({})
+    with pytest.raises(ValueError, match="not allowed in an HTTP header") as bad:
+        on.propose_token({"GH_P": "ghp_sec\nret"})
+    assert "sec" not in str(unset.value) + str(bad.value)
+    loaded = load_ci(
+        {"allow_propose": True, "propose_repos": [REPO], "propose_token_env": "GH_P"}, [REPO]
+    )
+    assert (loaded.allow_propose, loaded.propose_repos, loaded.propose_token_env) == (
+        True,
+        (REPO,),
+        "GH_P",
+    )

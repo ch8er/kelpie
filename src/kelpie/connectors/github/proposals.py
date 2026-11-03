@@ -180,8 +180,8 @@ class Proposer:
             if any(_head(pr) == left and MARKER in str(pr.get("body") or "") for pr in closed):
                 # The branch of an earlier proposal, merged or turned down for other
                 # changes: it is done with (GitHub can restore it from that pull request).
-                if not self._delete(repo, head_filter, branch, {left}):
-                    return ActionResult.REFUSED
+                if not self._delete(repo, head_filter, branch, {left}, strict=True):
+                    return ActionResult.REFUSED  # kept: a pull request open, or it moved on
                 self._branch(repo, branch, sha)
             else:
                 state = self._left_by_kelpie(repo, path, branch, default, sha, rendered.text)
@@ -320,9 +320,24 @@ class Proposer:
         there, _ = read_workflow(self.client, repo, path, branch)
         return "made" if there == text else None
 
-    def _delete(self, repo: str, head_filter: str, branch: str, ours: set[str]) -> bool:
+    def _delete(
+        self, repo: str, head_filter: str, branch: str, ours: set[str], *, strict: bool = False
+    ) -> bool:
         """Delete Kelpie's branch while it still points at ``ours`` and no pull request from
-        it is open (deleting it would close that pull request). Whether it is gone."""
+        it is open (deleting it would close that pull request). Whether it is gone.
+
+        GitHub has no conditional ref delete: a push between the check and the delete would
+        go with the branch (a window of one request). ``strict``: GitHub's errors raise (a
+        rate limit is retried, not taken for a branch kept); otherwise they are logged."""
+        if strict:
+            if self._open(repo, head_filter):
+                log.warning("ci-config: %s: branch %s heads a pull request; kept", repo, branch)
+                return False
+            if self._branch_sha(repo, branch) not in ours:
+                log.warning("ci-config: %s: branch %s moved on; left as it is", repo, branch)
+                return False
+            self.client.send("DELETE", f"/repos/{repo}/git/refs/heads/{quote(branch)}")
+            return True
         try:
             if self._open_now(repo, head_filter) is not False:
                 log.warning("ci-config: %s: branch %s may head a pull request; kept", repo, branch)

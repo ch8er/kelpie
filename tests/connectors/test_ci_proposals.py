@@ -433,3 +433,15 @@ def test_re_runs_are_idempotent(gh: FakeGitHub) -> None:
     for _ in range(3):
         assert proposer(gh).execute(action()) is ActionResult.NOTHING_TO_DO
     assert writes(gh) == []
+
+
+def test_a_rate_limit_while_remaking_an_earlier_branch_is_retried_not_refused(
+    gh: FakeGitHub,
+) -> None:
+    earlier = {"number": 3, "merged_at": None, "head": {"sha": "d" * 40}, "body": marker(["x"])}
+    gh.reply(CLOSED, [earlier])
+    gh.reply(f"POST /repos/{REPO}/git/refs", {"message": "Reference already exists"}, 422)
+    gh.reply(REF, {"object": {"sha": "d" * 40}})
+    gh.reply(f"DELETE /repos/{REPO}/git/refs/heads/{BRANCH}", {"message": "boom"}, 502)
+    with pytest.raises(GitHubError):
+        proposer(gh).execute(action())
