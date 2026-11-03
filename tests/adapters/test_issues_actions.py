@@ -378,6 +378,17 @@ def test_the_engine_routes_reassign_here(gh: FakeGitHub, pacing: Pacing) -> None
     assert ("POST", f"{ISSUE}/labels", {"labels": ["fix-me"]}) in writes(gh)
 
 
+def test_the_executor_runs_no_action_kind_the_adapter_leaves_out(
+    gh: FakeGitHub, pacing: Pacing
+) -> None:
+    # Copilot holds it: a wake run as a requeue would restart it.
+    executor = PlatformExecutor(adapter(gh, pacing, assignees=[{"login": "Copilot"}]))
+    for kind in (ActionKind.WAKE, ActionKind.WAIT, ActionKind.CLOSE):  # wake is not a requeue
+        action = Action(kind=kind, rule="wait_condition", reason="r", task_id=TASK)
+        assert executor.execute(action) is False  # a human is told instead
+    assert writes(gh) == []
+
+
 def test_an_assignment_github_drops_is_an_error_that_says_so(
     gh: FakeGitHub, pacing: Pacing
 ) -> None:

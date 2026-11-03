@@ -113,6 +113,11 @@ class IssuesAdapter:
     actions: ClassVar[frozenset[ActionKind]] = frozenset(
         {ActionKind.REQUEUE, ActionKind.UNBLOCK, ActionKind.COMMENT, ActionKind.REASSIGN}
     )
+    # Kinds no issue task draws: no sessions to stop, no worktrees to commit, no parked task
+    # to wake.
+    inapplicable: ClassVar[frozenset[ActionKind]] = frozenset(
+        {ActionKind.STOP, ActionKind.WIP_COMMIT, ActionKind.WAKE}
+    )
     _last: tuple[datetime, int, int] | None = field(default=None, init=False, repr=False)
     # Agents that held a task at the last read through their pull request only: a re-read
     # issue does not show them (assignees and labels do show the others).

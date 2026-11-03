@@ -99,3 +99,31 @@ def test_a_refused_rule_is_never_advised_and_kelpie_says_why(tmp_path: Path) -> 
     (advice,) = [a for a in report.recommendations if a.title == "Reduce ownerless tasks"]
     assert "let orphan_status" not in advice.detail  # no act advice in the remedy either
     assert "act mode is not available here: Hermes can't close tasks" in advice.detail
+
+
+def test_a_rule_acting_on_some_adapters_is_advised_with_where_it_alerts(
+    tmp_path: Path,
+) -> None:
+    from kelpie.report.daily import render_markdown
+
+    settings = load_settings(config(tmp_path, "claude code and github issues"))
+    found = sources(settings)
+    assert "stale_blocks" not in found.act_blockers  # GitHub Issues clears blocks
+    rule = "stale_blocks"
+    report = build_report(
+        replace(
+            day_inputs(
+                actions=[entry(at(9), rule, "unblock", Outcome.SUGGESTED, "T-1", Mode.SUGGEST)],
+                states=[opened(f"{rule}:T-1", rule, at(8), at(8), at(12))],
+                modes={rule: Mode.SUGGEST},
+            ),
+            act_blockers=found.act_blockers,
+            act_gaps=found.act_gaps,
+        )
+    )
+    (advice,) = [a for a in report.recommendations if a.title == f"Let {rule} act"]
+    gap = "Claude Code can't clear blocks yet"
+    assert f"(on some tasks it would alert instead: {gap})" in advice.detail
+    text = render_markdown(report)
+    assert f"(on some tasks act mode would alert instead: {gap})" in text
+    assert "act mode is not available here" not in text
