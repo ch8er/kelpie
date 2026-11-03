@@ -2654,12 +2654,12 @@ def _refuse_unimplemented_actions(
 
 def acting_rules(settings: Settings, loaded: LoadedRules) -> list[str]:
     """The rules that act on a board here: in act mode, implemented, not under dry-run, with
-    an effect a platform adapter carries out (not only alerts, or cancelling CI builds)."""
+    an effect a platform adapter carries out (not only alerts, or the CI connector's writes:
+    cancelling builds, proposing a CI configuration)."""
     if settings.engine.dry_run:
         return []
-    on_boards = {
-        p.name for p in PLANNED if p.effects - {ActionKind.CANCEL_BUILD}
-    }  # what act_blockers calls a rule's platform effects
+    # What act_blockers calls a rule's platform effects.
+    on_boards = {p.name for p in PLANNED if p.effects - CI_WRITES}
     return sorted(
         s.name
         for s in loaded.statuses
