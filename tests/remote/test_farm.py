@@ -845,6 +845,7 @@ def test_unreadable_board_names_past_the_first_16_are_only_counted() -> None:
         boards = tuple(f"b{n}-{i}" for i in range(16))
         rig.report("laptop", AdapterReport("hermes", KINDS, board(), unobserved=boards))
         snap = rig.tick()
+        rig.tick()  # the same report again: counted once
         assert len([u for u in snap.unobserved if u.startswith("laptop:b")]) == 16  # all out
     assert len(rig.alerter.sent) == 16 + 16  # the first 16 told, then resolved; no more
     assert len(set(rig.observer.failed)) == 16

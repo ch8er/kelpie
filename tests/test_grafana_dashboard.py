@@ -44,6 +44,8 @@ SCRAPE_LABELS = {"instance", "job"}
 NOT_ON_DASHBOARD: dict[str, str] = {
     # The collector's own cost (#281): kelpie doctor reads it ("path scans cheap").
     "kelpie_path_scan_seconds": "the path-sizes script's scan time, checked by kelpie doctor",
+    # Audit M6: an agent's reports carrying names the hub refuses; alerted once per agent.
+    "kelpie_hub_refused_total": "the hub's refusals of an agent's names, alerted when they start",
 }
 
 

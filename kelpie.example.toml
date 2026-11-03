@@ -842,6 +842,7 @@ commands = true           # keep the prefix of shell commands on tool spans ("ma
 # [[hub.agents]]
 # name = "laptop"
 # token_env = "KELPIE_AGENT_LAPTOP_TOKEN"
+# adapters = ["hermes"]  # optional: the adapters it may report (default: all of Kelpie's)
 
 # --- Listeners (docs/configuration.md#server) ---------------------------------------------
 # Connection guards of every kelpie serve listener (main port and hub); the defaults are

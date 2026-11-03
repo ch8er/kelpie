@@ -69,7 +69,7 @@ only adapters the hub takes) and counted, once per report, in
 `kelpie_hub_refused_total{kind="adapter"}`. Of an adapter's unreadable boards, the first 16
 names (first seen first, until the hub restarts) get alerts and series; a later new name
 still keeps its tasks out of the rules but is only counted, once per report
-(`kind="board"`). A fixed list was chosen over "the first names an agent reports": it holds
+(`kind="board"`), with no alert of its own. A fixed list was chosen over "the first names an agent reports": it holds
 across hub restarts and gives an agent no first report to abuse. Host sleeps an agent
 reports are kept only when they ended before its report, and at most 64 per agent. Role
 names on `/metrics` come from the agents' boards too; they are not bounded yet (audit L10).
