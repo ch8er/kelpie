@@ -432,7 +432,7 @@ class HubServer(GuardedServer):
         limits = replace(
             limits,
             max_connections=settings.max_connections,
-            # One address never holds every slot of a small hub.
+            # Never more than the hub's own cap.
             max_per_address=min(limits.max_per_address, settings.max_connections),
         )
         tls = hub.tls or (server_context(settings) if settings.tls else None)

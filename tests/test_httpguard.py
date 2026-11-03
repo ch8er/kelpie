@@ -200,7 +200,7 @@ def test_an_oversized_body_is_refused_unread(serve: KelpieHTTPServer, length: in
 
 class BigMetrics(Metrics):
     def render(self) -> str:
-        return "#" * (8 * 1024 * 1024)
+        return "#" * (32 * 1024 * 1024)  # more than any send and receive buffer
 
 
 @needs_aliases

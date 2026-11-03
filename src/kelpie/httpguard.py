@@ -193,6 +193,13 @@ class GuardedServer(ThreadingHTTPServer):
             if entry is not None:
                 self._drop_peer(entry.peer)
 
+    def cut(self, request: Any) -> None:
+        """The header deadline passed: shut the connection unless it was admitted meanwhile
+        (checked under the lock, like eviction, so an authorized request is never lost)."""
+        with self._slots_lock:
+            if id(request) in self._pending:
+                shut(request)
+
     def _drop_peer(self, peer: str) -> None:
         left = self._per_peer.get(peer, 0) - 1
         if left > 0:
@@ -255,7 +262,7 @@ class GuardedHandler(BaseHTTPRequestHandler):
             raise
 
     def _cut(self) -> None:
-        shut(self.request)
+        self.server.cut(self.request)
 
     def admit(self) -> None:
         """The request is authorized: it gives its pending slot back."""
