@@ -28,6 +28,7 @@ from kelpie.connectors.github.client import (
     valid_token,
 )
 from kelpie.connectors.github.connector import GitHubConnector, valid_repo
+from kelpie.connectors.github.proposals import Proposer
 from kelpie.connectors.github.pulls import PullSettings, load_pulls
 from kelpie.core.serde import parse_duration
 
@@ -113,6 +114,7 @@ class GitHubSettings:
         clock: Callable[[], datetime],
         environ: Mapping[str, str] = os.environ,
         observer: GitHubObserver | None = None,
+        other_tokens: tuple[str, ...] = (),
     ) -> GitHubCI | None:
         """The CI source sharing ``connector``'s client; None when not configured. With
         ``cancel_token_env`` the cancel request alone goes through a second client that
@@ -164,7 +166,35 @@ class GitHubSettings:
                 skus=self.ci.billing_skus,
                 budget=self.ci.tick_budget,
             )
-        return GitHubCI(connector.client, self.ci, cancel_client, billing)
+        proposer = None
+        propose_token = self.ci.propose_token(environ)
+        if propose_token is not None:
+            others = {
+                name: environ.get(name, "").strip()
+                for name in (
+                    self.token_env,
+                    self.ci.cancel_token_env,
+                    self.ci.billing_token_env,
+                    *other_tokens,  # other GitHub clients' tokens (the issues adapter's)
+                )
+                if name is not None
+            }
+            if same := [name for name, value in others.items() if value == propose_token]:
+                raise ValueError(
+                    f"[connectors.github.ci] ${self.ci.propose_token_env} holds the same token "
+                    f"as ${same[0]}: proposals need a token of their own"
+                )
+            proposer = Proposer(
+                GitHubClient(
+                    self.api_url,
+                    propose_token,
+                    timeout=self.timeout,
+                    cache_ttl=self.cache_ttl,
+                    clock=clock,
+                ),
+                self.ci.propose_repos,
+            )
+        return GitHubCI(connector.client, self.ci, cancel_client, billing, proposer)
 
 
 def load_github(section: Any) -> GitHubSettings:
@@ -220,6 +250,11 @@ def load_github(section: Any) -> GitHubSettings:
         raise ValueError(
             "[connectors.github.ci] billing_token_env must not be [connectors.github] "
             "token_env: billing gets a token of its own"
+        )
+    if ci is not None and ci.propose_token_env is not None and ci.propose_token_env == token_env:
+        raise ValueError(
+            "[connectors.github.ci] propose_token_env must not be [connectors.github] "
+            "token_env: the token that reads everything does not change workflows"
         )
     pulls = load_pulls(section["pulls"]) if "pulls" in section else None
     return GitHubSettings(

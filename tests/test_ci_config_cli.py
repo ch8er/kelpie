@@ -62,8 +62,12 @@ def test_proposals_print_as_diffs_and_nothing_is_written(
     with serve() as gh:
         workflow(gh)
         monkeypatch.setenv("GH_READ", TOKEN)
+        monkeypatch.setenv("GH_PROPOSE", "ghp_SyntheticProposeToken0123456789")
         settings = settings_for(
-            tmp_path, gh.url, 'allow_cancel = true\ncancel_repos = ["example/app"]\n'
+            tmp_path,
+            gh.url,
+            'allow_propose = true\npropose_repos = ["example/app"]\n'
+            'propose_token_env = "GH_PROPOSE"\n',
         )
         builds = drafts(4, 20.0)  # 80 min of drafts: over propose_min_minutes
         read_with: list[Settings] = []
@@ -76,7 +80,7 @@ def test_proposals_print_as_diffs_and_nothing_is_written(
         out, err, code = ci_config.run(settings, lambda: NOW)
         assert code == 0 and err.startswith("warning: [engine.rules.ci_economy] propose_config")
         (ci,) = [s.github.ci for s in read_with if s.github]
-        assert ci is not None and not ci.allow_cancel  # no write token
+        assert ci is not None and not ci.allow_propose and not ci.allow_cancel  # no write token
         assert f"# {PATH} in example/app:" in out
         assert f"--- a/{PATH}\n+++ b/{PATH}\n" in out
         assert "+    types: [opened, synchronize, reopened, ready_for_review]" in out

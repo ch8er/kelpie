@@ -121,6 +121,47 @@ so it is kept for Kelpie's own user:
   `/data` 0700, owned by the `kelpie` user; a named volume takes that mode when it is
   first created, an existing volume or bind mount keeps its own.
 
+## What Kelpie can write to GitHub
+
+Reading GitHub (pull requests, checks, Actions runs) needs only `[connectors.github]
+token_env`, a read-only token. Every write is off by default, runs only through the engine
+(so the rule's mode, `observe` by default, and the global `dry_run` apply; see
+[act-checklist.md](act-checklist.md)), is limited to an allow-list of repositories, and
+goes through a client with a token of its own:
+
+| Write | Turned on by | Allow-list | Token (minimum permissions) | What it may touch |
+| --- | --- | --- | --- | --- |
+| `cancel_build` (rule 9) | `[connectors.github.ci] allow_cancel` | `cancel_repos` (and `cancel_workflows`, `cancel_branches`) | `cancel_token_env`: Actions: write | Cancels one Actions run its last scan offered as superseded, after a fresh re-check; never on the default branch |
+| `propose_ci_config` (rule 9) | `[engine.rules.ci_economy] propose_config` and `[connectors.github.ci] allow_propose` | `propose_repos` (required) | `propose_token_env` (required): Contents, Pull requests and Workflows: write on those repositories only | Creates the branch `kelpie/ci-config/<file>`, commits one file under `.github/workflows/` on it, opens a **draft** pull request; deletes only that branch when its own attempt failed |
+| Issues adapter actions | `[adapters.github_issues]` and the rule in `act` | the adapter's `repos` | `[adapters.github_issues] token_env`: Issues: write | Labels, assignees and signed comments on issues |
+
+For `propose_ci_config` in particular:
+
+- **Never the default branch.** Kelpie commits only on its own `kelpie/ci-config/` branch,
+  made from the default branch's head, with the read file's blob sha (GitHub refuses the
+  commit if the file changed meanwhile). It refuses when that branch name would be the
+  default branch.
+- **Never merged by Kelpie.** The pull request is a draft; Kelpie calls no merge or
+  auto-merge endpoint, and its description says a human reviews and merges it.
+- **One open proposal per repository**, and idempotent re-runs: while any pull request from
+  a `kelpie/ci-config/` branch of the repository is open, a proposal is nothing to do. A
+  change a human turned down is never proposed again for that file.
+- **Nothing from the repository in what Kelpie writes**, beyond the workflow file itself:
+  the pull request's title and description hold Kelpie's own words and the rule's numbers,
+  and only fixed text, the default branch's name (checked) and the docs globs (checked,
+  quoted) are written into the workflow.
+- **A token of its own.** Kelpie refuses to start when `propose_token_env` names, or holds
+  the same value as, the read, cancel, billing or issues-adapter token, so a leaked read
+  token cannot change workflows and the propose token can be revoked alone. Use a
+  fine-grained token limited to `propose_repos`; the Workflows permission is what lets it
+  change `.github/workflows/` at all.
+- `kelpie ci-config` previews the same change with the read token only (`Contents: read`)
+  and writes nothing.
+
+A workflow change runs with the repository's Actions permissions once merged, so review it as
+you would any change to CI. Revoke the propose token, or set `allow_propose = false`, to stop
+proposals at once.
+
 ## Traces token
 
 The OTLP ingest token (`[traces] token_env`, `KELPIE_TRACES_TOKEN`) is the one secret the

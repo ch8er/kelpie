@@ -13,8 +13,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 - `kelpie ci-config`: rule 9's proposed CI configuration changes, printed as a diff of each
   GitHub Actions workflow file (concurrency with cancel-in-progress, `paths-ignore` for docs,
   skipping drafts). Read-only; it needs only the read token. `ci_economy` emits the
-  proposals as `propose_ci_config` with `propose_config = true` (off by default); nothing
-  opens them yet ([#237](https://github.com/ch8er/kelpie/pull/237)).
+  proposals as `propose_ci_config` with `propose_config = true` (off by default)
+  ([#237](https://github.com/ch8er/kelpie/pull/237)).
+- `propose_ci_config` opened as a **draft** pull request by the GitHub CI connector, from
+  `kelpie/ci-config/<workflow file>`, when `[connectors.github.ci] allow_propose` is set for
+  the repositories in `propose_repos`, with a token of its own (`propose_token_env`).
+  Never on the default branch, never merged by Kelpie, one open proposal per repository,
+  and a change a human turned down is not proposed again
+  ([#237](https://github.com/ch8er/kelpie/pull/237)).
+
+### Safety
+
+- What Kelpie can write to GitHub, with the token each write needs:
+  [docs/security.md](docs/security.md#what-kelpie-can-write-to-github).
 
 ### Changed
 
