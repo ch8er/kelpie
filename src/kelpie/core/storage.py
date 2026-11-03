@@ -323,7 +323,8 @@ class SqliteLedgerStore:
 
     def record_sleeps(self, sleeps: Sequence[HostSleep]) -> None:
         """Store host sleeps (issue #296) for the daily report; one already stored is kept
-        once. Rows older than ``HOST_SLEEPS_KEEP`` go."""
+        once. Rows older than ``HOST_SLEEPS_KEEP`` before the newest sleep of the server's
+        own host go."""
         if not sleeps:
             return
 
@@ -334,7 +335,11 @@ class SqliteLedgerStore:
                 " VALUES (?, ?, ?, ?)",
                 [(s.agent or "", _ts(s.start), _ts(s.end), s.source) for s in sleeps],
             )
-            oldest = max(s.end for s in sleeps) - HOST_SLEEPS_KEEP
+            # Pruned on the server's own sleeps only: an agent's clock may be off.
+            own = [s.end for s in sleeps if s.agent is None]
+            if not own:
+                return db.execute("SELECT 1")
+            oldest = max(own) - HOST_SLEEPS_KEEP
             return db.execute("DELETE FROM host_sleeps WHERE end_at < ?", (_ts(oldest),))
 
         self._write(write)

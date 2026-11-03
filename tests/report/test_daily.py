@@ -1101,17 +1101,20 @@ def test_host_sleep_is_listed_apart_and_never_lost_hours() -> None:
         StateRow(state("stale_blocks:T-1", "stale_blocks", at(10), at(14), "T-1")),
         StateRow(state("stale_blocks:lap:T-2", "stale_blocks", at(10), at(14), "lap:T-2")),
         StateRow(state("orphan_status:farm", "orphan_status", at(10), at(12))),
+        # an agent that never slept: the server's sleep is not its own
+        StateRow(state("stale_blocks:vm:T-3", "stale_blocks", at(10), at(14), "vm:T-3")),
     ]
     sleeps = [
         HostSleep(at(11, 24), at(12, 11)),
         HostSleep(at(23, 50), at(1, 30, day=3), agent="lap"),  # partly the next day
     ]
-    base = ReportInputs(day=DAY, tz=UTC, states=states)
+    base = ReportInputs(day=DAY, tz=UTC, states=states, agents=frozenset({"lap", "vm"}))
     awake = build_report(replace(base, host_sleeps=sleeps), sections={})
     plain = build_report(base, sections={})
-    assert plain.chaos_hours == pytest.approx(10.0)
-    # T-1 and the farm-wide state lose the server's 47 minutes; lap:T-2 is on another host
-    assert awake.chaos_hours == pytest.approx(10.0 - 47 / 60 - 36 / 60)
+    assert plain.chaos_hours == pytest.approx(14.0)
+    # T-1 and the farm-wide state lose the server's 47 minutes; lap:T-2 and vm:T-3 are on
+    # other hosts
+    assert awake.chaos_hours == pytest.approx(14.0 - 47 / 60 - 36 / 60)
     assert awake.host_asleep == ((None, pytest.approx(47.0)), ("lap", pytest.approx(10.0)))
     markdown = render_markdown(awake)
     assert "**Host asleep**: 47 min, lap 10 min." in markdown

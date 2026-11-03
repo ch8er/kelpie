@@ -345,6 +345,9 @@ class ReportInputs:
     # Stretches the farm's hosts slept that overlap the day (issue #296): listed apart,
     # never counted as hours lost.
     host_sleeps: Sequence[HostSleep] = ()
+    # The ``kelpie agent``s whose boards the farm has (task ids ``<agent>:...``): a task of
+    # one is on that agent's host, any other task on the host of kelpie serve.
+    agents: frozenset[str] = frozenset()
     # The instruction files each role loads, as the board measured them (``instructions_at``)
     # when the report was built ([instructions]; the section ``instructions``).
     instruction_files: Sequence[InstructionFile] = ()
@@ -1088,7 +1091,9 @@ def _chaos_hours(
         a, b = max(counts_from(state), start), min(state.last_seen, end)
         if b <= a:
             continue
-        awake = _awake(inputs.host_sleeps, state.task_id, a, b)
+        # A host that slept lost no hours (issue #296); a hold's idle agents and a person's
+        # inbox are counted as they are (agent-hours a hold kept, a person's time).
+        awake = _awake(inputs.host_sleeps, inputs.agents, state.task_id, a, b)
         cause = cause_of(state)
         if cause == HOLDS:
             agent_hours, held = hold_agent_hours(inputs.actions, state, a, b, _humans(inputs))
@@ -1113,15 +1118,20 @@ def _chaos_hours(
 
 
 def _awake(
-    sleeps: Sequence[HostSleep], task_id: str | None, a: datetime, b: datetime
+    sleeps: Sequence[HostSleep],
+    known: frozenset[str],
+    task_id: str | None,
+    a: datetime,
+    b: datetime,
 ) -> intervals.Spans:
     """The parts of ``[a, b)`` the task's host was awake (issue #296): a host that slept
-    lost no hours. A task id ``<agent>:...`` is on that agent's host, any other (and a state
-    on no task) on the host of kelpie serve."""
+    lost no hours. A task id ``<agent>:...`` of a known agent (or one with a sleep on
+    record) is on that agent's host, any other (and a state on no task) on the host of
+    kelpie serve."""
     span = [(a, b)]
     if not sleeps:
         return span
-    agents = {s.agent for s in sleeps if s.agent is not None}
+    agents = known | {s.agent for s in sleeps if s.agent is not None}
     agent = next((x for x in agents if task_id and task_id.startswith(f"{x}:")), None)
     mine = intervals.merged((s.start, s.end) for s in sleeps if s.agent == agent)
     return intervals.minus(span, mine)

@@ -17,7 +17,7 @@ from typing import Protocol
 
 from kelpie.core.budgets import PriceTable
 from kelpie.core.config import Mode
-from kelpie.core.model import HostSleep, Reconciliation, Snapshot, Snooze
+from kelpie.core.model import HostSleep, Reconciliation, Snapshot, Snooze, source_agent
 from kelpie.core.spend import SpendConfig
 from kelpie.core.storage import TokenRow
 from kelpie.report.config import ReportSettings
@@ -148,6 +148,7 @@ def load_inputs(sources: ReportSources, day: date, board: Snapshot) -> ReportInp
         instructions_at=board.now if board.instruction_files else None,
         instruction_tokens=tokens,
         host_sleeps=sleeps,
+        agents=frozenset(a for t in board.tasks if (a := source_agent(t.source)) is not None),
     )
 
 

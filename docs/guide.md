@@ -253,7 +253,8 @@ board the report is unchanged.
   inbox are listed under "Planned waits" in agent-hours, never counted. A host that slept
   (a laptop lid closed: issue #296, `[engine] host_sleep_min_gap`) lost no hours: the time
   it slept is taken out of every state on its tasks (an agent's sleep out of that agent's
-  tasks only) and listed under "Host asleep" per host. Humans (owners of
+  tasks only; a hold's idle agent-hours and a person's inbox are counted as they are) and
+  listed under "Host asleep" per host. Humans (owners of
   kind `human`) never count as idle agents. `[report] hour_usd` prices them all.
 - **Cost of chaos, dollars**: tokens burned by runaway and no-progress sessions while
   flagged, and by every session `exit_contract` requeued (a restart). Spend follows each

@@ -61,7 +61,7 @@ TLS, size limits and authentication for agents do not change `/metrics`. Three c
 
 | Call | Body (agent → server) | Reply |
 | --- | --- | --- |
-| `/v1/agent/report` | protocol version, agent version, its `interval`, `sent_at`; per adapter: name, the action kinds it carries out, and its snapshot or the error it failed with, plus the boards it could not read (`unobserved`, only when there are some: several Hermes boards, listed as `<agent>:<board>` and alerted once) | `{}` |
+| `/v1/agent/report` | protocol version, agent version, its `interval`, `sent_at`; per adapter: name, the action kinds it carries out, and its snapshot or the error it failed with, plus the boards it could not read (`unobserved`, only when there are some: several Hermes boards, listed as `<agent>:<board>` and alerted once); the stretches its host slept (`sleeps`, start and end, only for 15 minutes after a wake: issue #296) | `{}` |
 | `/v1/agent/actions` | results of actions carried out since the last call | actions for this agent; held open up to 20 s until one is queued (long poll) |
 | `/v1/traces` | OTLP/HTTP, relayed by the agent from local exporters | as the OTLP endpoint |
 
@@ -280,7 +280,9 @@ and `requeue` are idempotent there; `comment` may repeat once.
   each agent's sleeps for a day in `Snapshot.host_sleeps` under the agent's name: the ages
   of that agent's sessions and tasks count awake time, and its sessions that do not come
   back are requeued once as "ended while the host slept". The resolve of its silence says
-  how long the host slept. A sleep of one host never touches another host's ages.
+  how long the host slept. A sleep of one host never touches another host's ages. The hub
+  keeps an agent's sleeps in memory: after a hub restart, the rules know only those
+  reported since (the daily report reads them from the database).
 
 ## Failure modes
 

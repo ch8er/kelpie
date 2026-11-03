@@ -79,6 +79,7 @@ class _Health:
 
     last_fresh: datetime | None = None
     silent_told: bool = False
+    silent_since: datetime | None = None  # its last fresh report when it went silent
     skew_told: bool = False
 
 
@@ -225,6 +226,7 @@ class RemoteFarm:
         silent = not fresh and now - since > settings.silent_after
         if silent and not health.silent_told:
             health.silent_told = True
+            health.silent_since = since
             when = (
                 f"since {health.last_fresh.isoformat(timespec='seconds')}"
                 if health.last_fresh
@@ -241,7 +243,7 @@ class RemoteFarm:
             self._alert(
                 Severity.INFO,
                 f"agent {view.name} silent",
-                f"Agent {view.name} reports again.{_slept(report)}",
+                f"Agent {view.name} reports again.{_slept(report, health.silent_since)}",
                 transition=Transition.RESOLVED,
             )
         if self.observer is not None:
@@ -396,11 +398,13 @@ def _condition(agent: str, raw: object, others: Iterable[str] = ()) -> dict[str,
     }
 
 
-def _slept(report: Report | None) -> str:
-    """Why an agent was silent, when its host slept (issue #296)."""
+def _slept(report: Report | None, silent_since: datetime | None) -> str:
+    """Why an agent was silent, when its host slept during the silence (issue #296)."""
     if report is None or not report.sleeps:
         return ""
     start, end = report.sleeps[-1]
+    if silent_since is not None and end <= silent_since:
+        return ""  # an earlier sleep: not why it was silent
     return f" Its host slept {_age(end - start)} (until {end.isoformat(timespec='minutes')})."
 
 
