@@ -842,3 +842,19 @@ def test_unreadable_board_names_past_the_first_16_are_only_counted() -> None:
     assert len(rig.alerter.sent) == 16 + 16  # the first 16 told, then resolved; no more
     assert len(set(rig.observer.failed)) == 16
     assert rig.observer.refusals[("laptop", "board")] == 32
+
+
+def test_refusals_are_on_metrics_per_agent_and_kind() -> None:
+    from kelpie.metrics import Metrics
+
+    rig = Rig()
+    metrics = Metrics()
+    rig.farm.observer = metrics
+    rig.report(
+        "laptop", AdapterReport("hermes", KINDS, board()), AdapterReport("evil", KINDS, error="x")
+    )
+    rig.tick()
+    text = metrics.render()
+    assert 'kelpie_hub_refused_total{agent="laptop",kind="adapter"} 1' in text
+    assert 'kelpie_hub_refused_total{agent="laptop",kind="board"} 0' in text
+    assert "evil" not in text

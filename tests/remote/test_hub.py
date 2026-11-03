@@ -48,7 +48,7 @@ class Clock:
 
 @dataclass
 class BoardAdapter(StoppingAdapter):
-    name: str = "fake"
+    name: str = "hermes"  # a name the hub takes (protocol.ADAPTER_NAMES)
     unsupported: bool = False
     stops: int = 0
 
@@ -110,7 +110,7 @@ def agent_for(server: HubServer, adapter: BoardAdapter, clock: Clock, **kw: Any)
 
 def stop_action(session: str = "s1") -> WireAction:
     return WireAction(
-        "", "fake", ActionKind.STOP, "loop_breaker", "looping", None, {"session_id": session}
+        "", "hermes", ActionKind.STOP, "loop_breaker", "looping", None, {"session_id": session}
     )
 
 
@@ -154,7 +154,7 @@ def test_report_reaches_the_hub(server: HubServer, hub: Hub, clock: Clock) -> No
     view = next(v for v in hub.agents() if v.name == "laptop")
     assert view.report is not None and view.report_at == NOW
     (part,) = view.report.adapters
-    assert part.name == "fake"
+    assert part.name == "hermes"
     assert ActionKind.STOP in part.actions and ActionKind.COMMENT in part.actions
     assert part.snapshot is not None and part.snapshot.tasks[0].id == "t_1a"
     other = next(v for v in hub.agents() if v.name == "vm-1")
@@ -219,7 +219,7 @@ def test_action_round_trip(server: HubServer, hub: Hub, clock: Clock) -> None:
 def test_kinds_not_offered_are_refused_by_the_agent(server: HubServer, clock: Clock) -> None:
     adapter = BoardAdapter()
     agent = agent_for(server, adapter, clock, actions=frozenset({ActionKind.STOP}))
-    comment = WireAction("a1", "fake", ActionKind.COMMENT, "rule", "hi", "t_1a")
+    comment = WireAction("a1", "hermes", ActionKind.COMMENT, "rule", "hi", "t_1a")
     result = agent.execute(encode_action(comment))
     assert result is not None and result.outcome is Outcome.NOT_EXECUTED
     assert "refused" in (result.detail or "")
@@ -270,7 +270,7 @@ def test_different_comments_are_different_actions(
     server: HubServer, hub: Hub, clock: Clock
 ) -> None:
     def comment(text: str) -> WireAction:
-        return WireAction("", "fake", ActionKind.COMMENT, "rule", text, "t_1a")
+        return WireAction("", "hermes", ActionKind.COMMENT, "rule", text, "t_1a")
 
     with pytest.raises(AgentUnavailable):
         hub.send("laptop", comment("text A"), timeout=0.1)
@@ -632,7 +632,7 @@ def test_a_poll_reply_stays_under_its_cap(hub: Hub) -> None:
     ]
     for n in range(4):  # about 530 KB each
         wait = WireAction(
-            "", "fake", ActionKind.WAIT, "r", "x", f"t_{n}", {"conditions": conditions}
+            "", "hermes", ActionKind.WAIT, "r", "x", f"t_{n}", {"conditions": conditions}
         )
         send_async(hub, wait, timeout=5)
     deadline = time.monotonic() + 5
