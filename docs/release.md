@@ -129,7 +129,7 @@ before anything is built.
 
 ```sh
 pipx install kelpie-sre            # or: uv tool install kelpie-sre
-pip install --pre kelpie-sre       # pre-releases need --pre (or ==<version>)
+pip install --pre kelpie-sre       # once a final release exists, pre-releases need --pre (or ==<version>)
 docker pull ghcr.io/ch8er/kelpie:<version>
 KELPIE_IMAGE=ghcr.io/ch8er/kelpie:<version> docker compose up -d --no-build
 ```

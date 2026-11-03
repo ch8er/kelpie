@@ -97,33 +97,39 @@ Kelpie cannot tell who wrote a span:
   one token that every agent's exporter holds. Whoever has the token can send a few identical
   tool spans tagged with another agent's session id; without a token (loopback, or
   `allow_unauthenticated`), any process that reaches the port can.
-- **Hermes spool lines.** A line names its `run_id`, and every agent on the host can write
-  to the spool, so a line can name another agent's run.
+- **Hook spool lines.** A line names its run (Hermes `run_id`, Claude Code and OpenClaw
+  `session_id`), and any agent that can write to the spool (the same user, or a container
+  with it mounted) can name another agent's run.
 
 With rule 10 in `act`, either makes Kelpie stop the other agent's run, and on Hermes end
 its worker processes; forged spend can do the same through a hard budget (with
 `stop_on_shared_budgets`, through a shared one). The stop looks like Kelpie's own decision.
-In `observe` and `suggest` no run is stopped. Forged spans can also skew alerts and the
-daily report's figures; rule 10 is the only rule that stops a run.
+In `observe` and `suggest` no run is stopped. Forged spans can also make rule 2 in `act`
+comment on another agent's task (its CI-polling note), hold back `checkpoints`' commit
+reminders, and skew alerts and the daily report; rule 10 is the only rule that stops a run.
 
 **Who is affected.** Farms that run rule 10 in `act` and whose agents are untrusted or
 sandboxed (in a container, as another user, on another machine reporting straight to
 `kelpie serve`) while sharing the one traces token. An unsandboxed agent running as the same
 user as its peers gains nothing new: it could already signal their processes or block their
-tasks. The multi-host hub is not affected: it namespaces every span and run by the agent
-whose token sent it, so a `kelpie agent` cannot reach another host's runs.
+tasks. Across hosts the multi-host hub is not affected: it namespaces every span and run by
+the `kelpie agent` whose token sent it, so one host cannot reach another host's runs. Agents
+on one host share that host's OTLP relay, which takes spans without a token, so within a
+host the risk is the same as on a single-host farm.
 
 **What to do meanwhile.**
 
 - On such farms keep `loop_breaker` in `observe` or `suggest`
   ([act-checklist.md](act-checklist.md)); a person decides each stop.
-- Or give agents that do not trust each other separate farms: their own `kelpie serve` (or
-  their own `kelpie agent` behind a hub) and their own traces token.
-- Always set a traces token; keep the ingest on loopback or a private address, and do not
-  hand the token to processes that are not agents' exporters.
+- Or give agents that do not trust each other separate farms: their own `kelpie serve` and
+  traces token, or their own host with its own `kelpie agent` behind a hub.
+- Set a traces token, keep the ingest on loopback or a private address, and do not hand
+  the token to processes that are not agents' exporters. The shipped docker compose file
+  allows ingest without a token (its port is on `127.0.0.1`): before rule 10 acts there,
+  set `KELPIE_TRACES_TOKEN` and drop `KELPIE_TRACES_ALLOW_UNAUTHENTICATED`.
 
 **The fix.** Per-agent ingest tokens, each allowed to report only for its own owners and
-sessions, and a pid check for Hermes spool lines
+sessions, and a check that a spool line comes from the run it names
 ([#302](https://github.com/ch8er/kelpie/issues/302)). This section goes when it lands.
 
 ### `kelpie serve`'s HTTP server has no connection guards (M5)

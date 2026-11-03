@@ -22,7 +22,7 @@ These are the release notes for the tag, ahead of what changed.
   can tie it up without a token (audit item M5, fix in
   [#304](https://github.com/ch8er/kelpie/issues/304)).
 - **Rule 10 in `act` trusts every holder of the traces token** (audit item M1). Spans and
-  Hermes spool lines say which run they belong to, and every agent holds the one ingest
+  hook spool lines say which run they belong to, and every agent holds the one ingest
   token, so an agent can make `loop_breaker` stop another agent's run. If your agents are
   untrusted or sandboxed and share one token, keep rule 10 in `observe` or `suggest`, or
   give them separate farms. Fix: per-agent ingest tokens
@@ -44,8 +44,8 @@ These are the release notes for the tag, ahead of what changed.
   `kelpie demo` inside it; the release workflow builds and publishes it), live runs on real
   Hermes, Claude Code and OpenClaw platforms with this version (the adapters are tested
   against synthetic boards and spools, Hermes also against a simulated farm; plugin and
-  hook registration were not run), and GitHub Issues and Linear beyond the token check. The wheel and sdist were
-  installed and run on Python 3.12 and 3.13.
+  hook registration were not run), and GitHub Issues and Linear beyond the token check.
+  The wheel and sdist were installed and run on Python 3.12 and 3.13.
 
 ### Added
 

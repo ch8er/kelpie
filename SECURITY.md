@@ -75,7 +75,7 @@ fixing. Reports that only restate them are not new, but ways to make them worse 
 scope. Details and what to do meanwhile: [docs/security.md](docs/security.md#known-residual-risks).
 
 - **Rule 10 trusts every holder of the traces token (M1).** In `act` mode `loop_breaker`
-  stops a run on span evidence. A span's session id, and a Hermes spool line's run id, are
+  stops a run on span evidence. A span's session id, and a hook spool line's run id, are
   whatever the sender writes, and every agent's exporter holds the one ingest token. So an
   agent can make Kelpie stop another agent's run. This matters on farms where agents are
   untrusted or sandboxed and share one traces token; keep rule 10 in `observe` or `suggest`
