@@ -5,9 +5,10 @@ the ones others may read."""
 from __future__ import annotations
 
 import os
+import sqlite3
 import stat
 from collections.abc import Iterator
-from datetime import date
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 import pytest
@@ -19,6 +20,7 @@ from kelpie.doctor import PRIVATE_CHECK, check_private_files
 from kelpie.report.config import ReportSettings
 from kelpie.report.fixes import FixStore
 from kelpie.report.run import write
+from kelpie.report.schedule import RunLog
 
 pytestmark = pytest.mark.skipif(os.name != "posix", reason="POSIX file modes")
 
@@ -38,15 +40,13 @@ def umask(request: pytest.FixtureRequest) -> Iterator[int]:
 
 
 @pytest.mark.parametrize("umask", [0o022, 0o002, 0o000, 0o077], indirect=True)
-def test_a_new_database_and_its_folders_are_private(tmp_path: Path, umask: int) -> None:
-    db = tmp_path / "data" / "kelpie" / "kelpie.db"
+def test_a_new_database_is_private(tmp_path: Path, umask: int) -> None:
+    db = tmp_path / "kelpie.db"
     store = SqliteLedgerStore(db)
     try:
         store._db.execute("CREATE TABLE IF NOT EXISTS probe (x)")  # the WAL now exists
         store._db.execute("INSERT INTO probe VALUES (1)")
         store._db.commit()
-        assert mode(tmp_path / "data") == 0o700
-        assert mode(tmp_path / "data" / "kelpie") == 0o700
         files = [p for p in db_files(db) if p.exists()]
         assert len(files) == 3  # kelpie.db, -wal, -shm
         assert {mode(p) for p in files} == {0o600}
@@ -54,12 +54,18 @@ def test_a_new_database_and_its_folders_are_private(tmp_path: Path, umask: int) 
         store.close()
 
 
+def test_a_missing_database_folder_is_not_created(tmp_path: Path) -> None:
+    """A mistyped [storage] path fails loudly, as before, instead of starting empty."""
+    with pytest.raises(sqlite3.OperationalError):
+        SqliteLedgerStore(tmp_path / "typo" / "kelpie.db")
+    assert not (tmp_path / "typo").exists()
+
+
 @pytest.mark.parametrize("umask", [0o277], indirect=True)
 def test_a_stricter_umask_is_respected(tmp_path: Path, umask: int) -> None:
-    target = tmp_path / "new" / "key"
+    target = tmp_path / "key"
     assert create_private(target)
     assert mode(target) == 0o400
-    assert mode(tmp_path / "new") == 0o500
 
 
 def test_an_existing_folder_and_database_keep_their_mode(tmp_path: Path, umask: int) -> None:
@@ -76,10 +82,15 @@ def test_an_existing_folder_and_database_keep_their_mode(tmp_path: Path, umask: 
 
 
 def test_the_fix_log_creates_a_private_database(tmp_path: Path, umask: int) -> None:
-    db = tmp_path / "state" / "kelpie.db"
+    db = tmp_path / "kelpie.db"
     FixStore(db).close()
     assert mode(db) == 0o600
-    assert mode(db.parent) == 0o700
+
+
+def test_the_report_run_log_recreates_a_private_database(tmp_path: Path, umask: int) -> None:
+    db = tmp_path / "kelpie.db"
+    RunLog(db).mark(date(2026, 11, 2), datetime(2026, 11, 3, 1, tzinfo=UTC))
+    assert mode(db) == 0o600
 
 
 def test_report_files_are_private(tmp_path: Path, umask: int) -> None:
@@ -94,6 +105,13 @@ def test_report_files_are_private(tmp_path: Path, umask: int) -> None:
     write("# day, again\n", settings, date(2026, 11, 2))
     assert mode(path) == 0o640
     assert path.read_text(encoding="utf-8") == "# day, again\n"
+
+
+def test_a_report_is_never_written_into_a_fifo(tmp_path: Path) -> None:
+    fifo = tmp_path / "report.md"
+    os.mkfifo(fifo)
+    with pytest.raises(OSError):
+        write_private(fifo, "x")  # at once: no reader needed
 
 
 def test_a_report_is_never_written_through_a_symlink(tmp_path: Path) -> None:
@@ -114,7 +132,7 @@ def test_private_dir_leaves_existing_folders_alone(tmp_path: Path, umask: int) -
     private_dir(tmp_path / "a" / "b")  # again: nothing to do
 
 
-def test_loose_skips_symlinks_and_folders(tmp_path: Path) -> None:
+def test_loose_follows_symlinks_and_skips_folders(tmp_path: Path) -> None:
     target = tmp_path / "t"
     target.write_text("x")
     target.chmod(0o644)
@@ -122,7 +140,7 @@ def test_loose_skips_symlinks_and_folders(tmp_path: Path) -> None:
     link.symlink_to(target)
     folder = tmp_path / "d"
     folder.mkdir(mode=0o755)
-    assert loose([target, link, folder, tmp_path / "missing"]) == [target]
+    assert loose([target, link, folder, tmp_path / "missing"]) == [target, link]
 
 
 def test_doctor_names_loose_files_and_changes_nothing(tmp_path: Path, umask: int) -> None:

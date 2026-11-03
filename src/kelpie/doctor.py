@@ -356,10 +356,10 @@ def check_private_files(settings: Settings) -> Check:
     only names them: it never changes a mode."""
     paths: list[Path] = []
     if settings.db_path is not None:
-        paths += db_files(settings.db_path.expanduser())
+        paths += db_files(settings.db_path)  # as serve opens it (no ~ expansion)
     folder = settings.report.dir
-    if folder is not None and folder.expanduser().is_dir():
-        paths += sorted(folder.expanduser().glob("kelpie-report-*.md"))
+    if folder is not None and folder.is_dir():
+        paths += sorted(folder.glob("kelpie-report-*.md"))
     if not paths:
         return _skip(PRIVATE_CHECK, "no database file and no report files")
     found = loose(paths)
