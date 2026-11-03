@@ -787,7 +787,7 @@ def test_a_slow_directory_scan_is_named(farm: Farm) -> None:
         ({"instance": "other:9100", "path": "/elsewhere"}, "900"),  # not a configured host
     )
     check = farm.checks()["path scans cheap"]
-    assert check.status == "PASS" and "1 directories, the slowest in 3s" in check.detail
+    assert check.status == "PASS" and "1 directory, the slowest in 3s" in check.detail
     farm.prom.responses[SCANS] = vector(
         ({"instance": "mac-1:9100", "path": "/Users/agent/Library/Caches"}, "3"),
         ({"instance": "mac-1:9100", "path": "/Users/agent/worktrees"}, "312"),

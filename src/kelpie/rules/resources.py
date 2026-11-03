@@ -135,6 +135,7 @@ class Forecast:
     stale: bool  # directory sizes exist for it, but none recent: the script stopped
     elsewhere: bool = False  # the host's directory sizes are all on other filesystems
     unplaced: bool = False  # the host has directory sizes that do not say their filesystem
+    measured: bool = False  # current sizes of this filesystem exist (none of them grows yet)
     path_max_age: timedelta = timedelta(hours=3)  # how old ``stale`` sizes are at least
 
 
@@ -238,6 +239,7 @@ class Resources:
                 stale,
                 elsewhere,
                 unplaced,
+                bool(current),
                 self.path_max_age,
             )
         return out
@@ -827,6 +829,12 @@ def _forecast_text(c: Forecast) -> str:
                 f"{_path(p)} (+{round(p.growth_per_day or 0, 2):g} {unit}/day)" for p in c.growing
             )
             + "."
+        )
+    elif c.measured:
+        what = (
+            "None of the directories measured on it grew over the last hours (directory "
+            "growth counts once it held for most of them): the growth is elsewhere, or "
+            "too recent to name."
         )
     elif c.elsewhere:
         what = (

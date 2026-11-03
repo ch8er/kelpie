@@ -477,8 +477,8 @@ def test_disk_growth_and_directory_sizes() -> None:
             assert held.startswith("quantile_over_time(0.25, clamp_min(")
             if name == "disk_growth":
                 assert held.endswith("[900s]) * 86400, 0)[3600s:900s])")
-            else:  # slices of two hourly runs of the script, four of them
-                assert held.endswith("[7200s]) * 86400, 0)[28800s:7200s])")
+            else:  # slices of two hourly runs of the script, three of them
+                assert held.endswith("[7200s]) * 86400, 0)[21600s:7200s])")
             assert again == f"{held})"
         prom.responses[text(cfg, "disk_growth")] = vector((mount(A, "/"), str(9 * GB)))
         sims = "/Users/agent/Library/Developer/CoreSimulator/Devices"

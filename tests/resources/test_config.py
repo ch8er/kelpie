@@ -196,12 +196,17 @@ def test_path_interval() -> None:
     """#281: the script runs hourly; directory growth is sustained over slices of 2 runs."""
     config = prometheus().build().config
     assert config.path_interval == timedelta(hours=1)
-    assert "[28800s:7200s]" in config.query_text("path_growth")
+    assert "[21600s:7200s]" in config.query_text("path_growth")
     assert "[3600s:900s]" in config.query_text("disk_growth")  # disks keep their slices
     fast = prometheus(path_interval="5m").build().config
     assert "[3600s:900s]" in fast.query_text("path_growth")  # never shorter than the disk's
     slow = prometheus(path_interval="6h").build().config
-    assert "[172800s:43200s]" in slow.query_text("path_growth")
+    assert "[129600s:43200s]" in slow.query_text("path_growth")
+    assert "[129600s]) * 86400 <" in slow.query_text("path_growth")  # the trend spans it too
+    # A short growth_window: the directory trend still spans several hourly runs.
+    short = prometheus(growth_window="30m").build().config
+    assert "deriv(kelpie_path_bytes[21600s]) * 86400 <" in short.query_text("path_growth")
+    assert "[1800s]) * 86400 <" in short.query_text("disk_growth")
     for bad in ("30s", "7h", "soon"):
         with pytest.raises(ValueError, match="path_interval"):
             load_resources(section(path_interval=bad))

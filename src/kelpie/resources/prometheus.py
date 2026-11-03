@@ -60,7 +60,9 @@ _WRITABLE = (
 )
 
 
-def _sustained(rate: str, slice_: str = "{slice}", sustain: str = "{sustain}") -> str:
+def _sustained(
+    rate: str, slice_: str = "{slice}", sustain: str = "{sustain}", window: str = "{window}"
+) -> str:
     """The lower of ``rate`` over ``{window}`` (the trend, a real shrink stays negative) and
     the first quartile of ``rate`` over the ``{slice}`` steps of the last ``{sustain}`` (what
     held in most of them). A slice that shrank counts as 0, so a cleanup cannot drag this
@@ -69,7 +71,7 @@ def _sustained(rate: str, slice_: str = "{slice}", sustain: str = "{sustain}") -
     lowest, so one odd slice (a burst or a cleanup) moves it little. Both sides carry the
     same labels, so ``or`` adds a series only where ``<`` dropped it: one result per
     series."""
-    trend = rate.replace("{range}", "{window}")
+    trend = rate.replace("{range}", window)
     sliced = rate.replace("{range}", slice_)
     held = f"quantile_over_time(0.25, clamp_min({sliced}, 0)[{sustain}:{slice_}])"
     return f"(({trend} < {held}) or {held})"
@@ -77,8 +79,8 @@ def _sustained(rate: str, slice_: str = "{slice}", sustain: str = "{sustain}") -
 
 # ``{host_label}`` is replaced by the configured host label, ``{window}`` and
 # ``{half_window}`` by ``growth_window`` and its half, ``{sustain}`` by ``growth_sustain``
-# and ``{slice}`` by a quarter of it (at least a minute), ``{path_slice}`` and
-# ``{path_sustain}`` by the same for directory sizes, long enough for ``path_interval``
+# and ``{slice}`` by a quarter of it (at least a minute), ``{path_slice}``, ``{path_sustain}``
+# and ``{path_window}`` by the same for directory sizes, long enough for ``path_interval``
 # (see PrometheusConfig), in custom queries too. Every result must keep the host label.
 DEFAULT_QUERIES: Mapping[str, str] = {
     "disk_size": f"node_filesystem_size_bytes{{{_FS}}} {_WRITABLE}",
@@ -125,7 +127,12 @@ DEFAULT_QUERIES: Mapping[str, str] = {
     # script measures every ``path_interval`` (1h): its sizes are steps, so each slice spans
     # two of them, or most slices would show no growth at all.
     "path_growth": (
-        _sustained("deriv(kelpie_path_bytes[{range}]) * 86400", "{path_slice}", "{path_sustain}")
+        _sustained(
+            "deriv(kelpie_path_bytes[{range}]) * 86400",
+            "{path_slice}",
+            "{path_sustain}",
+            "{path_window}",
+        )
         + " and kelpie_path_bytes offset {half_window}"
     ),
     "path_written": 'node_textfile_mtime_seconds{file=~"(.*/)?kelpie_paths[.]prom"}',
@@ -290,7 +297,8 @@ class PrometheusConfig:
     def query_text(self, name: str) -> str:
         """The query, its placeholders filled in (in custom queries too): ``{host_label}``,
         ``{window}`` (``growth_window``), ``{half_window}``, ``{sustain}``
-        (``growth_sustain``), ``{slice}``, ``{path_slice}`` and ``{path_sustain}``."""
+        (``growth_sustain``), ``{slice}``, ``{path_slice}``, ``{path_sustain}`` and
+        ``{path_window}``."""
         text = self.queries.get(name, DEFAULT_QUERIES[name])
         seconds = int(self.growth_window.total_seconds())
         return (
@@ -300,6 +308,7 @@ class PrometheusConfig:
             .replace("{sustain}", f"{int(self.growth_sustain.total_seconds())}s")
             .replace("{slice}", f"{int(self.growth_slice.total_seconds())}s")
             .replace("{path_sustain}", f"{int(self.path_sustain.total_seconds())}s")
+            .replace("{path_window}", f"{int(self.path_window.total_seconds())}s")
             .replace("{path_slice}", f"{int(self.path_slice.total_seconds())}s")
             .replace("{toolchain_metric}", self.toolchain_metric)
             .replace("{tool_label}", self.toolchain_tool_label)
@@ -322,8 +331,15 @@ class PrometheusConfig:
 
     @property
     def path_sustain(self) -> timedelta:
-        """``growth_sustain`` for directories: at least four path slices."""
-        return max(self.growth_sustain, 4 * self.path_slice)
+        """``growth_sustain`` for directories: at least three path slices (6h by default, so
+        a directory is named once it grew in two of them, about 4h)."""
+        return max(self.growth_sustain, 3 * self.path_slice)
+
+    @property
+    def path_window(self) -> timedelta:
+        """``growth_window`` for directories: at least ``path_sustain``, so a short window
+        still spans several of the script's runs."""
+        return max(self.growth_window, self.path_sustain)
 
 
 class PrometheusSource:

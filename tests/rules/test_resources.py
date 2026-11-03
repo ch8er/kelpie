@@ -383,7 +383,7 @@ def test_a_disk_that_fills_soon_alerts_with_what_grows() -> None:
     sims = "/Users/agent/Library/Developer/CoreSimulator/Devices"
     paths = (
         path(sims, 8.7, 34),
-        path("/Users/agent/.hermes", 0.3),
+        path("/Users/agent/Library/Caches", 0.3),
         path("/tmp", -1.0),
         path("/var/cache", 0.2),
         path("/srv/x", 0.1),
@@ -397,7 +397,7 @@ def test_a_disk_that_fills_soon_alerts_with_what_grows() -> None:
     assert a.params["hours_to_full"] == 48.0
     assert [p["path"] for p in a.params["growing_paths"]] == [
         sims,
-        "/Users/agent/.hermes",
+        "/Users/agent/Library/Caches",
         "/var/cache",
     ]
     assert f"{sims} (+8.7 GB/day)" in a.reason and "2.0 days (48h)" in a.reason
@@ -463,6 +463,16 @@ def test_directories_are_listed_under_the_disk_they_are_on() -> None:
     assert b.params["growing_paths"] == [] and "None of the directories measured" in b.reason
     [u] = full_alerts(run(root, docker, unknown))  # measured, filesystem unknown
     assert "do not say which filesystem" in u.reason
+
+
+def test_current_sizes_that_do_not_grow_yet_are_not_called_unmeasured() -> None:
+    """#281: directory growth needs most of 6h of hourly sizes; a disk's forecast can come
+    first, and the script is running then."""
+    flat = path("/srv/cache", 0)
+    [a] = full_alerts(run(disk(495, 9.0), flat))
+    assert a.params["growing_paths"] == []
+    assert "None of the directories measured on it grew" in a.reason
+    assert "not measured" not in a.reason
 
 
 def test_directory_sizes_from_a_stopped_script_are_said_to_be_old() -> None:

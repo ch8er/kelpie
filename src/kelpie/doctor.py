@@ -931,7 +931,8 @@ def check_path_scans(
             "agent home (docs/install.md, Host resources)",
         )
     longest = max(seconds for _, _, seconds in scans)
-    return _pass(SCANS, f"{len(scans)} directories, the slowest in {longest:.0f}s")
+    count = f"{len(scans)} director{'y' if len(scans) == 1 else 'ies'}"
+    return _pass(SCANS, f"{count}, the slowest in {longest:.0f}s")
 
 
 # kelpie_processes.prom: the macOS process count rule 7 reads (scripts/kelpie-process-limit.sh).
