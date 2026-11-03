@@ -315,7 +315,7 @@
             "uid": "kelpie-prometheus"
           },
           "refId": "A",
-          "expr": "sum by (adapter, board) (rate(kelpie_adapter_errors_total[5m])) * 60",
+          "expr": "sum by (adapter, board) (rate(kelpie_adapter_errors_total{board=~\"$board|\"}[5m])) * 60",
           "legendFormat": "adapter {{adapter}} {{board}}"
         },
         {
@@ -345,6 +345,204 @@
       }
     },
     {
+      "id": 64,
+      "type": "row",
+      "title": "Hosts",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 12
+      },
+      "panels": []
+    },
+    {
+      "id": 65,
+      "type": "stat",
+      "title": "Kelpie version",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "kelpie-prometheus"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 4,
+        "x": 0,
+        "y": 13
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "kelpie-prometheus"
+          },
+          "refId": "A",
+          "expr": "kelpie_build_info",
+          "legendFormat": "{{version}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "description": "The version of the running kelpie serve (kelpie_build_info).",
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "name"
+      }
+    },
+    {
+      "id": 66,
+      "type": "stat",
+      "title": "Server uptime",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "kelpie-prometheus"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 4,
+        "x": 4,
+        "y": 13
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "kelpie-prometheus"
+          },
+          "refId": "A",
+          "expr": "time() - kelpie_start_time_seconds",
+          "legendFormat": ""
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "description": "Since kelpie serve started. A drop to zero is a restart."
+    },
+    {
+      "id": 67,
+      "type": "stat",
+      "title": "Agent hosts up",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "kelpie-prometheus"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 4,
+        "x": 8,
+        "y": 13
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "kelpie-prometheus"
+          },
+          "refId": "A",
+          "expr": "sum(kelpie_agent_up{agent=~\"$host\"})",
+          "legendFormat": "up"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "kelpie-prometheus"
+          },
+          "refId": "B",
+          "expr": "count(kelpie_agent_up{agent=~\"$host\"})",
+          "legendFormat": "of"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "single host"
+        },
+        "overrides": []
+      },
+      "description": "Multi-host only: agents whose board is merged (fresh reports, clock in range), out of the agents the hub knows. Empty on a single host."
+    },
+    {
+      "id": 68,
+      "type": "timeseries",
+      "title": "Agent host up",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "kelpie-prometheus"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 6,
+        "x": 12,
+        "y": 13
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "kelpie-prometheus"
+          },
+          "refId": "A",
+          "expr": "kelpie_agent_up{agent=~\"$host\"}",
+          "legendFormat": "{{agent}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "description": "1 while the agent's board is merged into the farm; 0: silent or its clock is out of range, and its tasks are not evaluated (docs/multi-host.md)."
+    },
+    {
+      "id": 69,
+      "type": "timeseries",
+      "title": "Age of the last agent report",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "kelpie-prometheus"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 6,
+        "x": 18,
+        "y": 13
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "kelpie-prometheus"
+          },
+          "refId": "A",
+          "expr": "time() - (kelpie_agent_last_report_timestamp_seconds{agent=~\"$host\"} > 0)",
+          "legendFormat": "{{agent}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "description": "Since the hub accepted the agent's last report. Silent after [hub] silent_after (90 s by default)."
+    },
+    {
       "id": 11,
       "type": "row",
       "title": "Actions",
@@ -353,7 +551,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 12
+        "y": 20
       },
       "panels": []
     },
@@ -369,7 +567,7 @@
         "h": 7,
         "w": 8,
         "x": 0,
-        "y": 13
+        "y": 21
       },
       "targets": [
         {
@@ -402,7 +600,7 @@
         "h": 7,
         "w": 8,
         "x": 8,
-        "y": 13
+        "y": 21
       },
       "targets": [
         {
@@ -435,7 +633,7 @@
         "h": 7,
         "w": 8,
         "x": 16,
-        "y": 13
+        "y": 21
       },
       "targets": [
         {
@@ -468,7 +666,7 @@
         "h": 7,
         "w": 8,
         "x": 0,
-        "y": 20
+        "y": 28
       },
       "targets": [
         {
@@ -501,7 +699,7 @@
         "h": 7,
         "w": 8,
         "x": 8,
-        "y": 20
+        "y": 28
       },
       "targets": [
         {
@@ -534,7 +732,7 @@
         "h": 7,
         "w": 8,
         "x": 16,
-        "y": 20
+        "y": 28
       },
       "targets": [
         {
@@ -565,7 +763,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 27
+        "y": 35
       },
       "panels": []
     },
@@ -581,7 +779,7 @@
         "h": 7,
         "w": 12,
         "x": 0,
-        "y": 28
+        "y": 36
       },
       "targets": [
         {
@@ -614,7 +812,7 @@
         "h": 4,
         "w": 4,
         "x": 12,
-        "y": 28
+        "y": 36
       },
       "targets": [
         {
@@ -643,7 +841,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 35
+        "y": 43
       },
       "panels": []
     },
@@ -659,7 +857,7 @@
         "h": 7,
         "w": 12,
         "x": 0,
-        "y": 36
+        "y": 44
       },
       "targets": [
         {
@@ -668,7 +866,7 @@
             "uid": "kelpie-prometheus"
           },
           "refId": "A",
-          "expr": "sum by (status) (kelpie_tasks)",
+          "expr": "sum by (status) (kelpie_tasks{board=~\"$board\"})",
           "legendFormat": "{{status}}"
         }
       ],
@@ -691,7 +889,7 @@
         "h": 7,
         "w": 12,
         "x": 12,
-        "y": 36
+        "y": 44
       },
       "targets": [
         {
@@ -724,7 +922,7 @@
         "h": 7,
         "w": 12,
         "x": 0,
-        "y": 43
+        "y": 51
       },
       "targets": [
         {
@@ -733,7 +931,7 @@
             "uid": "kelpie-prometheus"
           },
           "refId": "A",
-          "expr": "sum by (platform_status) (kelpie_prework_tasks)",
+          "expr": "sum by (platform_status) (kelpie_prework_tasks{board=~\"$board\"})",
           "legendFormat": "{{platform_status}}"
         }
       ],
@@ -757,7 +955,7 @@
         "h": 7,
         "w": 12,
         "x": 12,
-        "y": 43
+        "y": 51
       },
       "targets": [
         {
@@ -766,7 +964,7 @@
             "uid": "kelpie-prometheus"
           },
           "refId": "A",
-          "expr": "max by (platform_status) (kelpie_prework_oldest_seconds)",
+          "expr": "max by (platform_status) (kelpie_prework_oldest_seconds{board=~\"$board\"})",
           "legendFormat": "{{platform_status}}"
         }
       ],
@@ -787,7 +985,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 50
+        "y": 58
       },
       "panels": []
     },
@@ -803,7 +1001,7 @@
         "h": 7,
         "w": 8,
         "x": 0,
-        "y": 51
+        "y": 59
       },
       "targets": [
         {
@@ -835,7 +1033,7 @@
         "h": 7,
         "w": 8,
         "x": 8,
-        "y": 51
+        "y": 59
       },
       "targets": [
         {
@@ -867,7 +1065,7 @@
         "h": 7,
         "w": 8,
         "x": 16,
-        "y": 51
+        "y": 59
       },
       "targets": [
         {
@@ -899,7 +1097,7 @@
         "h": 7,
         "w": 8,
         "x": 0,
-        "y": 58
+        "y": 66
       },
       "targets": [
         {
@@ -931,7 +1129,7 @@
         "h": 7,
         "w": 8,
         "x": 8,
-        "y": 58
+        "y": 66
       },
       "targets": [
         {
@@ -963,7 +1161,7 @@
         "h": 7,
         "w": 8,
         "x": 16,
-        "y": 58
+        "y": 66
       },
       "targets": [
         {
@@ -997,7 +1195,7 @@
         "h": 7,
         "w": 12,
         "x": 0,
-        "y": 65
+        "y": 73
       },
       "targets": [
         {
@@ -1035,7 +1233,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 72
+        "y": 80
       },
       "panels": []
     },
@@ -1051,7 +1249,7 @@
         "h": 7,
         "w": 8,
         "x": 0,
-        "y": 73
+        "y": 81
       },
       "targets": [
         {
@@ -1083,7 +1281,7 @@
         "h": 7,
         "w": 8,
         "x": 8,
-        "y": 73
+        "y": 81
       },
       "targets": [
         {
@@ -1124,7 +1322,7 @@
         "h": 7,
         "w": 8,
         "x": 16,
-        "y": 73
+        "y": 81
       },
       "targets": [
         {
@@ -1156,7 +1354,7 @@
         "h": 7,
         "w": 12,
         "x": 0,
-        "y": 80
+        "y": 88
       },
       "targets": [
         {
@@ -1207,7 +1405,7 @@
         "h": 7,
         "w": 12,
         "x": 12,
-        "y": 80
+        "y": 88
       },
       "targets": [
         {
@@ -1254,7 +1452,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 87
+        "y": 95
       },
       "panels": []
     },
@@ -1270,7 +1468,7 @@
         "h": 7,
         "w": 8,
         "x": 0,
-        "y": 88
+        "y": 96
       },
       "targets": [
         {
@@ -1302,7 +1500,7 @@
         "h": 7,
         "w": 8,
         "x": 8,
-        "y": 88
+        "y": 96
       },
       "targets": [
         {
@@ -1343,7 +1541,7 @@
         "h": 7,
         "w": 8,
         "x": 16,
-        "y": 88
+        "y": 96
       },
       "targets": [
         {
@@ -1364,6 +1562,39 @@
       }
     },
     {
+      "id": 62,
+      "type": "timeseries",
+      "title": "Connector failing for",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "kelpie-prometheus"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 24,
+        "x": 0,
+        "y": 103
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "kelpie-prometheus"
+          },
+          "refId": "A",
+          "expr": "max by (connector) (kelpie_connector_failing_seconds)",
+          "legendFormat": "{{connector}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "description": "While a connector step fails tick after tick, time since its last good tick. Past a rule's max_condition_age (15 min by default) its conditions are stale and no rule acts on them (alert KelpieConnectorFailing)."
+    },
+    {
       "id": 42,
       "type": "row",
       "title": "LLM providers",
@@ -1372,7 +1603,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 95
+        "y": 110
       },
       "panels": []
     },
@@ -1388,7 +1619,7 @@
         "h": 7,
         "w": 8,
         "x": 0,
-        "y": 96
+        "y": 111
       },
       "targets": [
         {
@@ -1429,7 +1660,7 @@
         "h": 7,
         "w": 8,
         "x": 8,
-        "y": 96
+        "y": 111
       },
       "targets": [
         {
@@ -1471,7 +1702,7 @@
         "h": 7,
         "w": 8,
         "x": 16,
-        "y": 96
+        "y": 111
       },
       "targets": [
         {
@@ -1510,7 +1741,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 103
+        "y": 118
       },
       "panels": []
     },
@@ -1526,7 +1757,7 @@
         "h": 4,
         "w": 4,
         "x": 0,
-        "y": 104
+        "y": 119
       },
       "targets": [
         {
@@ -1558,7 +1789,7 @@
         "h": 4,
         "w": 4,
         "x": 4,
-        "y": 104
+        "y": 119
       },
       "targets": [
         {
@@ -1590,7 +1821,7 @@
         "h": 4,
         "w": 16,
         "x": 8,
-        "y": 104
+        "y": 119
       },
       "targets": [
         {
@@ -1620,7 +1851,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 108
+        "y": 123
       },
       "panels": []
     },
@@ -1636,7 +1867,7 @@
         "h": 7,
         "w": 8,
         "x": 0,
-        "y": 109
+        "y": 124
       },
       "targets": [
         {
@@ -1669,7 +1900,7 @@
         "h": 7,
         "w": 8,
         "x": 8,
-        "y": 109
+        "y": 124
       },
       "targets": [
         {
@@ -1702,7 +1933,7 @@
         "h": 7,
         "w": 8,
         "x": 16,
-        "y": 109
+        "y": 124
       },
       "targets": [
         {
@@ -1732,7 +1963,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 115
+        "y": 131
       },
       "panels": []
     },
@@ -1748,7 +1979,7 @@
         "h": 7,
         "w": 8,
         "x": 0,
-        "y": 116
+        "y": 132
       },
       "targets": [
         {
@@ -1757,7 +1988,7 @@
             "uid": "kelpie-prometheus"
           },
           "refId": "A",
-          "expr": "sum by (role) (kelpie_role_tasks_done_24h) / 24",
+          "expr": "sum by (role) (kelpie_role_tasks_done_24h{board=~\"$board\"}) / 24",
           "legendFormat": "{{role}}"
         }
       ],
@@ -1781,7 +2012,7 @@
         "h": 7,
         "w": 8,
         "x": 8,
-        "y": 116
+        "y": 132
       },
       "targets": [
         {
@@ -1814,7 +2045,7 @@
         "h": 7,
         "w": 8,
         "x": 16,
-        "y": 116
+        "y": 132
       },
       "targets": [
         {
@@ -1847,7 +2078,7 @@
         "h": 7,
         "w": 12,
         "x": 0,
-        "y": 123
+        "y": 139
       },
       "targets": [
         {
@@ -1856,7 +2087,7 @@
             "uid": "kelpie-prometheus"
           },
           "refId": "A",
-          "expr": "sum by (stage) (kelpie_tasks_by_stage)",
+          "expr": "sum by (stage) (kelpie_tasks_by_stage{board=~\"$board\"})",
           "legendFormat": "{{stage}}"
         }
       ],
@@ -1880,7 +2111,7 @@
         "h": 7,
         "w": 12,
         "x": 12,
-        "y": 123
+        "y": 139
       },
       "targets": [
         {
@@ -1889,7 +2120,7 @@
             "uid": "kelpie-prometheus"
           },
           "refId": "A",
-          "expr": "sum by (role) (kelpie_role_returns_24h) / (sum by (role) (kelpie_role_tasks_done_24h) > 0)",
+          "expr": "sum by (role) (kelpie_role_returns_24h{board=~\"$board\"}) / (sum by (role) (kelpie_role_tasks_done_24h{board=~\"$board\"}) > 0)",
           "legendFormat": "{{role}}"
         },
         {
@@ -1898,7 +2129,7 @@
             "uid": "kelpie-prometheus"
           },
           "refId": "B",
-          "expr": "sum by (role) (kelpie_role_reopened_after_done_24h) / ((sum by (role) (kelpie_role_tasks_done_24h) + sum by (role) (kelpie_role_reopened_after_done_24h)) > 0)",
+          "expr": "sum by (role) (kelpie_role_reopened_after_done_24h{board=~\"$board\"}) / ((sum by (role) (kelpie_role_tasks_done_24h{board=~\"$board\"}) + sum by (role) (kelpie_role_reopened_after_done_24h{board=~\"$board\"})) > 0)",
           "legendFormat": "{{role}} reopened after done"
         }
       ],
@@ -1909,10 +2140,707 @@
         "overrides": []
       },
       "description": "Returns in the last 24h, counted for the role that redoes the work (not the reviewer that sent it back), over the tasks done in that time by the task's role, and the share of the role's completions reopened after done. Where tasks finish under another role's assignment (a reviewer's), the ratio mixes the two; the daily report's rework rate (share of the tasks a role worked on that came back to it) is the precise one."
+    },
+    {
+      "id": 63,
+      "type": "timeseries",
+      "title": "Share of completions reopened by role and board (24h)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "kelpie-prometheus"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 24,
+        "x": 0,
+        "y": 146
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "kelpie-prometheus"
+          },
+          "refId": "A",
+          "expr": "kelpie_role_reopened_after_done_ratio{board=~\"$board\"}",
+          "legendFormat": "{{role}} {{board}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit"
+        },
+        "overrides": []
+      },
+      "description": "Of the role's completions in the last 24h (still done, plus reopened since), the share moved back out of done; per board on a farm with several boards."
+    },
+    {
+      "id": 70,
+      "type": "row",
+      "title": "Spend check",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 153
+      },
+      "panels": []
+    },
+    {
+      "id": 71,
+      "type": "timeseries",
+      "title": "Bill and estimate per provider (newest reconciled day)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "kelpie-prometheus"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 0,
+        "y": 154
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "kelpie-prometheus"
+          },
+          "refId": "A",
+          "expr": "kelpie_spend_reported_usd",
+          "legendFormat": "bill {{provider}}"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "kelpie-prometheus"
+          },
+          "refId": "B",
+          "expr": "kelpie_spend_estimated_usd",
+          "legendFormat": "estimate {{provider}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD"
+        },
+        "overrides": []
+      },
+      "description": "What the provider's cost report billed for its newest reconciled UTC day, and what Kelpie priced from traces for the same day."
+    },
+    {
+      "id": 72,
+      "type": "timeseries",
+      "title": "Spend gap (estimate vs bill)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "kelpie-prometheus"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 8,
+        "y": 154
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "kelpie-prometheus"
+          },
+          "refId": "A",
+          "expr": "kelpie_spend_gap_ratio",
+          "legendFormat": "{{provider}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit"
+        },
+        "overrides": []
+      },
+      "description": "(estimate - bill) / bill. Negative: traces show less than was billed (spend Kelpie does not see). Absent when the bill is 0 or a credit."
+    },
+    {
+      "id": 73,
+      "type": "timeseries",
+      "title": "Age of the newest reconciled day",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "kelpie-prometheus"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 4,
+        "x": 16,
+        "y": 154
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "kelpie-prometheus"
+          },
+          "refId": "A",
+          "expr": "time() - (kelpie_spend_reconciled_day_timestamp_seconds > 0)",
+          "legendFormat": "{{provider}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "description": "Since the start (UTC midnight) of the newest day reconciled. Over two days: the cost report has not been read for a while."
+    },
+    {
+      "id": 74,
+      "type": "stat",
+      "title": "Cost report read",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "kelpie-prometheus"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 4,
+        "x": 20,
+        "y": 154
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "kelpie-prometheus"
+          },
+          "refId": "A",
+          "expr": "kelpie_cost_report_up",
+          "legendFormat": "{{provider}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "description": "1 when the provider's last cost report read worked."
+    },
+    {
+      "id": 75,
+      "type": "row",
+      "title": "Chat controls",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 161
+      },
+      "panels": []
+    },
+    {
+      "id": 76,
+      "type": "timeseries",
+      "title": "Snooze buttons per hour by outcome",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "kelpie-prometheus"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 0,
+        "y": 162
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "kelpie-prometheus"
+          },
+          "refId": "A",
+          "expr": "sum by (channel, outcome) (increase(kelpie_chat_actions_total[1h]))",
+          "legendFormat": "{{channel}} {{outcome}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "description": "Presses of the snooze buttons under alerts (snoozed, rejected, failed)."
+    },
+    {
+      "id": 77,
+      "type": "timeseries",
+      "title": "Ignored presses per hour by reason",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "kelpie-prometheus"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 8,
+        "y": 162
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "kelpie-prometheus"
+          },
+          "refId": "A",
+          "expr": "sum by (channel, reason) (increase(kelpie_chat_rejected_total[1h]))",
+          "legendFormat": "{{channel}} {{reason}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "description": "Presses and updates ignored: unknown user, wrong chat, expired or used reference, rate limited, malformed. unknown_user or wrong_chat in numbers: someone else can press the buttons."
+    },
+    {
+      "id": 78,
+      "type": "timeseries",
+      "title": "Chat API errors per hour",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "kelpie-prometheus"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 16,
+        "y": 162
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "kelpie-prometheus"
+          },
+          "refId": "A",
+          "expr": "sum by (channel, call, cause) (increase(kelpie_chat_api_errors_total[1h]))",
+          "legendFormat": "{{channel}} {{call}} {{cause}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "description": "Failed Bot API calls of the button poller."
+    },
+    {
+      "id": 79,
+      "type": "row",
+      "title": "Builds & disk",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 169
+      },
+      "panels": []
+    },
+    {
+      "id": 80,
+      "type": "timeseries",
+      "title": "Tool slots held by holder",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "kelpie-prometheus"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 0,
+        "y": 170
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "kelpie-prometheus"
+          },
+          "refId": "A",
+          "expr": "sum by (pool, holder) (kelpie_tool_slots_held)",
+          "legendFormat": "{{pool}} {{holder}}"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "kelpie-prometheus"
+          },
+          "refId": "B",
+          "expr": "kelpie_tool_slots",
+          "legendFormat": "{{pool}} slots"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "description": "Shared tool slots (simulator lock files, [adapters.hermes.tools]) held by agents and by CI, against the pool's size."
+    },
+    {
+      "id": 81,
+      "type": "table",
+      "title": "Toolchain versions per host",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "kelpie-prometheus"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 8,
+        "y": 170
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "kelpie-prometheus"
+          },
+          "refId": "A",
+          "expr": "kelpie_toolchain_info{instance=~\"$instance\"}",
+          "legendFormat": "",
+          "format": "table",
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "description": "From scripts/kelpie-toolchain.sh via node_exporter's textfile collector (incident 20). A version change shortly before an outage is named in the report."
+    },
+    {
+      "id": 82,
+      "type": "timeseries",
+      "title": "Processes per user and limit",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "kelpie-prometheus"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 16,
+        "y": 170
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "kelpie-prometheus"
+          },
+          "refId": "A",
+          "expr": "kelpie_user_processes{instance=~\"$instance\"}",
+          "legendFormat": "{{instance}} {{user}}"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "kelpie-prometheus"
+          },
+          "refId": "B",
+          "expr": "kelpie_user_processes_max{instance=~\"$instance\"}",
+          "legendFormat": "{{instance}} {{user}} limit"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "description": "From scripts/kelpie-process-limit.sh (macOS: node_exporter has no process collector there)."
+    },
+    {
+      "id": 83,
+      "type": "timeseries",
+      "title": "Watched directory sizes",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "kelpie-prometheus"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 0,
+        "y": 177
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "kelpie-prometheus"
+          },
+          "refId": "A",
+          "expr": "kelpie_path_bytes{instance=~\"$instance\"}",
+          "legendFormat": "{{instance}} {{path}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes"
+        },
+        "overrides": []
+      },
+      "description": "From scripts/kelpie-path-sizes.sh (incident 19): the directories rule 7 names when a disk fills."
+    },
+    {
+      "id": 84,
+      "type": "timeseries",
+      "title": "Watched directory growth per day",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "kelpie-prometheus"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 12,
+        "y": 177
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "kelpie-prometheus"
+          },
+          "refId": "A",
+          "expr": "deriv(kelpie_path_bytes{instance=~\"$instance\"}[6h]) * 86400",
+          "legendFormat": "{{instance}} {{path}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes"
+        },
+        "overrides": []
+      },
+      "description": "Growth over the last 6 hours, per day; rule 7's default growth window."
+    },
+    {
+      "id": 85,
+      "type": "row",
+      "title": "Token rotation",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 184
+      },
+      "panels": []
+    },
+    {
+      "id": 86,
+      "type": "stat",
+      "title": "Traces token file read",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "kelpie-prometheus"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 6,
+        "x": 0,
+        "y": 185
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "kelpie-prometheus"
+          },
+          "refId": "A",
+          "expr": "kelpie_traces_token_file_ok",
+          "legendFormat": ""
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "description": "0: the last read of [traces] token_file failed and Kelpie keeps the tokens it read before: a rotation or revocation has not taken effect."
+    },
+    {
+      "id": 87,
+      "type": "stat",
+      "title": "Rotated-out tokens accepted",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "kelpie-prometheus"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 6,
+        "x": 6,
+        "y": 185
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "kelpie-prometheus"
+          },
+          "refId": "A",
+          "expr": "kelpie_traces_grace_tokens",
+          "legendFormat": ""
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "description": "Previous tokens still accepted within [traces] token_grace."
+    },
+    {
+      "id": 88,
+      "type": "timeseries",
+      "title": "Requests on a rotated-out token per minute",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "kelpie-prometheus"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 12,
+        "y": 185
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "kelpie-prometheus"
+          },
+          "refId": "A",
+          "expr": "rate(kelpie_traces_grace_requests_total[5m]) * 60",
+          "legendFormat": "grace requests"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "description": "OTLP requests authenticated by a previous token: exporters not yet on the new one. Should reach zero before the grace period ends."
     }
   ],
   "templating": {
-    "list": []
+    "list": [
+      {
+        "name": "board",
+        "label": "Board",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "kelpie-prometheus"
+        },
+        "query": {
+          "query": "label_values(kelpie_tasks, board)",
+          "refId": "board-var"
+        },
+        "definition": "label_values(kelpie_tasks, board)",
+        "refresh": 2,
+        "includeAll": true,
+        "multi": true,
+        "allValue": ".*",
+        "current": {
+          "selected": true,
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ]
+        },
+        "sort": 1,
+        "description": "[[adapters.hermes.boards]] names (#283). Empty with one board: All matches it."
+      },
+      {
+        "name": "host",
+        "label": "Agent host",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "kelpie-prometheus"
+        },
+        "query": {
+          "query": "label_values(kelpie_agent_up, agent)",
+          "refId": "host-var"
+        },
+        "definition": "label_values(kelpie_agent_up, agent)",
+        "refresh": 2,
+        "includeAll": true,
+        "multi": true,
+        "allValue": ".*",
+        "current": {
+          "selected": true,
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ]
+        },
+        "sort": 1,
+        "description": "kelpie agent hosts of a multi-host farm (the hub's agent names)."
+      },
+      {
+        "name": "instance",
+        "label": "Node",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "kelpie-prometheus"
+        },
+        "query": {
+          "query": "label_values(node_uname_info, instance)",
+          "refId": "instance-var"
+        },
+        "definition": "label_values(node_uname_info, instance)",
+        "refresh": 2,
+        "includeAll": true,
+        "multi": true,
+        "allValue": ".*",
+        "current": {
+          "selected": true,
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ]
+        },
+        "sort": 1,
+        "description": "node_exporter targets, for the textfile metrics (directory sizes, toolchain, processes)."
+      }
+    ]
   },
   "annotations": {
     "list": []
