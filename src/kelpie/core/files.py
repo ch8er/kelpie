@@ -3,9 +3,11 @@
 
 New files are created mode 0600 and new folders (the report folder) 0700, both narrowed
 further by the process umask: a stricter umask such as 0077 is respected, a looser one
-never widens them. The umask must leave the owner read and write (0077 is the strictest
-that works): under 0277 a new database would be read-only. A missing database folder is
-not created: a mistyped ``[storage] path`` fails loudly, as before.
+never widens them. The umask must leave the owner read, write and execute (0077 is the
+strictest that works): under 0277 a new database is read-only, under 0177 a new report
+folder cannot be entered. A ``[storage] path`` that is a dangling symlink is left to
+SQLite, which creates the target under the umask (doctor then names it). A missing
+database folder is not created: a mistyped ``[storage] path`` fails loudly, as before.
 
 Existing files and folders are never chmodded here: ``kelpie doctor`` names the ones
 others may read (:func:`loose`), and the operator decides.

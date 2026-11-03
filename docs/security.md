@@ -69,8 +69,9 @@ so it is kept for Kelpie's own user:
   were already private: the traces token file, the Hermes park key (`kelpie serve` refuses
   one others may read) and the button store (0600).
 - The umask can only narrow these modes: `umask 077` keeps them as above; a looser umask
-  never widens them. The umask must leave the owner read and write: under `umask 277` a
-  new database is read-only and Kelpie cannot use it.
+  never widens them. The umask must leave the owner read, write and execute (up to
+  `umask 077`): under `umask 277` a new database is read-only, under `umask 177` a new
+  report folder cannot be entered.
 - Kelpie never chmods `kelpie.db` or a report file that already exists. One created by an
   older version (0644 under the usual umask) keeps its mode, and `kelpie doctor` warns
   ("data files private"), naming the files others may read (through a symlink, the

@@ -366,14 +366,15 @@ def check_private_files(settings: Settings) -> Check:
     if found:
         return _warn(
             PRIVATE_CHECK,
-            f"{len(found)} file(s) others may read (task titles, block reasons): {_paths(found)}",
+            f"{len(found)} file(s) others may read or write (task titles, block reasons): "
+            f"{_paths(found)}",
             "chmod 600 them (and chmod 700 their folder) if other users of this machine "
             "should not read them; Kelpie creates new ones 0600 and leaves these as they are",
         )
     present = [p for p in paths if p.exists()]
     if not present:
         return _skip(PRIVATE_CHECK, "no database file and no report files yet")
-    return _pass(PRIVATE_CHECK, f"{len(present)} file(s), none readable by others")
+    return _pass(PRIVATE_CHECK, f"{len(present)} file(s), none open to others")
 
 
 TOKEN_CHECK = "traces token kept private"

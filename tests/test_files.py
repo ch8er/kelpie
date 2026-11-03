@@ -130,6 +130,11 @@ def test_private_dir_leaves_existing_folders_alone(tmp_path: Path, umask: int) -
     assert mode(tmp_path) == 0o755
     assert mode(tmp_path / "a") == 0o700
     private_dir(tmp_path / "a" / "b")  # again: nothing to do
+    (tmp_path / "c").mkdir(mode=0o755)
+    (tmp_path / "c").chmod(0o755)
+    private_dir(tmp_path / "c" / "d")  # an existing parent is kept as it is
+    assert mode(tmp_path / "c") == 0o755
+    assert mode(tmp_path / "c" / "d") == 0o700
 
 
 def test_loose_follows_symlinks_and_skips_folders(tmp_path: Path) -> None:
