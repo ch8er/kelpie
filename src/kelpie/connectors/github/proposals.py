@@ -25,6 +25,7 @@ from urllib.parse import quote
 
 from kelpie.connectors.github.client import GitHubClient, GitHubError
 from kelpie.connectors.github.workflow_config import (
+    CANCEL_WARNING,
     DOCS_WARNING,
     DRAFTS_WARNING,
     WorkflowError,
@@ -42,10 +43,11 @@ WORKFLOW_PATH = re.compile(
 )
 
 
-def preview(client: GitHubClient, action: Action) -> str:
-    """What :class:`Proposer` would commit for ``action``, as a diff of the workflow file on
-    the default branch, read with ``client`` (read access suffices); writes nothing."""
-    target = _target(action, None)
+def preview(client: GitHubClient, action: Action, repos: tuple[str, ...]) -> str:
+    """The changes of ``action`` as a diff of the workflow file on the default branch, read
+    with ``client`` (read access suffices), for a repository in ``repos`` (the configured
+    ones) only; writes nothing."""
+    target = _target(action, repos)
     if target is None:
         return "(not a workflow file Kelpie edits)"
     repo, path, _, changes = target
@@ -57,6 +59,8 @@ def preview(client: GitHubClient, action: Action) -> str:
         return f"(not rendered: {exc})"
     lines = [rendered.diff(before, path).rstrip("\n") or "(nothing to change in this file)"]
     lines += [f"left out: {name}: {why}" for name, why in rendered.left_out]
+    if "cancel_in_progress" in rendered.applied:
+        lines.append(f"note: {CANCEL_WARNING}")
     if "ignore_docs_paths" in rendered.applied:
         lines.append(f"note: {DOCS_WARNING}")
     if "skip_drafts" in rendered.applied:
@@ -65,23 +69,22 @@ def preview(client: GitHubClient, action: Action) -> str:
 
 
 def _target(
-    action: Action, repos: tuple[str, ...] | None
+    action: Action, repos: tuple[str, ...]
 ) -> tuple[str, str, str, list[Mapping[str, Any]]] | None:
-    """The action's repository, workflow path, file name and changes, when it is one Kelpie
-    may propose for (in ``repos``, unless None)."""
+    """The action's repository (spelled as in ``repos``), workflow path, file name and
+    changes, when the repository is in ``repos`` and the workflow a file Kelpie edits."""
     if action.kind is not ActionKind.PROPOSE_CI_CONFIG:
         return None
     params = action.params
     repo, workflow, changes = params.get("repo"), params.get("workflow"), params.get("changes")
     if not isinstance(repo, str):
         return None
-    if repos is not None:
-        # The repository as configured: never a spelling the action brought along.
-        configured = {r.lower(): r for r in repos}
-        if not repo.isascii() or repo.lower() not in configured:
-            log.warning("ci-config: %r is not in propose_repos", repo)
-            return None
-        repo = configured[repo.lower()]
+    # The repository as configured: never a spelling the action brought along.
+    configured = {r.lower(): r for r in repos}
+    if not repo.isascii() or repo.lower() not in configured:
+        log.warning("ci-config: %r is not a configured repository", repo)
+        return None
+    repo = configured[repo.lower()]
     match = WORKFLOW_PATH.fullmatch(workflow) if isinstance(workflow, str) else None
     if match is None or not isinstance(changes, list):
         log.warning("ci-config: %r is not a workflow file Kelpie edits", workflow)
@@ -90,7 +93,8 @@ def _target(
 
 
 def repository(client: GitHubClient, repo: str) -> tuple[str, str]:
-    """The repository's default branch, and its owner's login as GitHub spells it."""
+    """The repository's default branch, and its owner's login as GitHub spells it (for the
+    writes that open a proposal)."""
     info = client.get(f"/repos/{repo}", fresh=True).body
     info = info if isinstance(info, Mapping) else {}
     default = info.get("default_branch")
@@ -102,7 +106,7 @@ def repository(client: GitHubClient, repo: str) -> tuple[str, str]:
 
 
 def read_workflow(client: GitHubClient, repo: str, path: str, ref: str) -> tuple[str, str]:
-    """The workflow file at ``ref``, and its blob sha."""
+    """The workflow file at ``ref``, and its blob sha (a commit on top of it names it)."""
     file = client.get(f"/repos/{repo}/contents/{quote(path)}", {"ref": ref}, fresh=True).body
     return _decode(file)
 

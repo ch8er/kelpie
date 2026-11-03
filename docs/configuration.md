@@ -528,10 +528,13 @@ what it said before plus the change:
   and `reopened` runs, and pushes to branches other than the default. Every other run (a
   label, an edit, `ready_for_review`, the default branch, manual and scheduled runs) has a
   group of its own, so a run whose jobs skip never cancels the commit's real run. Left out
-  when the workflow sets `concurrency` already.
+  when the workflow sets `concurrency` already, or is also a reusable workflow
+  (`workflow_call`: a called workflow sees its caller's context and would share its group).
+  Check before merging: the group cancels superseded runs on every branch but the default
+  one, release branches too; `cancel_branches` and `cancel_workflows` do not limit it.
 - `ignore_docs_paths`: `paths-ignore` with the docs globs on `push` and `pull_request` (`*`
   becomes `**`: GitHub's `*` stops at `/`). Left out for a trigger with its own `paths` or
-  `paths-ignore`. Check before merging: a skipped workflow leaves a required check pending
+  `paths-ignore`, and when a glob starts with `!` (a negation there) or is only `*`. Check before merging: a skipped workflow leaves a required check pending
   on a docs-only pull request.
 - `skip_drafts`: a draft condition on each job without an `if` of its own, and
   `ready_for_review` among the pull request types. Check before merging: GitHub reports a
@@ -541,7 +544,9 @@ what it said before plus the change:
   expressions, and nothing skips a commit another run already verified): listed as left
   out, with why.
 
-The diff for each waste kind is pinned by the fixtures in `tests/fixtures/ci_config/`.
+The edits are made in this order whatever order the rule lists the changes in, in the
+file's own indent step, so the same changes always give the same diff; the diff for each
+waste kind is pinned by the fixtures in `tests/fixtures/ci_config/`.
 
 A CI outage (incident 20) is one `warning` "CI outage since <time>": the failing workflow,
 job and step, the repositories, runners and PRs it affects, and the tasks waiting on those

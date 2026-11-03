@@ -15,10 +15,13 @@ file except the docs globs, which are checked and quoted.
   other than the default branch. Every other run (pushes to the default branch, manual,
   scheduled and other events) gets a group of its own, so nothing cancels it, as Kelpie's
   own cancels leave the default branch and manual runs alone. Left out when the workflow
-  sets ``concurrency`` already.
+  sets ``concurrency`` already, or is also a reusable workflow (``workflow_call``: a called
+  workflow sees its caller's context, so caller and callee would share the group).
+  :data:`CANCEL_WARNING` says what to check before merging.
 - ``ignore_docs_paths``: ``paths-ignore`` with the rule's docs globs under the ``push`` and
   ``pull_request`` triggers (``*`` becomes ``**``: in GitHub's filters ``*`` stops at a
-  ``/``). Left out for a trigger with ``paths`` or ``paths-ignore`` of its own.
+  ``/``). Left out for a trigger with ``paths`` or ``paths-ignore`` of its own, and when a
+  glob starts with ``!`` (a negation in GitHub's filters) or is only ``*`` (every file).
   :data:`DOCS_WARNING` says what to check before merging.
 - ``skip_drafts``: each job without an ``if`` skips draft pull requests, and the
   ``pull_request`` trigger lists ``ready_for_review`` so the build runs once the draft is
@@ -26,6 +29,9 @@ file except the docs globs, which are checked and quoted.
   :data:`DRAFTS_WARNING` says what to check before merging.
 - ``skip_wip`` and ``skip_verified``: not rendered (GitHub expressions have no regular
   expressions, and nothing skips a commit another run already verified).
+
+The edits are made in that order, whatever order the changes come in, so the same changes
+always give the same text; the indent step is the file's own.
 
 Only block-style mappings are edited; flow style (``pull_request: {branches: [main]}``) is
 left as it is. The forms ``on: push``, ``on: [push, pull_request]`` and a block list of
@@ -44,6 +50,11 @@ from typing import Any
 import yaml
 
 MAX_WORKFLOW = 256 * 1024  # bytes: larger files are not edited
+CANCEL_WARNING = (
+    "The `concurrency` group cancels a superseded run on every branch but the default one "
+    "(release branches too): Kelpie's own `cancel_branches` and `cancel_workflows` do not "
+    "limit it. Narrow the group's condition first if some branches must always build in full."
+)
 DOCS_WARNING = (
     "A workflow skipped by `paths-ignore` leaves its checks pending on the pull request: "
     "if one of them is a required status check, a docs-only pull request cannot merge "
@@ -92,7 +103,7 @@ class WorkflowError(ValueError):
     """The file is no workflow Kelpie edits (too large, not YAML, not a mapping)."""
 
 
-def concurrency(default: str) -> str:
+def concurrency(default: str, step: int = 2) -> str:
     """The ``concurrency`` block for a repository whose default branch is ``default``.
 
     One group per workflow file (``workflow_ref``, not ``name:``, which two files may share)
@@ -110,7 +121,8 @@ def concurrency(default: str) -> str:
         f"(github.event_name == 'push' && github.ref != 'refs/heads/{default}' && github.ref)"
         " || github.run_id }}"
     )
-    return f"concurrency:\n  group: {group}\n  cancel-in-progress: true\n"
+    pad = " " * step
+    return f"concurrency:\n{pad}group: {group}\n{pad}cancel-in-progress: true\n"
 
 
 def render(text: str, changes: Sequence[Mapping[str, Any]], default: str) -> Rendered:
@@ -124,19 +136,24 @@ def render(text: str, changes: Sequence[Mapping[str, Any]], default: str) -> Ren
         text = text.replace("\r\n", "\n")
     original = _parse(text)
     applied: list[str] = []
-    left_out: list[tuple[str, str]] = []
-    for change in changes:
-        name = change.get("change")
-        if not isinstance(name, str):
-            continue
+    left_out: list[tuple[int, str, str]] = []  # (index in changes, change, why)
+    # The edits in a fixed order, whatever order the rule listed them in (most minutes
+    # first, which changes between windows): the same changes always give the same text.
+    order = sorted(
+        (i for i, c in enumerate(changes) if isinstance(c.get("change"), str)),
+        key=lambda i: (_RANK.get(changes[i]["change"], len(_RANK)), i),
+    )
+    for i in order:
+        change = changes[i]
+        name = change["change"]
         edit = _EDITS.get(name)
         if edit is None:
-            left_out.append((name, _NOT_RENDERED.get(name, "not a change Kelpie renders")))
+            left_out.append((i, name, _NOT_RENDERED.get(name, "not a change Kelpie renders")))
             continue
         try:
             edited = edit(text, change, default)
         except _Skip as exc:
-            left_out.append((name, str(exc)))
+            left_out.append((i, name, str(exc)))
             continue
         try:
             data = _parse(edited)
@@ -144,13 +161,13 @@ def render(text: str, changes: Sequence[Mapping[str, Any]], default: str) -> Ren
         except WorkflowError:
             ok = False
         if not ok:
-            left_out.append((name, "could not be placed safely in this file"))
+            left_out.append((i, name, "could not be placed safely in this file"))
             continue
         text = edited
         applied.append(name)
     if crlf:
         text = text.replace("\n", "\r\n")
-    return Rendered(text, tuple(applied), tuple(left_out))
+    return Rendered(text, tuple(applied), tuple((n, w) for _, n, w in sorted(left_out)))
 
 
 class _Skip(Exception):
@@ -220,8 +237,15 @@ def _without(source: Mapping[Any, Any], applied: Sequence[str]) -> Any:
 
 
 def _cancel_in_progress(text: str, change: Mapping[str, Any], default: str) -> str:
-    if "concurrency" in _parse(text):
+    data = _parse(text)
+    if "concurrency" in data:
         raise _Skip("the workflow sets concurrency already")
+    on = _on(data)
+    called = on == "workflow_call" or (isinstance(on, list | dict) and "workflow_call" in on)
+    if called:
+        # A called workflow sees its caller's github context: the caller's group, and GitHub
+        # cancels the run as a concurrency deadlock.
+        raise _Skip("the workflow is also a reusable workflow (workflow_call)")
     if _BRANCH.fullmatch(default) is None or ".." in default:
         raise _Skip("the default branch's name is not one Kelpie writes into an expression")
     lines = text.splitlines(keepends=True)
@@ -230,7 +254,7 @@ def _cancel_in_progress(text: str, change: Mapping[str, Any], default: str) -> s
         raise _Skip("no top-level jobs key to place it before")
     while at > 0 and lines[at - 1].lstrip().startswith("#") and _indent(lines[at - 1]) == 0:
         at -= 1  # above the comments that belong to jobs
-    return "".join([*lines[:at], concurrency(default), "\n", *lines[at:]])
+    return "".join([*lines[:at], concurrency(default, _unit(lines)), "\n", *lines[at:]])
 
 
 def _check_cancel(data: Mapping[Any, Any], change: Mapping[str, Any]) -> bool:
@@ -277,6 +301,9 @@ def _globs(change: Mapping[str, Any]) -> list[str]:
         return []
     if not all(isinstance(g, str) and _GLOB.fullmatch(g) for g in paths):
         raise _Skip("a docs path has characters Kelpie does not write into a workflow")
+    if any(g.startswith("!") or not g.strip("*/") for g in paths):
+        # "!" negates in GitHub's filters; "*" alone would skip the workflow on every change.
+        raise _Skip("a docs path would negate the filter or match every file")
     return [_github_glob(g) for g in paths]
 
 
@@ -329,6 +356,7 @@ _EDITS: dict[str, Callable[[str, Mapping[str, Any], str], str]] = {
     "ignore_docs_paths": _ignore_docs_paths,
     "skip_drafts": _skip_drafts,
 }
+_RANK = {name: rank for rank, name in enumerate(_EDITS)}
 _CHECKS = {
     "cancel_in_progress": _check_cancel,
     "ignore_docs_paths": _check_docs,

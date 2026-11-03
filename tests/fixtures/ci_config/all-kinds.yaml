@@ -26,7 +26,7 @@ workflow: |
         - run: make test  # the full matrix
 expected:
   changes: [cancel_in_progress, skip_drafts, skip_wip, ignore_docs_paths, skip_verified]
-  applied: [cancel_in_progress, skip_drafts, ignore_docs_paths]
+  applied: [cancel_in_progress, ignore_docs_paths, skip_drafts]
   left_out:
     - [skip_wip, GitHub expressions cannot match the WIP patterns (no regular expressions)]
     - [skip_verified, GitHub Actions has no setting that skips an already verified commit]

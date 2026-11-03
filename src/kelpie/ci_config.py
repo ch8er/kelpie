@@ -51,7 +51,7 @@ def run(settings: Settings, clock: Callable[[], datetime] | None = None) -> tupl
     out: list[str] = []
     for action in proposals:
         repo, path = action.params.get("repo"), action.params.get("workflow")
-        out += [f"# {path} in {repo}: {action.reason}", preview(client, action), ""]
+        out += [f"# {path} in {repo}: {action.reason}", preview(client, action, github.repos), ""]
     if not proposals:
         out.append(
             "No pipeline wasted enough minutes for a proposal "

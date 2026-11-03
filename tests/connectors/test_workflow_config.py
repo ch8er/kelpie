@@ -223,3 +223,47 @@ def test_only_runs_for_a_new_commit_share_a_concurrency_group() -> None:
         """contains(fromJSON('["opened","synchronize","reopened"]'), github.event.action) && """
         "github.event.pull_request.number"
     ) in group
+
+
+def test_the_same_changes_in_any_order_give_the_same_text() -> None:
+    forward = render(TYPICAL, [DRAFTS, CANCEL, DOCS], "main")
+    backward = render(TYPICAL, [DOCS, CANCEL, DRAFTS], "main")
+    assert forward.text == backward.text
+    assert (
+        forward.applied
+        == backward.applied
+        == (
+            "cancel_in_progress",
+            "ignore_docs_paths",
+            "skip_drafts",
+        )
+    )
+    skipped = render(TYPICAL, [{"change": "skip_wip"}, CANCEL, {"change": "skip_verified"}], "m")
+    assert [name for name, _ in skipped.left_out] == ["skip_wip", "skip_verified"]
+
+
+def test_a_reusable_workflow_gets_no_concurrency_group() -> None:
+    for on in ("on:\n  push:\n  workflow_call:\n", "on: [push, workflow_call]\n"):
+        text = f"name: CI\n{on}jobs:\n  test:\n    runs-on: ubuntu-latest\n"
+        rendered = render(text, [CANCEL], "main")
+        assert rendered.applied == ()
+        assert rendered.left_out == (
+            ("cancel_in_progress", "the workflow is also a reusable workflow (workflow_call)"),
+        )
+
+
+def test_a_four_space_file_stays_four_space() -> None:
+    text = TYPICAL.replace("  ", "    ")
+    rendered = render(text, [CANCEL, DOCS], "main")
+    assert rendered.applied == ("cancel_in_progress", "ignore_docs_paths")
+    assert "\n    group: " in rendered.text and "\n    cancel-in-progress: true\n" in rendered.text
+    assert "\n        paths-ignore:\n            - 'docs/**'\n" in rendered.text
+
+
+def test_a_docs_glob_that_matches_everything_or_negates_is_not_written() -> None:
+    for glob in ("*", "**", "*/*", "!docs/*"):
+        rendered = render(TYPICAL, [{**DOCS, "paths": ["docs/*", glob]}], "main")
+        assert rendered.applied == ()
+        assert rendered.left_out == (
+            ("ignore_docs_paths", "a docs path would negate the filter or match every file"),
+        )

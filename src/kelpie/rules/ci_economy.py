@@ -40,8 +40,9 @@ connector's business.
    With ``propose_config``, each pipeline whose wasted minutes reach ``propose_min_minutes``
    also gets ``propose_ci_config``, routed to the connector that reported its builds
    (``executor`` = ``Build.source``), with its ``repo``, ``workflow`` and ``changes``: in
-   act mode the connector opens a pull request with the changes written for its CI. Once
-   per pipeline and set of changes.
+   act mode a connector that declares the kind opens a pull request with the changes written
+   for its CI (none does yet: it is a "not executed" alert; ``kelpie ci-config`` previews
+   it). Once per pipeline and set of changes.
 
 2. **Superseded builds still running** → ``cancel_build`` (``cancel_superseded``), only
    for builds the connector marked ``cancellable`` (within its cancel policy), routed to
@@ -151,7 +152,7 @@ class CiEconomy:
     not_started_mode: str = "observe"  # a new check: "observe", or "rule" (the rule's mode)
     # A toolchain change on a host this long before an outage began is its likely cause.
     toolchain_window: timedelta = TOOLCHAIN_WINDOW
-    propose_config: bool = False  # opt-in, with the CI connector's allow_propose
+    propose_config: bool = False  # opt-in
     propose_min_minutes: float = 60.0
     name: str = NAME
 

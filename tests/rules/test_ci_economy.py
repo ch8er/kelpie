@@ -542,3 +542,35 @@ def test_propose_config_values() -> None:
     assert (rule.propose_config, rule.propose_min_minutes) == (False, 90.0)
     with pytest.raises(ValueError, match="propose_config must be true or false"):
         build({"propose_config": "yes"})
+
+
+def test_no_connector_opens_a_proposal_yet_so_act_only_alerts() -> None:
+    """Until a CI connector declares propose_ci_config, an act-mode proposal reaches no
+    connector: it is recorded as not executed and a human is told."""
+    from kelpie.connectors.github.builds import CiSettings, GitHubCI
+    from kelpie.connectors.github.client import GitHubClient
+
+    for allow_cancel in (False, True):
+        settings = CiSettings(repos=("example/repo",), allow_cancel=allow_cancel)
+        github = GitHubCI(GitHubClient("http://127.0.0.1:9", None), settings)
+        assert ActionKind.PROPOSE_CI_CONFIG not in github.actions
+    snap = Snapshot(
+        now=NOW,
+        builds=(b("A-1", draft=True, minutes=20), b("A-2", draft=True, minutes=15, sha="x2")),
+    )
+    rule = CiEconomy(waste_min_minutes=0, propose_min_minutes=30, propose_config=True)
+    proposed: list[Action] = []
+
+    class Recording(FakeCI):
+        def execute(self, action: Action) -> None:  # type: ignore[override]
+            proposed.append(action)
+
+    ci, alerter = Recording(), FakeAlerter()
+    config = EngineConfig(dry_run=False, modes={"ci_economy": Mode.ACT})
+    engine = Engine([rule], connectors=[ci], alerter=alerter, config=config)
+    results = engine.tick(lambda: snap)
+    (result,) = [r for r in results if r.action.kind is ActionKind.PROPOSE_CI_CONFIG]
+    assert result.outcome is not Outcome.EXECUTED and proposed == []
+    assert ("[ci_economy] propose_ci_config (not executed, needs a human)", Severity.WARNING) in (
+        alerter.sent
+    )

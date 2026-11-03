@@ -9,10 +9,10 @@
 +      - '**.md'
      branches: [main, 'release/**']
    pull_request:
++    types: [opened, synchronize, reopened, ready_for_review]
 +    paths-ignore:
 +      - 'docs/**'
 +      - '**.md'
-+    types: [opened, synchronize, reopened, ready_for_review]
 +
 +concurrency:
 +  group: ${{ github.workflow_ref }}-${{ github.event_name }}-${{ (github.event_name == 'pull_request' && contains(fromJSON('["opened","synchronize","reopened"]'), github.event.action) && github.event.pull_request.number) || (github.event_name == 'push' && github.ref != 'refs/heads/main' && github.ref) || github.run_id }}
