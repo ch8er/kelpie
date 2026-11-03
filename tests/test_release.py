@@ -147,7 +147,7 @@ def test_checkouts_leave_no_token_behind(file: str) -> None:
     data = yaml.safe_load((ROOT / ".github/workflows" / file).read_text())
     for name, job in data["jobs"].items():
         steps = job.get("steps", ())
-        filtered = any(str(s.get("uses", "")).startswith("dorny/paths-filter@") for s in steps)
+        filtered = (file, name) == ("ci.yml", "changes")  # its paths-filter may git fetch
         for step in steps:
             if str(step.get("uses", "")).startswith("actions/checkout@") and not filtered:
                 assert (step.get("with") or {}).get("persist-credentials") is False, (file, name)

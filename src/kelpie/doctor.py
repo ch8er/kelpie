@@ -401,7 +401,12 @@ def check_traces_token(settings: Settings, environ: Mapping[str, str]) -> Check:
     problems: list[str] = []
     fixes: list[str] = []
     if (weak := weak_token(token)) is not None:  # audit L11; serve refuses it off loopback
-        problems.append(f"${traces.token_env} {weak}")
+        where = (
+            f"the token in {traces.token_file}"
+            if traces.token_file is not None
+            else f"${traces.token_env}"
+        )
+        problems.append(f"{where} {weak}")
         fixes.append("set a random token: `kelpie traces rotate-token`, or `openssl rand -hex 32`")
     roots: list[Path] = []
     if traces.token_file is not None:

@@ -206,17 +206,24 @@ class TraceSettings:
 
         Raises ValueError unless traces are disabled, a token is set, the bind host is
         loopback, or ``allow_unauthenticated`` (or its env var) says so on purpose. Off
-        loopback a token from the environment must be strong (:func:`weak_token`), as the
-        token file's must be (audit L11).
+        loopback the token must be strong (:func:`weak_token`, audit L11), unless
+        ``allow_unauthenticated`` says the network is trusted anyway (doctor still warns).
         """
         if not self.enabled or is_loopback(host):
             return
         token = self.token(environ)
         if token:
-            if self.token_file is None and (why := weak_token(token)) is not None:
+            why = weak_token(token)
+            if why is not None and not self.unauthenticated_allowed(environ):
+                where = (
+                    f"the token in {self.token_file}"
+                    if self.token_file is not None
+                    else f"${self.token_env}"
+                )
                 raise ValueError(
-                    f"[traces] ${self.token_env} {why}, and OTLP ingest listens on {host}: "
-                    "use a random token (e.g. `openssl rand -hex 32`) or bind to 127.0.0.1"
+                    f"[traces] {where} {why}, and OTLP ingest listens on {host}: replace it "
+                    "with a random token (`kelpie traces rotate-token`, or `openssl rand -hex "
+                    "32`), or bind to 127.0.0.1 where nothing else must reach the port"
                 )
             return
         if self.unauthenticated_allowed(environ):
@@ -230,7 +237,7 @@ class TraceSettings:
 
 
 MIN_TOKEN_CHARS = 16  # as for the token file
-MIN_TOKEN_SYMBOLS = 8  # distinct characters: "a" * 16 is not a secret
+MIN_TOKEN_SYMBOLS = 6  # distinct characters: "a" * 16 is not a secret; random hex passes
 
 
 def weak_token(token: str) -> str | None:
