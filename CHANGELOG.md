@@ -86,6 +86,8 @@ control loop. Each rule runs in `observe`, `suggest` or `act` mode.
   grace and rule 3's ownerless and undriven checks count awake time, so a laptop that slept
   raises no requeue or orphan alert for the gap; a session that does not come back after
   the wake is requeued once as "ended while the host slept" ([#311](https://github.com/ch8er/kelpie/pull/311)).
+- `kelpie agent` watches its own host the same way and reports its sleeps; the hub counts
+  that agent's ages in awake time, never another host's ([#312](https://github.com/ch8er/kelpie/pull/312)).
 
 #### Platform adapters
 
