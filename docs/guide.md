@@ -297,10 +297,10 @@ board the report is unchanged.
   those tasks' hours count once, each occurrence of an outage apart, under "farm outages",
   ahead of the person's inbox and their stale blocks. Under the cost of chaos, "Outages"
   lists each outage of the day: its signature, its reason, since when (perhaps an earlier
-  day) and until when or still open, its scope that day (PRs, or for a block storm tasks)
+  day) and until when or still open, its scope that day (PRs, or for a block storm or a tool failure tasks)
   and the alerts folded under it (a lower bound), who can end it when its reason names a
   person, and the waiting time all of them explained together. An outage whose check is
-  still in observe (`storm_mode`, `not_started_mode`) is listed as such, and its waits
+  still in observe (`storm_mode`, `not_started_mode`, `tool_outage_mode`) is listed as such, and its waits
   stay where they were until the check is switched on; its hours count from the first
   alert after that (until a check switched back to observe), and before/after lists them
   apart, as a signal the config change turned on. "Toolchain changes before outages" lists

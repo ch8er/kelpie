@@ -413,7 +413,7 @@ class OutageLine:
     since: datetime
     until: datetime  # its last sighting by the end of the day
     open: bool  # still open at the end of the day
-    scope: int  # its scope that day: PRs, or for a block storm tasks
+    scope: int  # its scope that day: PRs, or tasks (a block storm, a tool failure)
     folded: int
     kind: str = CI_FAILURES
     reason: str | None = None  # what happened, in one line
@@ -853,23 +853,35 @@ def _toolchain_causes(
     inputs: ReportInputs, start: datetime, end: datetime
 ) -> tuple[ToolchainCause, ...]:
     """Outages open within the day whose alerts (as of that occurrence) named a toolchain
-    change: the first such alert of each occurrence."""
+    change: the first such alert of each occurrence. Occurrences and their start are the
+    Outages list's (:func:`outages`, :func:`occurrence_after`): a row's ``since`` moves as
+    early blocks or failures age out (rules 4 and 10) or walks back (rule 9)."""
     named: dict[str, list[tuple[datetime, OutageParams]]] = {}
     for e in inputs.actions:
         if e.at < end and (o := OutageParams.from_params(e.params)) is not None and o.toolchain:
             named.setdefault(o.state, []).append((e.at, o))
+    if not named:
+        return ()
+    found = outages(
+        [r.state for r in inputs.states if is_outage_state(r.state.id)],
+        [e for e in inputs.actions if e.at < end],
+        _occurrences(inputs),
+    )
     out: list[ToolchainCause] = []
-    for row in inputs.states:
-        st = row.state
-        if not is_outage_state(st.id) or st.since >= end or st.last_seen < start:
+    for span in found:
+        if span.since >= end or span.until < start:
             continue
-        found = sorted(
-            (x for x in named.get(st.id, ()) if st.since <= x[0] <= st.last_seen),
+        mine = sorted(
+            (
+                x
+                for x in named.get(span.state, ())
+                if (span.after is None or x[0] > span.after) and x[0] <= span.until
+            ),
             key=lambda x: x[0],
         )
-        if found and (line := found[0][1].toolchain):
-            o = found[0][1]
-            out.append(ToolchainCause(o.signature, o.kind, st.since, line))
+        if mine and (line := mine[0][1].toolchain):
+            o = mine[0][1]
+            out.append(ToolchainCause(o.signature, o.kind, span.since, line))
     return tuple(sorted(out, key=lambda c: (c.since, c.signature)))
 
 
@@ -1814,7 +1826,7 @@ def render_markdown(report: DailyReport, task_url: str | None = None) -> str:
             "Hours lost: task-hours, how long a task was stuck after Kelpie first reported "
             "it, each task-hour counted once: when several rules saw the same task at the "
             "same time, under the first of "
-            + ("a farm outage (from its first sighting), " if outage else "")
+            + ("a farm outage (from its first alert that counts), " if outage else "")
             + "a person's inbox, a stale block, an ownerless "
             "task, a wait past its limit, an exit without a final status, review ping-pong, "
             "idle capacity, a card stuck before work, a runaway loop, activity without "

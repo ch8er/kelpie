@@ -549,4 +549,5 @@ control loop. Each rule runs in `observe`, `suggest` or `act` mode.
   mode and the daily report ([#62](https://github.com/ch8er/kelpie/pull/62), [#73](https://github.com/ch8er/kelpie/pull/73), [#74](https://github.com/ch8er/kelpie/pull/74), [#81](https://github.com/ch8er/kelpie/pull/81)).
 - A code health and security audit plan was written before the first release ([#92](https://github.com/ch8er/kelpie/pull/92)).
 
+[Unreleased]: https://github.com/ch8er/kelpie/compare/v0.1.0a1...HEAD
 [0.1.0a1]: https://github.com/ch8er/kelpie/releases/tag/v0.1.0a1

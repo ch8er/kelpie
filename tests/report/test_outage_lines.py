@@ -158,6 +158,36 @@ def test_an_outage_after_a_toolchain_change_names_it_as_the_likely_cause() -> No
     assert f"- block storm `xcodebuild fails` since 2026-03-02 02:00 UTC: {XCODE}" in markdown
 
 
+def test_a_toolchain_cause_survives_a_since_that_moved_past_its_alert() -> None:
+    """A storm's ``since`` moves forward as its early blocks age out (rule 4): the alert
+    that named the change, before the new ``since``, still names it, from the Outages
+    list's start."""
+    from kelpie.core.incidents import BLOCK_STORM, Outage, incident_state_id
+
+    storm = incident_state_id("stale_blocks", "xcodebuild fails")
+    row = StateRow(
+        replace(outage_state(storm, at(5), at(9)).state, rule="stale_blocks", opened_at=at(2.1)),
+        at(9.5),
+    )
+
+    def alert(hour: float, toolchain: str | None) -> LedgerEntry:
+        params = Outage(
+            state=storm,
+            signature="xcodebuild fails",
+            kind=BLOCK_STORM,
+            tasks=("T-1",),
+            toolchain=toolchain,
+        ).to_params()
+        return replace(ledger("stale_blocks", **params), at=at(hour))
+
+    report = build_report(
+        inputs(states=(row,), actions=(alert(2.1, XCODE), alert(6, None))), sections={}
+    )
+    [line] = report.outages
+    [cause] = report.toolchain_causes
+    assert cause.change == XCODE and cause.since == line.since == at(2.1)
+
+
 def test_no_change_named_no_toolchain_lines() -> None:
     state = closed(outage_state(SID, at(2), at(20)), at(20.5))
     report = build_report(inputs(states=(state,), actions=(outage_sample(at(3)),)), sections={})
