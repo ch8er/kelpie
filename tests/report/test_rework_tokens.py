@@ -77,7 +77,7 @@ def test_rework_is_the_calls_after_the_first_return_by_who_made_them() -> None:
     [section] = [s for s in report.sections if s.title == "Farm throughput"]
     text = "\n".join(section.lines)
     assert (
-        "**Tokens on rework** (1 task(s) returned, 1 return(s)): 33,000 tokens, $0.14, "
+        "**Tokens on rework** (1 task(s) returned, 1 return(s)): 33,000 tokens ($0.14), "
         "33,000 per return: developer 22,000 ($0.09); reviewer 11,000 ($0.04)."
     ) in text
     assert "- `T-1`, 1 return(s): 33,000 tokens ($0.14), 33,000 per return: developer 22,000; " \
@@ -114,15 +114,67 @@ def test_a_returned_task_with_no_call_since_is_listed_with_none() -> None:
     inputs = farm((Return(at(20), "late"),))
     report = build_report(inputs)
     text = render_markdown(report)
-    assert "**Tokens on rework** (1 task(s) returned, 1 return(s)): 0 tokens, $0.00, 0 per " \
+    assert "**Tokens on rework** (1 task(s) returned, 1 return(s)): 0 tokens ($0.00), 0 per " \
         "return." in text  # fmt: skip
     assert "- `T-1`, 1 return(s): 0 tokens ($0.00), 0 per return: no model calls" in text
 
 
-def test_a_call_that_ends_at_the_return_counts() -> None:
-    """A call counts by when it ended (as the cost of chaos burns them)."""
+def test_a_call_that_ends_at_the_return_is_not_rework() -> None:
+    """A call counts by when it ended (as the cost of chaos burns them): one that ended at
+    the return is the review that sent the task back; one after it is rework."""
     from dataclasses import replace
 
     inputs = farm((Return(at(12) + timedelta(seconds=5), "at once"),))
-    report = build_report(replace(inputs, spans=(call(9, 12.0, "p-dev"),)))
+    report = build_report(replace(inputs, spans=(call(8, 12.0, "s-rev"), call(9, 12.5, "p-dev"))))
     assert "1 return(s)): 11,000 tokens" in render_markdown(report)
+
+
+def test_the_costliest_returned_tasks_first_and_the_rest_counted() -> None:
+    from dataclasses import replace
+
+    tasks = tuple(
+        Task(f"T-{i}", "t", Status.IN_PROGRESS, at(9), owner_id="dev-1",
+             returns=(Return(at(12), "review"),))
+        for i in range(1, 8)
+    )  # fmt: skip
+    spans = tuple(
+        call(10 * i + k, 13 + k / 10, f"s-{i}", f"T-{i}") for i in range(1, 8) for k in range(i)
+    )
+    report = build_report(replace(farm(()), tasks=tasks, spans=spans, sessions=(), usage=()))
+    text = render_markdown(report)
+    listed = [line for line in text.splitlines() if line.startswith("- `T-")]
+    assert [line.split("`")[1] for line in listed] == ["T-7", "T-6", "T-5", "T-4", "T-3"]
+    assert "- +2 more" in text
+
+
+def test_on_a_subscription_rework_is_plan_tokens_never_dollars() -> None:
+    from dataclasses import replace
+
+    from kelpie.core.spend import ProviderSpend, SpendConfig, SpendSettings
+
+    plan = ProviderSpend("vendor", mode="subscription", models=("model-large",))
+    spend = SpendConfig(settings=SpendSettings(providers=(plan,)), prices=PRICES)
+    inputs = replace(farm((Return(at(12), "review"),)), spend=spend)
+    text = render_markdown(build_report(inputs))
+    line = next(x for x in text.splitlines() if x.startswith("**Tokens on rework**"))
+    assert "plan tokens" in line and "$" not in line
+
+
+def test_an_unpriced_model_is_marked_not_free() -> None:
+    from dataclasses import replace
+
+    from kelpie.core.budgets import PriceTable as Prices
+
+    inputs = replace(farm((Return(at(12), "review"),)), prices=Prices(), spend=None)
+    text = render_markdown(build_report(inputs))
+    line = next(x for x in text.splitlines() if x.startswith("**Tokens on rework**"))
+    assert "(unpriced)" in line
+
+
+def test_doer_of_falls_back_to_the_task_role() -> None:
+    from kelpie.report.attribution import call_owners
+
+    inputs = farm(())
+    owners = call_owners(inputs.tasks, inputs.owners, (), {}, None, ())
+    assert owners.doer_of("T-1", "nobody") == "developer"  # no session role: the task's
+    assert owners.doer_of(None, "nobody") == "unknown"

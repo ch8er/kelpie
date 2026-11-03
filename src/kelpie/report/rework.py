@@ -1,13 +1,15 @@
 """Tokens per return (#197 item 7): what the farm spent redoing work that came back.
 
 A task sent back (``Task.returns``: from review, a merge, a failed check) is reworked from
-then on. Its rework is every counted model call made for it from its first return within
-the day to the day's end, by the role that made the call (its session's, else the task's;
+then on. Its rework is every counted model call made for it after its first return within
+the day (by when the call ended: one ending at the return is the review that sent it back)
+to the day's end, by the role that made the call (its session's, else the task's;
 :mod:`kelpie.report.attribution`: a call names its task itself, else through its session,
 on Hermes the profile's ``state.db``).
 The reviewer's next look counts too: it is part of what the return cost. A lower bound,
-like the rework rate it sits beside: a return before the day is not counted, and calls
-that name no task cannot be told apart. Pure and deterministic.
+like the rework rate it sits beside: a return before the day is not counted, a task no
+longer on the board has no returns to read, and calls that name no task cannot be told
+apart. Pure and deterministic.
 """
 
 from __future__ import annotations
@@ -61,7 +63,7 @@ def rework_tokens(
         if task is None or task not in first:
             continue
         at = last_at(span)
-        if first[task][0] <= at < end:
+        if first[task][0] < at < end:  # a call ending at the return is the one that sent it
             calls[task][owners.doer_of(task, span.session_id)].append(span)
     out = []
     for task_id in sorted(first):

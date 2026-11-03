@@ -41,10 +41,25 @@ def _per_task(spend: Spend, completed: int) -> str:
     return out + (f" and {plan}" if plan else "")
 
 
+def _money(spend: Spend, est: str) -> str:
+    """Spend as the section shows it: dollars, ``+N unpriced`` for tokens of models
+    without a price, ``N plan tokens`` for a subscription's (never dollars)."""
+    plan = f"{spend.plan_tokens:,} plan tokens" if spend.plan_tokens else ""
+    if spend.plan_tokens and not spend.billed_tokens:
+        return plan
+    if spend.billed_tokens and spend.unpriced_tokens == spend.billed_tokens:
+        return "unpriced" + (f" and {plan}" if plan else "")
+    out = f"${spend.usd:,.2f}{est}"
+    out += f" +{spend.unpriced_tokens:,} unpriced" if spend.unpriced_tokens else ""
+    return out + (f" and {plan}" if plan else "")
+
+
 def _rework_lines(ctx: SectionContext, owners: CallOwners, est: str) -> list[str]:
     """Tokens on rework (#197 item 7): per role, then per returned task, costliest first;
-    nothing when no task came back within the day."""
-    found = rework_tokens(ctx.inputs.tasks, ctx.spans, ctx.counted, owners, ctx.start, ctx.end)
+    nothing when no task came back within the day. Calls an outage held are the outage's
+    (under Outages), not rework."""
+    own = {k: m for k, m in ctx.counted.items() if k not in ctx.outage_calls}
+    found = rework_tokens(ctx.inputs.tasks, ctx.spans, own, owners, ctx.start, ctx.end)
     if not found:
         return []
     priced = [(t, ctx.price(t.rows())) for t in found]
@@ -55,18 +70,19 @@ def _rework_lines(ctx: SectionContext, owners: CallOwners, est: str) -> list[str
         for role, rows in t.per_role.items():
             per_role[role].extend(rows)
     roles = "; ".join(
-        f"{md.text(r)} {(sp := ctx.price(rows)).tokens:,} (${sp.usd:,.2f})"
+        f"{md.text(r)} {(sp := ctx.price(rows)).tokens:,} ({_money(sp, '')})"
         for r, rows in sorted(per_role.items())
     )
     lines = [
         "",
         f"**Tokens on rework** ({len(found)} task(s) returned, {returns} return(s)): "
-        f"{total.tokens:,} tokens, ${total.usd:,.2f}{est}"
-        + (f", {total.tokens // returns:,} per return" if returns else "")
+        f"{total.tokens:,} tokens ({_money(total, est)}), {total.tokens // returns:,} per "
+        "return"
         + (f": {roles}" if roles else "")
-        + ". A task's rework is its model calls from its first return of the day to "
-        "midnight, by the role that made them (the reviewer's next look included); a "
-        "return before the day is not counted (a lower bound).",
+        + ". A task's rework is its model calls after its first return of the day, to the "
+        "end of the day, by the role that made them (the reviewer's next look included; "
+        "calls an outage held are under Outages); a lower bound: a return before the day, "
+        "a task no longer on the board and a call that names no task are not counted.",
         "",
     ]
     ranked = sorted(priced, key=lambda x: (-x[1].usd, -x[1].tokens, x[0].task_id))
@@ -76,7 +92,7 @@ def _rework_lines(ctx: SectionContext, owners: CallOwners, est: str) -> list[str
         )
         lines.append(
             f"- {md.code(t.task_id)}, {t.returns} return(s): {spend.tokens:,} tokens "
-            f"(${spend.usd:,.2f}), {spend.tokens // t.returns:,} per return"
+            f"({_money(spend, '')}), {spend.tokens // t.returns:,} per return"
             + (f": {who}" if who else ": no model calls linked to it since")
         )
     if len(ranked) > _SHOWN_REWORK:
