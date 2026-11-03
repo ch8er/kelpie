@@ -138,6 +138,47 @@ def test_call_owners_order_of_sources() -> None:
     assert found.task_of(None, "p-9") == "T-1"  # remembered beats the usage record
     assert found.task_of(None, "s-9") == "T-9"  # the usage record
     assert found.task_of("T-5", "s-1") == "T-5"  # the span's own task first
-    assert found.role_of(None, "s-1") == "developer"  # the task's role first
-    assert found.role_of(None, "s-9") == "pm"  # a task of no known role: the session's
+    # a role: the task the span names, else the session owner's, never the session's task
+    assert found.role_of("T-1", "s-1") == "developer"
+    assert found.role_of(None, "s-1") == "reviewer"
+    assert found.role_of(None, "s-9") == "pm"  # the usage record's
     assert found.role_of(None, "nobody") == "unknown"
+
+
+def test_a_call_a_loop_also_covers_is_burned_once_under_the_outage() -> None:
+    """A runaway-loop state on the same session over 12:00-13:30: call 2 is in both, and
+    the outage, first, burns it; the loop keeps none of it twice."""
+    from kelpie.report.daily import day_bounds
+    from tests.report.test_outage_kinds import row
+
+    inputs = with_calls(storm_day())
+    loop = row(f"loop_breaker:identical_calls:{PLATFORM}", "loop_breaker", at(12), at(11.9),
+               at(13.5))  # fmt: skip
+    report = build_report(replace(inputs, states=(*inputs.states, loop)), sections={})
+    lines = {c.rule: c for c in report.chaos}
+    assert lines[OUTAGE].spend.tokens == 2 * 11_000
+    assert "loop_breaker" not in lines or lines["loop_breaker"].spend.tokens == 0
+    burned = sum(c.spend.tokens for c in report.chaos)
+    assert burned == 2 * 11_000
+    assert day_bounds(inputs.day, inputs.tz)[0] == at(0)
+
+
+def test_without_an_outage_a_reviewers_call_stays_the_reviewers() -> None:
+    """No outage: a call on the reviewer's session for a developer's task is priced to the
+    reviewer, as before the session's task was looked up (single-farm output unchanged)."""
+    from kelpie.core.model import Owner, Session, Status, Task
+
+    task = Task("T-1", "t", Status.DONE, at(15), owner_id="dev-1")
+    inputs = ReportInputs(
+        day=at(0).date(),
+        tz=at(0).tzinfo,  # type: ignore[arg-type]
+        tasks=(task,),
+        owners=(Owner("dev-1", "developer"), Owner("rev-1", "reviewer")),
+        sessions=(Session("s-rev", "T-1", "rev-1", at(12), at(13)),),
+        spans=(call(1, 12.5, "s-rev"),),
+        prices=PRICES,
+    )
+    markdown = render_markdown(build_report(inputs))
+    assert "| developer |" in markdown
+    assert "*no spend*" in markdown  # the developer's completed task: no call of its own
+    assert "| reviewer | 1 |" in markdown  # listed: its spend is in no developer cell

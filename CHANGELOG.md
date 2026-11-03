@@ -22,7 +22,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 - Outage tokens (#197 item 6): the model calls an outage's tasks made while it held them
   are the outage's, per role: in its line under Outages, in its cost-of-chaos line, and out
   of each role's cost per completed task. A call without a task id finds its task through
-  its session, now including the platform's usage records (`Snapshot.usage`, #271).
+  its session, now including the platform's usage records (`Snapshot.usage`, #271)
+  ([#325](https://github.com/ch8er/kelpie/pull/325)).
 
 ## [0.1.0a1] - 2026-11-03
 

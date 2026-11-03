@@ -7,10 +7,13 @@ reported now, what the span store remembers of finished sessions
 (``Snapshot.usage``, #271: on Hermes each profile's ``state.db``, which names the session's
 task and role under both Kelpie's session id and the platform's own).
 
-A call's role is its task's (the task's own, else its owner's), else its session owner's,
-else the role its usage record names, else :data:`kelpie.core.stages.UNKNOWN_ROLE`: the
-order the throughput section prices roles by, so a line that moves spend away from a role
-moves it from the same role. Pure and deterministic.
+A call's role is the role of the task the span itself names (the task's own, else its
+owner's), else its session owner's, else the role its usage record names, else
+:data:`kelpie.core.stages.UNKNOWN_ROLE`: the order the throughput section has always priced
+roles by (a session's task is never used for its role: a task in review often carries the
+reviewer's role by then), so a line that moves spend away from a role moves it from the
+same role. The session's task only finds the call's task, as an outage needs. Pure and
+deterministic.
 """
 
 from __future__ import annotations
@@ -38,9 +41,9 @@ class CallOwners:
         return self.session_tasks.get(session_id) if session_id else None
 
     def role_of(self, task_id: str | None, session_id: str | None) -> str:
-        """A call's role: its task's, else its session's, else unknown."""
-        task = self.task_of(task_id, session_id)
-        role = self.task_roles.get(task) if task else None
+        """A call's role: the role of the task the span names (``task_id``: the span's
+        own, never its session's), else its session owner's, else unknown."""
+        role = self.task_roles.get(task_id) if task_id else None
         if role is None and session_id:
             role = self.session_roles.get(session_id)
         return role or UNKNOWN_ROLE
@@ -64,7 +67,10 @@ def call_owners(
     (:func:`kelpie.traces.outputs.session_context`, as the report's ``roles``)."""
     of_session: dict[str, str] = {}
     roles: dict[str, str] = {}
-    for u in usage:  # the weakest source first: later ones overwrite it
+    # The weakest source first, later ones overwrite it: for the task, usage records, then
+    # remembered sessions, then the board's; for the role, usage records, then the session
+    # owners' roles.
+    for u in usage:
         for sid in (u.platform_session_id, u.session_id):
             if u.task_id:
                 of_session[sid] = u.task_id
