@@ -10,8 +10,10 @@ no LLM in the loop, and every rule starts observe-only until you let it act.
 pip install kelpie-sre && kelpie demo
 ```
 
-> **Pre-release.** Kelpie is not on PyPI yet; the first alpha (0.1.0a1) follows a security
-> audit. Until then install from source: `pip install git+https://github.com/ch8er/kelpie`.
+> **Alpha.** `pip install kelpie-sre` installs the first alpha, 0.1.0a1; interfaces and
+> config keys may still change. Read [its release notes](https://github.com/ch8er/kelpie/blob/main/CHANGELOG.md#before-you-install)
+> before you run it on a farm. For the latest `main`:
+> `pip install git+https://github.com/ch8er/kelpie`.
 
 `kelpie demo` runs a simulated farm on your machine and shows Kelpie finding and fixing its
 problems. No farm, accounts or keys needed; Python 3.12 or newer. It replays a working day

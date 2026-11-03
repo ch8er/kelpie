@@ -2,11 +2,12 @@
 
 ## Supported versions
 
-Kelpie is **pre-alpha**. Only the `main` branch is supported; there are no maintained
-release branches yet, and fixes land on `main` only.
+Kelpie is an **alpha**. Fixes land on `main` and in the next release; there are no
+maintained release branches.
 
 | Version | Supported |
 |---------|-----------|
+| the latest release (`0.1.0a1`) | Yes |
 | `main`  | Yes       |
 | anything else | No  |
 
@@ -65,3 +66,20 @@ please keep these properties in mind when assessing impact:
 - **Out of scope:** vulnerabilities in the agent platforms themselves, Prometheus, Grafana,
   node_exporter or Langfuse (report them upstream), and issues that require an attacker
   who already controls the Kelpie host.
+
+## Known residual risks
+
+Open findings of the pre-release security audit
+([#275](https://github.com/ch8er/kelpie/issues/275)) that the release documents instead of
+fixing. Reports that only restate them are not new, but ways to make them worse are in
+scope. Details and what to do meanwhile: [docs/security.md](docs/security.md#known-residual-risks).
+
+- **Rule 10 trusts every holder of the traces token (M1).** In `act` mode `loop_breaker`
+  stops a run on span evidence. A span's session id, and a Hermes spool line's run id, are
+  whatever the sender writes, and every agent's exporter holds the one ingest token. So an
+  agent can make Kelpie stop another agent's run. This matters on farms where agents are
+  untrusted or sandboxed and share one traces token; keep rule 10 in `observe` or `suggest`
+  there. The fix is per-agent ingest tokens ([#302](https://github.com/ch8er/kelpie/issues/302)).
+- **`kelpie serve`'s HTTP port has no pre-auth deadline or connection cap (M5).** Keep it on
+  loopback (the default) or behind a reverse proxy that limits connections and request
+  time. Fix: [#304](https://github.com/ch8er/kelpie/issues/304).

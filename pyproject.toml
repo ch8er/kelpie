@@ -1,6 +1,6 @@
 [project]
 name = "kelpie-sre"
-version = "0.0.1"
+version = "0.1.0a1"
 description = "Open-source SRE and throughput optimization for AI agent farms"
 readme = "README.md"
 license = "Apache-2.0"
@@ -9,7 +9,7 @@ requires-python = ">=3.12"
 authors = [{ name = "Kelpie contributors" }]
 keywords = ["ai-agents", "agent-farm", "sre", "observability", "llm", "opentelemetry"]
 classifiers = [
-    "Development Status :: 2 - Pre-Alpha",
+    "Development Status :: 3 - Alpha",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
     "Topic :: System :: Monitoring",
