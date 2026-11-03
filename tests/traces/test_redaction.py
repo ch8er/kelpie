@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import random
+import shlex
 import stat
 import time
 from collections.abc import Callable
@@ -209,6 +210,82 @@ LEAKS = [
     ('export A="x`y" ; hunter2 prod-db01 ; `" && make', "hunter2"),
     ("export A=$[1 ; hunter2 ; 2] && make", "hunter2"),
     ("A='x'\"y ; hunter2 z\" make", "hunter2"),
+    # #275 L7: data commands and credential words keep no plain word after them
+    ("echo hunter2 | docker login --password-stdin", "hunter2"),
+    ("echo ghp_Zx9Qe7Lm2Vb4Nc6Ty8Uh1Jk3Wq5Er7 | gh auth login --with-token", "ghp_"),
+    ("echo -n hunter2 | docker login -u bot --password-stdin ghcr.io", "hunter2"),
+    ("echo hunter2", "hunter2"),
+    ("printf hunter2 | docker login --password-stdin", "hunter2"),
+    ("printf '%s' hunter2 | podman login --password-stdin", "hunter2"),
+    ("yes hunter2 | passwd", "hunter2"),
+    ("sudo echo hunter2 | tee x", "hunter2"),
+    ("env A=1 printf hunter2 | x", "hunter2"),
+    ("make && echo hunter2 | docker login --password-stdin", "hunter2"),
+    ("redis-cli auth hunter2", "hunter2"),
+    ("redis-cli auth default hunter2", "hunter2"),
+    ("redis-cli auth default hunter2", "default"),
+    ("redis-cli -a hunter2", "hunter2"),
+    ("redis-cli -a hunter2 ping", "hunter2"),
+    ("redis-cli -h cache.test auth hunter2", "hunter2"),
+    ("vault login hvsabcdefgh", "hvsabcdefgh"),
+    ("mysqladmin password hunter2", "hunter2"),
+    ("tool token hunter2", "hunter2"),
+    ("tool secret hunter2", "hunter2"),
+    ("gpg passphrase hunter2", "hunter2"),
+    ("sudo -u root redis-cli auth hunter2", "hunter2"),
+    # #275 L8: an escaped blank does not end an argument
+    ("FOO_TOKEN=a\\ hunter2 make test", "hunter2"),
+    ("FOO_TOKEN=a\\ b\\ hunter2 make test", "hunter2"),
+    ("A=1 FOO_TOKEN=a\\ hunter2 B=2 make", "hunter2"),
+    ("PGPASSWORD=correct\\ horse\\ battery psql -h db", "horse"),
+    ("PGPASSWORD=correct\\ horse\\ battery psql -h db", "battery"),
+    ("env TOKEN=a\\ hunter2 make test", "hunter2"),
+    ("sudo -u a\\ hunter2 make", "hunter2"),
+    ("sudo --user a\\ hunter2 make", "hunter2"),
+    ("export TOKEN=a\\ hunter2 && make", "hunter2"),
+    ("curl -u admin:a\\ hunter2 x", "hunter2"),
+    ("my\\ hunter2 run", "hunter2"),
+    ("A='x y'\\ hunter2 make", "hunter2"),
+    ("A='x 'y\\ hunter2 make", "hunter2"),
+    ("A=x\\ 'y z' hunter2 make", "hunter2"),
+    ("A=x\\\\\\ hunter2 make", "hunter2"),  # three backslashes: the blank is escaped
+    # review of #322: an escape covers one blank; after a run of blanks comes the executable
+    ("FOO=a\\  make Secr3tPassw0rd", "Secr3tPassw0rd"),
+    ("FOO=a\\  tool Secr3tPassw0rd", "Secr3tPassw0rd"),
+    ("FOO=a\\ \tmake Secr3tPassw0rd", "Secr3tPassw0rd"),
+    ("V0=a\\    tool Zq9Sec x", "Zq9Sec"),
+    ("sudo -u a\\  make Secr3tPassw0rd", "Secr3tPassw0rd"),
+    ("sudo --user=a\\  make Secr3tPassw0rd", "Secr3tPassw0rd"),
+    ("env A=x\\  make Secr3tPassw0rd", "Secr3tPassw0rd"),
+    ("FOO=a\\ b\\  make Secr3tPassw0rd", "Secr3tPassw0rd"),
+    ("A=x\\ ; tool Secr3tPassw0rd", "Secr3tPassw0rd"),
+    ("A=x\\ |tool Secr3tPassw0rd", "Secr3tPassw0rd"),
+    ("bw unlock hunter2", "hunter2"),
+    ("ngrok authtoken hunter2", "hunter2"),
+    ("ngrok config add-authtoken hunter2", "hunter2"),
+    ("op signin hunter2", "hunter2"),
+    ("tool pass hunter2", "hunter2"),
+    ("tool api-key hunter2", "hunter2"),
+    ("builtin echo hunter2", "hunter2"),
+    # second review of #322: a trailing backslash continues the word on the next line
+    ("gh pr checks hunter\\\n2", "hunter"),
+    ("mytool hunter\\\n2 --flag", "hunter"),
+    ("tool sub abc\\", "abc"),
+    ("Pw\\\t", "Pw"),
+    ("pw\\ ", "pw"),
+    # a credential word as the executable, and more of them
+    ("passwd hunter2", "hunter2"),
+    ("login hunter2", "hunter2"),
+    ("sudo passwd hunter2", "hunter2"),
+    ("pass show hunter2", "hunter2"),
+    ("tool api_key hunter2", "hunter2"),
+    ("tool tokens hunter2", "hunter2"),
+    ("tool secrets hunter2", "hunter2"),
+    ("keytool storepass hunter2", "hunter2"),
+    # an operator glued into the executable's word: a redirection target, not a name
+    ("cmd>/x/hunter2", "hunter2"),
+    ("cmd</x/hunter2 y", "hunter2"),
+    ("x.y\\a\\ 2>&1test//hunter2", "hunter2"),
 ]
 
 
@@ -264,6 +341,77 @@ def test_no_secret_leaks(copy: str, cmd: str, secret: str) -> None:
 )
 def test_commands_stay_recognizable(cmd: str, expected: str) -> None:
     assert command.redact_command(cmd) == expected
+
+
+# #275 L7/L8 near-misses: the fix masks the secret, never the command it belongs to.
+NEAR_MISSES = [
+    ("echo hunter2 | docker login --password-stdin", "echo *** | docker login --password-stdin"),
+    ("echo $PW | docker login --password-stdin", "echo *** | docker login --password-stdin"),
+    ('echo "$PW" | docker login --password-stdin', "echo ***"),  # quoted: the rest is masked
+    ("printf %s pw | gh auth login --with-token", "printf *** | gh auth *** --with-token"),
+    ("yes | apt-get install x", "yes | apt-get install x"),
+    ("yes pw | passwd", "yes *** | passwd"),
+    ("echo done && make test", "echo *** && make test"),
+    ("echo", "echo"),
+    ("redis-cli auth pw", "redis-cli auth ***"),
+    ("redis-cli -a pw", "redis-cli -a ***"),
+    ("redis-cli ping", "redis-cli ping"),
+    ("redis-cli info memory", "redis-cli info memory"),
+    ("gh auth status", "gh auth ***"),
+    ("docker login", "docker login"),
+    ("vault login tok", "vault login ***"),
+    ("FOO_TOKEN=a\\ b make test", "make test"),
+    ("FOO=a\\\\ make test", "make test"),  # an escaped backslash: the blank splits
+    ("env A=x\\ y make test", "env A=*** make test"),
+    ("sudo -u a\\ b make test", "sudo -u *** make test"),
+    ("cat my\\ file", "cat ***"),
+    ("pytest -q tests/a\\ b.py", "pytest -q ***"),
+    ("make test \\", "make test ***"),
+    ("FOO=a\\  make test", "make test"),  # two blanks: the escape covers the first only
+    ("sudo -u a\\  make test", "sudo -u *** make test"),
+    ("builtin echo pw", "builtin echo ***"),
+    ("make test\\", "make ***"),
+    ("passwd", "passwd"),
+]
+
+
+def test_escaped_blanks_split_as_bash_does() -> None:
+    """Random values with escaped blanks before a command: the word the redaction keeps as
+    the executable is the one bash runs (shlex agrees), never part of a value (#275 L8)."""
+    rng = random.Random(275)
+    parts = ["a", "b", "\\ ", "\\\\", " ", "  ", "\t", " \t", "Sx9"]
+    for _ in range(5000):
+        value = "".join(rng.choice(parts) for _ in range(rng.randint(1, 6)))
+        value = value.lstrip(" \t")
+        trail = len(value) - len(value.rstrip("\\"))
+        if not value or trail % 2:
+            continue
+        for head, n in ((f"FOO={value} ", 1), (f"sudo -u {value} ", 3), (f"env A={value} ", 2)):
+            cmd = head + "make Secr3tPassw0rd"
+            kept = command.redact_command(cmd) or ""
+            assert "Secr3tPassw0rd" not in kept, cmd
+            if len(shlex.split(cmd)) == n + 2:  # the value is one word: bash runs make
+                assert kept.split()[-2:] == ["make", "***"], (cmd, kept)
+
+
+@pytest.mark.parametrize("copy", COPIES)
+@pytest.mark.parametrize(("cmd", "expected"), NEAR_MISSES)
+def test_near_misses_keep_the_command(copy: str, cmd: str, expected: str) -> None:
+    assert COPIES[copy](cmd) == expected
+
+
+@pytest.mark.parametrize(
+    ("cmd", "prefix"),
+    [
+        ("echo pw | docker login --password-stdin", "echo"),
+        ("redis-cli auth pw", "redis-cli"),
+        ("gh auth status", "gh auth"),
+        ("FOO_TOKEN=a\\ b make test", "make test"),
+        ("env A=x\\ y npm test", "npm test"),
+    ],
+)
+def test_near_miss_prefixes(cmd: str, prefix: str) -> None:
+    assert command_prefix(command.redact_command(cmd)) == prefix
 
 
 @pytest.mark.parametrize(
@@ -325,7 +473,13 @@ def test_detect_filter_still_sees_a_pipe_in_the_prefix() -> None:
 
 def test_long_and_many_arguments_stay_fast() -> None:
     """Runs on every tool call: linear, whatever the line."""
-    for cmd in ("A=1 " * 200_000 + "echo", "x " + "'a " * 200_000, "y" * 5_000_000):
+    for cmd in (
+        "A=1 " * 200_000 + "echo",
+        "x " + "'a " * 200_000,
+        "y" * 5_000_000,
+        "A=a" + "\\ a" * 200_000 + " make",
+        "echo " + "a " * 200_000,
+    ):
         start = time.monotonic()
         command.redact_command(cmd)
         assert time.monotonic() - start < 1, cmd[:20]
@@ -337,7 +491,8 @@ def test_redaction_is_stable_on_random_commands() -> None:
             "gh", "pr", "checks", "5", "--token", "--a=b", "-pq", "Authorization:", "Bearer",
             "https://u:p@h", "`x`", "$'q'", "-", "--", "***", "…", "a'b", "/p/q",
             "sudo", "env", "nice", "rtk", "-iu", "-iA=1", "-E", "-n", "-1234", "-X", "A=1",
-            "--user=r", "--chroot", "make"]  # fmt: skip
+            "--user=r", "--chroot", "make", "echo", "printf", "auth", "login", "a\\",
+            "x\\\\", "\\"]  # fmt: skip
     for _ in range(20000):
         cmd = " ".join(rng.choice(pool) for _ in range(rng.randint(1, 9)))
         once = command.redact_command(cmd)

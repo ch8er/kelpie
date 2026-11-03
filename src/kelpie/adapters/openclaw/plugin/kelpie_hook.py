@@ -152,6 +152,7 @@ _WRAPPERS = {
     "command": (frozenset(), frozenset({"-p", "-v", "-V"})),
     "exec": (frozenset({"-a"}), frozenset({"-c", "-l"})),
     "rtk": (frozenset(), frozenset()),
+    "builtin": (frozenset(), frozenset()),
 }
 _MAX_WRAPPED = 8  # wrapper tokens kept on top of _MAX_TOKENS
 # Shell builtins that only set up for the command after them (``export X=… && make``,
@@ -162,15 +163,32 @@ _SETUP = frozenset({"export", "cd", "pushd", "set", "source", ".", "unset", "uma
 # ``_ . / ~ : = + , @ % $ -``, no quote, escape, bracket, comment or operator in it. With any
 # other argument, where bash ends the builtin's arguments is not clear: the rest is masked.
 _SIMPLE_ARG = re.compile(r"^[\w./~:=+,@%$-]*$")
-_BLANKS = re.compile(r"[ \t]+")  # what bash splits words on
+# Commands whose arguments are data, often a secret piped on (``echo pw | docker login
+# --password-stdin``, #275 L7): read like a setup builtin, the name with one ``***``.
+_DATA = frozenset({"echo", "printf", "yes"})
+# Words after which the next plain words are a credential, not a subcommand
+# (``redis-cli auth pw``, ``vault login tok``, ``mysqladmin password pw``; #275 L7).
+_CREDENTIAL_WORDS = frozenset(
+    {
+        *("auth", "authtoken", "add-authtoken", "login", "signin", "unlock"),
+        *("password", "passwd", "passphrase", "pass", "token", "secret", "apikey", "api-key"),
+        *("credential", "credentials", "api_key", "tokens", "secrets", "storepass"),
+        "keypass",
+    }
+)
+_OPERATORS = frozenset(";&|<>()")  # in an executable's word: not a name (cmd>/x/y)
+_UNCLEAR = frozenset("'\"`;&|<>()")  # with an escape in the word: the rest is masked
+# A word as bash splits it: blanks (spaces, tabs) end it unless escaped, so ``a\ b`` is one
+# word and ``a\  b`` (two blanks) two (#275 L8). Quotes are read later, by _quoted_span.
+_WORDS = re.compile(r"(?:\\[^\n]?|[^ \t\\])+")  # a trailing \ stays in its word
 
 
 def _quoted_span(tokens: list[str], i: int) -> int:
     """Index after the argument that starts at ``tokens[i]``: past the token that closes
     the first quote it opens, else the next token. An unclosed quote runs to the end."""
     tok = tokens[i]
-    if "\\" in tok and any(q in tok for q in _QUOTES):
-        return len(tokens)  # an escaped quote: where the argument ends is not clear
+    if "\\" in tok and any(c in _UNCLEAR for c in tok):
+        return len(tokens)  # an escape next to a quote or operator: where it ends is unclear
     kinds = {c for c in tok if c in _QUOTES}
     if len(kinds) > 1:
         return len(tokens)  # 'x'"y: counting one kind would end it in the wrong place
@@ -178,8 +196,8 @@ def _quoted_span(tokens: list[str], i: int) -> int:
     if quote is None or tok.count(quote) % 2 == 0:
         return i + 1
     for j in range(i + 1, len(tokens)):
-        if any(q in tokens[j] for q in _QUOTES if q != quote):
-            return len(tokens)  # another kind of quote inside: not clear either
+        if any(q in tokens[j] for q in _QUOTES if q != quote) or "\\" in tokens[j]:
+            return len(tokens)  # another kind of quote, or an escape, inside: not clear
         if tokens[j].count(quote) % 2 == 1:
             return j + 1
     return len(tokens)
@@ -217,8 +235,9 @@ def redact_command(command: str) -> str | None:
     list separator and the next executable. Everything else is ``***``: flag values,
     ``--flag=value`` values, paths, URLs, hosts, ``user:pass``, quoted text, variables. Once
     a flag or a masked argument appears, later plain words are masked too: they may be its
-    value. A secret passed as a lowercase word right after the executable
-    (``redis-cli auth hunter2``) is still kept. A setup builtin (``export``, ``cd``,
+    value, and so are the words after a credential word (``redis-cli auth ***``). The
+    arguments of ``echo``, ``printf`` and ``yes`` are data (``echo *** | docker login``).
+    An escaped blank (``a\\ b``) does not end an argument. A setup builtin (``export``, ``cd``,
     ``source``, ``set``, ...) keeps its name and one ``***`` for all its arguments, and its
     tokens do not count against the four, so ``export X=… && ./sim.sh test`` keeps the
     command it sets up: ``export *** && sim.sh test``.
@@ -226,7 +245,7 @@ def redact_command(command: str) -> str | None:
     lines = command.strip().splitlines()
     if not lines:
         return None
-    tokens = [t for t in _BLANKS.split(lines[0][:_MAX_LINE]) if t]
+    tokens = _WORDS.findall(lines[0][:_MAX_LINE])
     if len(lines[0]) > _MAX_LINE and tokens:
         tokens[-1] = _MASK  # the cut may have split it
     i = 0
@@ -289,12 +308,13 @@ def redact_command(command: str) -> str | None:
         elif exe:
             base = tok.rstrip("/").rsplit("/", 1)[-1]
             ok = (bool(_EXE.match(base)) and not _ASSIGN.match(base)) or base == "."
+            ok = ok and not any(c in _OPERATORS for c in tok)  # cmd>/x/y: not its name
             out.append(base if ok else _MASK)
-            exe, words = False, ok
+            exe, words = False, ok and base not in _CREDENTIAL_WORDS  # passwd ***
             if ok and base in _WRAPPERS:
                 wrapper = _WRAPPERS[base]
                 extra = min(extra + 1, _MAX_WRAPPED)
-            elif ok and base in _SETUP:
+            elif ok and (base in _SETUP or base in _DATA):
                 setup, words = True, False
                 extra = min(extra + 1, _MAX_WRAPPED)
         elif _FLAG.match(tok):
@@ -308,6 +328,7 @@ def redact_command(command: str) -> str | None:
             words = False
         elif words and _WORD.match(tok):
             out.append(tok)
+            words = tok not in _CREDENTIAL_WORDS  # redis-cli auth ***: its value
         elif out and out[-1] == "-m" and tok in _PYTHON_MODULES:
             out.append(tok)  # python -m pytest
         else:
