@@ -116,6 +116,10 @@ control loop. Each rule runs in `observe`, `suggest` or `act` mode.
   for the report, not sent one per task ([#183](https://github.com/ch8er/kelpie/pull/183)).
 - An action that a platform cannot perform becomes an alert for a human instead of an error
   ([#66](https://github.com/ch8er/kelpie/pull/66)).
+- On a farm with several adapters, each rule's actions are judged per adapter: `kelpie
+  doctor` and the daily report say which adapters a rule cannot act on yet (there its actions
+  become alerts), and an adapter that declares its action kinds is sent no other
+  ([#219](https://github.com/ch8er/kelpie/pull/219)).
 
 #### Platform adapters
 
