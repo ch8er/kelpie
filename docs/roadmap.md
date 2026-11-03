@@ -912,7 +912,7 @@ notes say `kelpie serve` stays on loopback or behind a limiting proxy until M5 i
 - [x] Subprocess calls (Hermes CLI, git): no injection, minimal environment, no token leakage (#275)
 - [x] No SQL built from strings with untrusted data (#275; L1, the read-only URI, fixed in #280)
 - [ ] Secrets never reach logs, metrics, `kelpie status`, errors, reports or the LLM section (audited in #275; L6 fixed in #280; open: L7, L8, command-redaction gaps)
-- [x] Outbound HTTP: no redirects with credentials, TLS verified, response size limits (#275; M3 and L12 fixed in #279; M4, the Linear client's deadline, open)
+- [x] Outbound HTTP: no redirects with credentials, TLS verified, response size limits (#275; M3 and L12 fixed in #279; M4, the Linear client's deadline, in #324)
 - [ ] OTLP and `/metrics` endpoints: auth, bind address, body limits (audited in #275; M2 fixed in #279, M5 in #309; M1 documented, fix in #302; open: L10, L11)
 - [x] File paths from config and data: no traversal, safe symlink handling (H1, H2 fixed in #278)
 - [x] Report and LLM root-cause section: prompt injection from agent text, what data leaves the host (#275; L9, no length cap on agent reasons, open)

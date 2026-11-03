@@ -234,14 +234,15 @@ def _iso(at: datetime) -> str:
 
 @dataclass(slots=True)
 class LinearClient:
-    """POST GraphQL to Linear. Not thread-safe: the control loop owns it."""
+    """POST GraphQL to Linear. One thread reads (the control loop, or ``kelpie agent``'s
+    reports) while another may carry out actions: the refresh's budgets (``read_deadline``,
+    ``requests_left``) are per thread."""
 
     api_url: str = DEFAULT_API_URL
     token: str | None = field(default=None, repr=False)
     timeout: timedelta = timedelta(seconds=10)
     clock: Callable[[], datetime] = lambda: datetime.now(UTC)
     backoff_until: datetime | None = None
-    requests_left: int | None = None  # this refresh's budget; None: no limit
     # From Linear's last answer: what is left of the hour's requests and complexity, the
     # hour's complexity limit; and the complexity spent since the client was made.
     hour_requests: int | None = None
@@ -267,6 +268,16 @@ class LinearClient:
     @read_deadline.setter
     def read_deadline(self, value: float | None) -> None:
         self._local.deadline = value
+
+    @property
+    def requests_left(self) -> int | None:
+        """This thread's request budget for the refresh; None: no limit."""
+        left: int | None = getattr(self._local, "requests_left", None)
+        return left
+
+    @requests_left.setter
+    def requests_left(self, value: int | None) -> None:
+        self._local.requests_left = value
 
     def __post_init__(self) -> None:
         self.api_url = check_api_url(self.api_url)
@@ -595,10 +606,12 @@ class LinearIssues:
             self._next = now + self.refresh
             raise failures[0]
         self.client.requests_left = self.max_requests
-        try:
-            items = [i for board, raw in lists for i in self._items(board, raw)]
+        try:  # history in the refresh's order too, so no team's always goes unread
+            turn = sorted(lists, key=lambda pair: (order[pair[0].key] - start) % len(boards))
+            read = {board.key: self._items(board, raw) for board, raw in turn}
         finally:
             self.client.requests_left = None
+        items = [i for board, _ in lists for i in read[board.key]]
         interval = self._interval(self.client.complexity_spent - before)
         self._next, self._stretched = now + interval, interval > self.refresh
         self._last, self._failed = (now, items), None
@@ -1016,13 +1029,13 @@ class LinearIssues:
 
     def _lookup(self, op: str, document: str, variables: Mapping[str, Any]) -> Any:
         """A read an action makes: outside the reads' request budget and reserve."""
+        # The read deadline stays: it is per thread, so it is set here only when a refresh
+        # makes this lookup (the agents' users); an action's lookups never see it.
         saved, self.client.requests_left = self.client.requests_left, None
-        deadline, self.client.read_deadline = self.client.read_deadline, None
         try:
             return self._query(op, document, variables)
         finally:
             self.client.requests_left = saved
-            self.client.read_deadline = deadline
 
     def _write(self, op: str, document: str, variables: Mapping[str, Any]) -> Any:
         first = self.gate.begin()

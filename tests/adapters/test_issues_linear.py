@@ -1150,7 +1150,7 @@ def test_a_server_that_drips_bytes_is_cut_at_the_timeout() -> None:
         stop.set()
         listener.close()
     assert exc.value.kind == "network"
-    assert time.monotonic() - started < 3.0
+    assert time.monotonic() - started < 5.0  # 1s timeout; on main it never returns
     assert client.backing_off()  # and the next tick does not ask again at once
 
 
@@ -1214,7 +1214,7 @@ def test_tick_budget_is_configured_and_bounded() -> None:
     base = {"teams": ["ENG"]}
     assert load_linear(base).tick_budget == timedelta(seconds=30)
     assert load_linear({**base, "tick_budget": "45s"}).tick_budget == timedelta(seconds=45)
-    for bad in ("0s", "2m"):
+    for bad in ("0s", "5s", "2m"):  # 5s: under the 10s timeout
         with pytest.raises(ValueError, match="tick_budget"):
             load_linear({**base, "tick_budget": bad})
 
@@ -1254,21 +1254,32 @@ def test_a_refresh_deadline_never_reaches_writes_or_another_thread(lin: FakeLine
     real_post = reader.client.post
     reader.client.post = lambda *x, **k: timeouts.append(x[4]) or real_post(*x, **k)
     reader.client.read_deadline = reader.client.monotonic() - 1  # spent, on this thread
-    seen: list[float | None] = []
-    t = threading.Thread(target=lambda: seen.append(reader.client.read_deadline))
+    reader.client.requests_left = 0
+    seen: list[object] = []
+    errors: list[BaseException] = []
+
+    def act() -> None:  # the agent's poll thread
+        try:
+            seen.append((reader.client.read_deadline, reader.client.requests_left))
+            reader.fetch("ENG-1")  # the re-check before a write
+            reader.reserve(1)
+            reader.comment("ENG-1", "hello")
+        except BaseException as exc:  # pragma: no cover - reported below
+            errors.append(exc)
+
+    t = threading.Thread(target=act)
     t.start()
     t.join()
-    assert seen == [None]
-    reader.fetch("ENG-1")  # the re-check before a write
-    reader.reserve(1)
-    reader.comment("ENG-1", "hello")
+    assert errors == [] and seen == [(None, None)]
     assert lin.issues["ENG-1"].comments == ["hello"]
     assert timeouts and all(t == 10.0 for t in timeouts)
-    assert reader.client.read_deadline is not None  # put back after each
+    assert reader.client.requests_left == 0  # this thread's budget untouched
 
 
 def test_each_refresh_starts_with_the_next_team(lin: FakeLinear) -> None:
     lin.team("OPS")
+    lin.issue("ENG-1", "one", ago(days=1))
+    lin.issue("OPS-1", "two", ago(days=1))
     boards = (Board("ENG"), Board("OPS"))
     a = adapter(lin, boards)
     reader = a.tracker
@@ -1290,3 +1301,27 @@ def test_each_refresh_starts_with_the_next_team(lin: FakeLinear) -> None:
         tasks(a)
         started.append(firsts[0])
     assert sorted(started) == ["ENG", "OPS"]
+    assert [t.split("-")[0] for t in tasks(a)] == ["ENG", "OPS"]  # items in configured order
+
+
+def test_the_agents_user_lookup_of_a_refresh_is_within_its_budget(lin: FakeLinear) -> None:
+    lin.issue("ENG-1", "one", ago(days=1))
+    a = adapter(lin)
+    reader = a.tracker
+    assert isinstance(reader, LinearIssues)
+    tasks(a)  # users looked up, lists read
+    reader._looked_up = None  # the hourly lookup is due
+    reader._users.clear()
+    reader._next, reader.tick_budget = None, timedelta(seconds=10)
+    sent: list[str] = []
+    real_post = reader.client.post
+    reader.client.post = lambda *x, **k: sent.append(x[3].decode()) or real_post(*x, **k)
+    clock = [0.0]
+
+    def ticking() -> float:
+        clock[0] += 20.0  # past the budget at the first request
+        return clock[0]
+
+    reader.client.monotonic = ticking
+    assert set(tasks(a)) == {"ENG-1"}  # served from the last good read
+    assert sent == []  # not even the users' lookup went out

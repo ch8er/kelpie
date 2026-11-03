@@ -455,9 +455,11 @@ def load_linear(section: Any) -> LinearSettings:
     ):
         raise ValueError(f"{sect} max_requests_per_tick must be 0 to {MAX_REQUESTS}")
     tick_budget = _duration(section, "tick_budget", LINEAR_TICK_BUDGET, sect)
-    if not timedelta(0) < tick_budget <= LINEAR_MAX_TICK_BUDGET:
+    if not timeout <= tick_budget <= LINEAR_MAX_TICK_BUDGET:
+        # Below one request's timeout, a dead server would never count as down (no back-off).
         raise ValueError(
-            f"{sect} tick_budget must be positive and at most {LINEAR_MAX_TICK_BUDGET.seconds}s"
+            f"{sect} tick_budget must be at least timeout and at most "
+            f"{LINEAR_MAX_TICK_BUDGET.seconds}s"
         )
     agents_section = section.get("agents", {})
     if not isinstance(agents_section, Mapping) or len(agents_section) > MAX_AGENTS:
