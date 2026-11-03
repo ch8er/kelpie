@@ -127,6 +127,7 @@ source_modules = [
     "kelpie.server",
     "kelpie.metrics",
     "kelpie.net",
+    "kelpie.httpguard",
     "kelpie.remote",
     "kelpie.doctor",
     "kelpie.why",
@@ -251,6 +252,25 @@ forbidden_modules = [
     "kelpie.server",
     "kelpie.cli",
     "kelpie.metrics",
+]
+
+[[tool.importlinter.contracts]]
+name = "The connection guards build on core only"
+type = "forbidden"
+source_modules = ["kelpie.httpguard"]
+forbidden_modules = [
+    "kelpie.adapters",
+    "kelpie.connectors",
+    "kelpie.rules",
+    "kelpie.traces",
+    "kelpie.resources",
+    "kelpie.alerts",
+    "kelpie.remote",
+    "kelpie.app",
+    "kelpie.server",
+    "kelpie.cli",
+    "kelpie.metrics",
+    "kelpie.report",
 ]
 
 [tool.coverage.run]

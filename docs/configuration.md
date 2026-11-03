@@ -37,6 +37,7 @@ configure what exists.
 - [[alerts]](#alerts), [snoozing from the alert](#snoozing-from-the-alert)
 - [[report]](#report), [report sections](#report-sections)
 - [[agent]](#agent) and [[hub]](#hub): multi-host
+- [[server]](#server): connection guards of every listener
 - [Checks across sections](#checks-across-sections)
 
 ## How the config is read
@@ -45,8 +46,8 @@ configure what exists.
   else defaults only. Read once at startup. `--config` goes before the command:
   `kelpie --config kelpie.toml status`.
 - **Top-level sections:** `engine`, `storage`, `adapters`, `traces`, `budgets`, `prices`,
-  `spend`, `resources`, `connectors`, `block_conditions`, `alerts`, `report`. Anything else stops
-  Kelpie at startup.
+  `spend`, `resources`, `instructions`, `connectors`, `block_conditions`, `alerts`, `report`,
+  `agent`, `hub`, `snooze`, `server`. Anything else stops Kelpie at startup.
 - **Unknown keys** in any table stop Kelpie at startup with the key named. Rule names are
   checked against the plan's rule list (`kelpie.rules.PLANNED`).
 - **Optional.** Every key is optional unless marked *required*. A section that is absent is
@@ -2006,7 +2007,7 @@ the agents' relays).
 | `action_timeout` | `30s` | How long an action waits for the agent's result, and each agent's total per tick (1s–2m). |
 | `max_clock_skew` | `2m` | A report whose clock is further off is not merged, and a human is told (5s–1h). |
 | `max_body_bytes` | 16 MiB | Largest request body, also after gzip. |
-| `max_connections` | `64` | Connections not yet authenticated (8–10000; also at most 16 per address, per /64 for IPv6); each has 3s to present its token, and when all are taken the oldest is cut. |
+| `max_connections` | `64` | Connections not yet authenticated (8–10000); when all are taken the oldest is cut. Per address, the header deadline and the timeouts come from [`[server]`](#server). |
 
 `[[hub.agents]]`: one entry per machine, `name` (as in its `[agent] name`) and `token_env`
 (the variable holding its token on the server). Names and variables must be distinct, and
@@ -2015,6 +2016,30 @@ so must the tokens.
 `/metrics` gains `kelpie_agent_up{agent}` and
 `kelpie_agent_last_report_timestamp_seconds{agent}`; adapter errors on an agent are counted
 as `kelpie_adapter_errors_total{adapter="<agent>/<adapter>"}`.
+
+## [server]
+
+The connection guards of every listener of `kelpie serve`: the main port (`/v1/traces`,
+`/metrics`, `/healthz`) and the hub (`[hub] listen`), one implementation for both. A
+connection is *pending* from accept until it is admitted: an OTLP export or a hub request
+once its token checks out (before its body is read). A `GET` (`/metrics`, `/healthz`) is
+never admitted: its reply too must be written within `header_timeout`, so a client that
+asks and never reads cannot keep a slot. The defaults are safe off loopback; change them
+only when a client is known to be slower.
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `max_connections` | `64` | Pending connections on the main port at once (8–10000; the hub has `[hub] max_connections`). When all are taken, the oldest pending one is cut to make room. |
+| `max_connections_per_address` | `16` | Pending connections from one address (an IPv6 /64), on each listener (1–10000). More are closed at accept, before a thread is started. At most `max_connections` (checked against the main port's cap even when only the hub needs more); on the hub it is lowered to `[hub] max_connections` if larger. Every exporter and scraper on the Kelpie host shares `127.0.0.1`'s share, and behind a reverse proxy or NAT every client shares the proxy's; an export is pending only until its token is checked, so raise this when such a setup logs refusals. |
+| `header_timeout` | `3s` | From accept to the end of the headers (TLS handshake included on the hub) and, for a `GET`, to the end of the reply, however slowly they come; then the socket is shut down (1s–1m). A scrape that cannot read `/metrics` within it gets a cut-off reply and Prometheus records a failed scrape: raise it for a scraper on a slow or distant link. |
+| `read_timeout` | `30s` | Each socket read or write, for every connection (1s–5m). |
+| `body_timeout` | `60s` | A whole request body (read only after the token checks out, when one is configured); past it the connection is closed (an OTLP export counts as 408). Not shorter than `read_timeout`, at most 10m. |
+
+Body sizes are each endpoint's own limit: `[traces] max_body_bytes` (8 MiB) and
+`[traces] max_concurrent_requests` on the main port, `[hub] max_body_bytes` (16 MiB) on the
+hub; both are checked against `Content-Length` before the body is read, and again after
+gzip. One request per connection. Refused and cut connections are logged at most once a
+minute per address. See [security.md](security.md#listeners).
 
 ## Checks across sections
 

@@ -22,6 +22,7 @@ from kelpie.cli import main
 from kelpie.core.model import Snapshot, Span, SpanKind
 from kelpie.core.spans import MemorySpanStore, SpanStore
 from kelpie.core.storage import SqliteSpanStore
+from kelpie.httpguard import Limits
 from kelpie.metrics import Metrics
 from kelpie.server import make_server
 from kelpie.traces import otlp, semconv
@@ -265,8 +266,9 @@ def test_gzip_member_count_is_capped() -> None:
 
 def test_stalled_client_is_dropped_and_counted(tmp_path: Path) -> None:
     app = build_app(Settings(db_path=tmp_path / "k.db"), clock=lambda: NOW)
-    server = make_server("127.0.0.1", 0, app.metrics, app.ingest)
-    server.RequestHandlerClass.timeout = 0.2  # type: ignore[attr-defined]
+    server = make_server(
+        "127.0.0.1", 0, app.metrics, app.ingest, Limits(read_timeout=0.2, body_timeout=1.0)
+    )
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
@@ -282,7 +284,6 @@ def test_stalled_client_is_dropped_and_counted(tmp_path: Path) -> None:
             assert time.monotonic() < deadline
             time.sleep(0.02)
     finally:
-        server.RequestHandlerClass.timeout = 30  # type: ignore[attr-defined]
         server.shutdown()
         server.server_close()
         app.close()
@@ -291,9 +292,9 @@ def test_stalled_client_is_dropped_and_counted(tmp_path: Path) -> None:
 def test_dripping_client_hits_the_body_deadline(tmp_path: Path) -> None:
     """A byte just under the socket timeout each time still ends at the body deadline."""
     app = build_app(Settings(db_path=tmp_path / "k.db"), clock=lambda: NOW)
-    server = make_server("127.0.0.1", 0, app.metrics, app.ingest)
-    handler = server.RequestHandlerClass
-    handler.timeout, handler.body_deadline = 0.5, 0.6  # type: ignore[attr-defined]
+    server = make_server(
+        "127.0.0.1", 0, app.metrics, app.ingest, Limits(read_timeout=0.5, body_timeout=0.6)
+    )
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
@@ -317,7 +318,6 @@ def test_dripping_client_hits_the_body_deadline(tmp_path: Path) -> None:
             assert time.monotonic() < deadline
             time.sleep(0.02)
     finally:
-        handler.timeout, handler.body_deadline = 30, 60.0  # type: ignore[attr-defined]
         server.shutdown()
         server.server_close()
         app.close()
