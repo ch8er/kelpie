@@ -90,7 +90,9 @@ Waits inside sessions. With ``state_home``, each profile's ``state.db`` (Hermes'
 session store, read-only, see :mod:`kelpie.adapters.hermes.state_db`) gives the commands
 that waited inside a session (``sleep``, a CI watch, a loop over them) as
 :class:`~kelpie.core.model.SessionWait`, on the run of the task whose workspace the
-session worked in (:meth:`HermesAdapter._waits`).
+session worked in (:meth:`HermesAdapter._waits`). The same ``state.db`` gives the skills
+opened in the last 24 hours (``skill_view``) as :class:`~kelpie.core.model.SkillLoad`, for
+the instruction files' tokens a day (``Snapshot.skill_loads``).
 
 Liveness. ``Session.last_heartbeat`` is the latest of the run's ``last_heartbeat_at``, the
 task's ``last_heartbeat_at`` (when the run is the task's ``current_run_id``) and the newest
@@ -145,6 +147,7 @@ from kelpie.adapters.hermes.state_db import (
     TERMINAL_TOOL,
     Usage,
     Wait,
+    read_skill_loads,
     read_usage,
     read_waits,
 )
@@ -180,6 +183,7 @@ from kelpie.core.model import (
     Session,
     SessionUsage,
     SessionWait,
+    SkillLoad,
     Snapshot,
     Span,
     SpanKind,
@@ -228,6 +232,7 @@ HOST_READ_KEPT = timedelta(minutes=5)  # a failed read of tool runs reuses the l
 DEFAULT_HOME = Path("~/.hermes")  # Hermes' home: its profiles' state.db (state_db.py)
 DEFAULT_STATE_WINDOW = timedelta(hours=6)  # waits in sessions active this long ago
 STATE_EVERY = timedelta(minutes=1)  # state.db is read at most this often (snapshot time)
+LOADS_WINDOW = timedelta(hours=24)  # skill loads counted over this (tokens a day)
 # The workspace kinds whose directory is one task's: a session working there is the task's.
 TASK_DIR_KINDS = ("worktree", "scratch")
 
@@ -660,6 +665,10 @@ class HermesAdapter:
     _state_seen: tuple[datetime, tuple[Wait, ...], tuple[Usage, ...]] | None = field(
         default=None, init=False, repr=False, compare=False
     )
+    # the last count of skill loads (None: not counted), with its time (STATE_EVERY)
+    _loads_seen: tuple[datetime, tuple[SkillLoad, ...] | None] | None = field(
+        default=None, init=False, repr=False, compare=False
+    )
     wait_key: Path = DEFAULT_WAIT_KEY  # signs park and stop markers (park.py, stop.py)
     # When a marker is issued: Hermes records the park or stop on its own clock, and the two
     # must agree within one CLI call (a simulated farm runs both on a virtual clock).
@@ -772,8 +781,42 @@ class HermesAdapter:
             part = replace(part, sessions=sessions, resources=slots)
         if self.state_home is not None:
             waits, usage = self._state(self.state_home, now, part.sessions, rows)
-            part = replace(part, waits=waits, usage=usage)
+            part = replace(part, waits=waits, usage=usage, **self.loads(now))
         return part
+
+    def loads(self, now: datetime) -> dict[str, Any]:
+        """``Snapshot`` fields of the skills opened in the last ``LOADS_WINDOW``: the loads,
+        and this adapter in ``skill_loads_counted`` when every profile's ``state.db`` was
+        read (else none: a missing load must not read as a skill nobody opens)."""
+        if self.state_home is None:
+            return {}
+        seen = self._loads_seen
+        if seen is not None and timedelta(0) <= now - seen[0] < STATE_EVERY:
+            loads = seen[1]
+        else:
+            try:
+                found = read_skill_loads(self.state_home, now - LOADS_WINDOW, self.state_sources)
+            except Exception as exc:  # an extra: the board is read without them
+                warn_once((str(self.state_home), "loads"), "hermes: skills not counted: %s", exc)
+                found = None
+            loads = None
+            if found is not None:
+                loads = tuple(
+                    SkillLoad(
+                        skill=x.skill,
+                        at=x.at,
+                        session_id=f"hermes-session-{x.profile}-{x.session}",
+                        role=self.role_of(x.profile),
+                        source=self.name,
+                        profile=x.profile,
+                    )
+                    for x in sorted(found, key=lambda x: (x.at, x.profile, x.session))
+                    if now - LOADS_WINDOW <= x.at <= now
+                )
+            self._loads_seen = (now, loads)
+        if loads is None:
+            return {}
+        return {"skill_loads": loads, "skill_loads_counted": (self.name,)}
 
     def read_board(
         self, now: datetime, spans: tuple[Span, ...], own_spans: bool = False

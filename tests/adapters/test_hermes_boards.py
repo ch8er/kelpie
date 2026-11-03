@@ -301,3 +301,4 @@ def test_waits_in_sessions_are_read_once_over_every_board(
     (w,) = snap.waits
     assert (w.task_id, w.role, w.shape) == ("sign:t_s1", "dev", "sleep")
     assert w.session_id == next(s.id for s in snap.sessions if s.task_id == "sign:t_s1")
+    assert snap.skill_loads_counted == ("hermes",)  # the home's skill loads, once

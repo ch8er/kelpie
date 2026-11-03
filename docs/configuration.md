@@ -1303,10 +1303,26 @@ and `skills/*/SKILL.md` (on demand) in `<state_dir>/workspace` and `<state_dir>/
 A project's own `CLAUDE.md` and `.claude/skills` live in its checkout: list them under
 `[[instructions.files]]`.
 
-Tokens a day spent reading a file are its estimated tokens (characters / 4) times the
-sessions of its role (on its platform, for the defaults) that started in the last 24 hours
-(`token_basis = "sessions"`; for an on-demand file an upper bound). Counting real skill
-loads (Hermes `skill_view` calls, Claude Code skill loads) is not done yet.
+Tokens a day spent reading a file are its estimated tokens (characters / 4) times how often
+it was read in the last 24 hours, and `token_basis` says which count that is:
+
+- `loads`: a skill (`<name>/SKILL.md`, on demand) of a platform that counts skill loads, times
+  the loads of a skill of that name (with its categories, when the call named them) in the
+  profile whose files it is in, else by its role, else, for a skill every role shares, by
+  any role. Hermes counts `skill_view` calls from each profile's `state.db`
+  (`[adapters.hermes] state_home`; a view of a linked reference file is not a load), Claude
+  Code its `Skill` calls from the hook (version 2 of `hook.py` or later, a `lookback` of at
+  least 24 hours, and a spool that still holds the day: not rotated away). A plugin's skill
+  (`plugin:name`) matches none of these files. A skill nobody opened costs nothing. When a
+  platform cannot count every load (a `state.db` it cannot read, a call it cannot parse,
+  over 2,000 sessions a day in a profile), it counts none that time.
+- `sessions`, otherwise: the sessions of its role (on its platform, for the defaults) that
+  started in the last 24 hours. The cost of an always-loaded file; for an on-demand file of
+  a platform whose loads could not be counted this time (no `state.db`, one that cannot be
+  read, an older hook) an upper bound.
+
+A file listed under `[[instructions.files]]` names no platform, so it is always on
+`sessions`.
 
 ## [resources.prometheus]
 
