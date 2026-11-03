@@ -141,7 +141,7 @@ class LoopBreaker:
         actions: list[Action] = []
         index: SpanIndex | None = None
         for session in snapshot.sessions:
-            if not is_live(session, snapshot.now, self.session_stale_after):
+            if not is_live(session, snapshot.now, self.session_stale_after, snapshot.host_sleeps):
                 continue
             calls = tool_calls(snapshot.spans_for_session(session.id))
             if not calls:
@@ -392,7 +392,7 @@ class LoopBreaker:
                 for s in snapshot.sessions
                 if may_stop
                 and s.id in b.session_ids
-                and is_live(s, snapshot.now, self.session_stale_after)
+                and is_live(s, snapshot.now, self.session_stale_after, snapshot.host_sleeps)
             ]
             names = ", ".join(sorted(s.id for s in live))
             if live:

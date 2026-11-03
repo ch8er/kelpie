@@ -1,0 +1,49 @@
+id: "field-08-host-sleep-sessions-resume"
+incident: null
+title: "The host slept 47 minutes: sessions that were only asleep are left alone"
+description: >
+  A laptop running the farm and Kelpie was suspended from 11:24 to 12:11; Kelpie found it
+  from its wall clock jumping ahead of its monotonic clock (`host_sleeps`). Two minutes after
+  the wake, one session has already sent a heartbeat again and one has not yet: its last
+  sign of life is 49 minutes old on the wall clock but two minutes in awake time, so it is
+  not stale. A review session that ended without a status four minutes before the lid
+  closed had six awake minutes for its platform to record one, short of the grace period.
+  None of them is requeued. A session that ended without a status at 10:30, long before
+  the sleep, is requeued as on any day, so the rule is known to be active.
+rule: exit_contract
+config:
+  session_exit_grace: "10m"
+  session_stale_after: "30m"
+snapshot:
+  now: "2026-03-02T12:13:00+00:00"
+  owners:
+    - {id: agent-dev-1, role: developer}
+    - {id: agent-dev-2, role: developer}
+    - {id: agent-dev-4, role: developer}
+    - {id: reviewer-1, role: reviewer}
+  tasks:
+    - {id: T-F801, title: "Add CSV export", status: in_progress, status_since: "2026-03-02T11:00:00+00:00", owner_id: agent-dev-1}
+    - {id: T-F802, title: "Fix date parsing", status: in_progress, status_since: "2026-03-02T11:05:00+00:00", owner_id: agent-dev-2}
+    - {id: T-F803, title: "Review: search filters", status: review, status_since: "2026-03-02T10:40:00+00:00", owner_id: reviewer-1}
+    - {id: T-F804, title: "Bump HTTP client", status: in_progress, status_since: "2026-03-02T09:30:00+00:00", owner_id: agent-dev-4}
+  sessions:
+    # Asleep with its host; no heartbeat since the wake yet.
+    - {id: S-F801, task_id: T-F801, owner_id: agent-dev-1, started_at: "2026-03-02T11:00:00+00:00", last_heartbeat: "2026-03-02T11:23:30+00:00"}
+    # Already beating again.
+    - {id: S-F802, task_id: T-F802, owner_id: agent-dev-2, started_at: "2026-03-02T11:05:00+00:00", last_heartbeat: "2026-03-02T12:12:30+00:00"}
+    # Ended four minutes before the sleep: six awake minutes since, inside the grace period.
+    - {id: S-F803, task_id: T-F803, owner_id: reviewer-1, started_at: "2026-03-02T10:50:00+00:00", ended_at: "2026-03-02T11:20:00+00:00"}
+    # A real exit without a status, long before the sleep.
+    - {id: S-F804, task_id: T-F804, owner_id: agent-dev-4, started_at: "2026-03-02T09:30:00+00:00", ended_at: "2026-03-02T10:30:00+00:00", exit_reason: "context limit"}
+  host_sleeps:
+    - {start: "2026-03-02T11:24:00+00:00", end: "2026-03-02T12:11:00+00:00"}
+expected_actions:
+  - kind: requeue
+    task_id: T-F804
+    reason_contains: "ended at 2026-03-02 10:30 UTC (context limit) without a final status"
+    params: {session_id: S-F804}
+not_expected_actions:
+  - {kind: requeue, task_id: T-F801}
+  - {kind: requeue, task_id: T-F802}
+  - {kind: requeue, task_id: T-F803}
+  - {kind: requeue, task_id: T-F804, reason_contains: "host slept"}

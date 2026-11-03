@@ -37,6 +37,9 @@ snapshot:                    # passed verbatim to kelpie.core.serde.snapshot_fro
                              # PRs closed within the connector's lookback
   pull_requests_complete: true # the code host listed both in full (omitted: no code host)
   output_offenders: [...]    # OutputOffender: repeated huge tool outputs ([traces.outputs])
+  host_sleeps:               # HostSleep: stretches a host slept (issue #296); `agent`
+                             # names a kelpie agent, omitted for the server's own host
+    - {start: "2026-03-02T11:24:00+00:00", end: "2026-03-02T12:11:00+00:00"}
   snoozes:                   # Snooze by task id: deliberate waits (kelpie snooze, markers)
     T-101: {task_id: T-101, until: "2026-03-05T00:00:00+00:00", reason: "the release",
             by: ceo, created_at: "2026-03-01T09:00:00+00:00", source: cli,
@@ -197,6 +200,9 @@ Fixture conventions:
 | 21 | `21-standing-answers-repeated.yaml` | `instruction_bloat` | informational `alert` for the support role's near-duplicate sections and one value in four files; nothing for a small, slowly growing developer file |
 | – | `field-05-repeated-huge-outputs.yaml` | `output_offenders` | `comment` T-F502 (the latest offending task still open; T-F503 is done) addressed to human-owner (xcbeautify for `xcodebuild`, 2 days, ~179k tokens); `alert` to whoever owns the ops instructions for `tool:read_file` (no task to comment on) |
 | – | `field-07-runaway-context.yaml` | `no_progress` | `alert` for T-F701's session (190k-token context after 8 steps, +10k per step, though it commits); nothing for the session that compacted, nor for one with too few steps |
+| – | `field-08-host-sleep-sessions-resume.yaml` | `exit_contract` | the host slept 11:24–12:11: no `requeue` for a session silent since 11:23 two minutes after the wake, one beating again, or a review session that ended four minutes before the sleep (six awake minutes: inside the grace period); `requeue` T-F804, ended at 10:30, as on any day |
+| – | `field-08-host-sleep-session-died.yaml` | `exit_contract` | 34 minutes after the wake: one `requeue` T-F812 "ended while the host slept (11:24-12:11 UTC, 47 min)" with `host_slept` and `resume` (branch, commit); nothing for the session that resumed; `requeue` the other host's silent session as on any day (its host did not sleep) |
+| – | `field-08-stall-without-sleep.yaml` | `exit_contract` | negative: the same silence without a clock jump (no `host_sleeps`) → `requeue` T-F821 and the review T-F823 as today, nothing about sleep; nothing for the beating session |
 
 ## Adding a fixture
 

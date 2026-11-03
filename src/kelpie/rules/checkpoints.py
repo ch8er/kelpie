@@ -71,6 +71,7 @@ from kelpie.rules._tasks import (
     finished_parent,
     is_live,
     last_exit,
+    task_awake,
     undeclared_exit,
 )
 
@@ -104,13 +105,17 @@ class Checkpoints:
             if task.status.is_terminal:
                 continue
             sessions = snapshot.sessions_for(task.id)
-            live = [s for s in sessions if is_live(s, snapshot.now, self.session_stale_after)]
+            live = [
+                s
+                for s in sessions
+                if is_live(s, snapshot.now, self.session_stale_after, snapshot.host_sleeps)
+            ]
             for session in live:
                 actions.extend(self._remind(task, session, snapshot))
             end = None if live else last_exit(task, snapshot, self.session_stale_after)
             if end is None:
                 continue  # someone is working on it, or nobody ever did
-            age = snapshot.now - end.at
+            age = task_awake(task, end.at, snapshot)
             if age >= self.act_within:
                 # Kelpie stops acting on the exit: say once what became of the changes, unless
                 # a decision was made already (the shared once-key keeps the first).
@@ -254,7 +259,7 @@ class Checkpoints:
             return
         # A fresh worktree's HEAD is the base commit, often older than the session.
         anchor_at = max(session.last_commit_at or session.started_at, session.started_at)
-        since_commit = snapshot.now - anchor_at
+        since_commit = task_awake(task, anchor_at, snapshot)  # a host asleep commits nothing
         too_many = (session.changed_files or 0) > self.max_changed_files
         if since_commit < self._commit_every(task, session, snapshot) and not too_many:
             return

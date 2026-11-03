@@ -1,0 +1,48 @@
+id: "field-08-host-sleep-session-died"
+incident: null
+title: "The host slept 47 minutes: a session that did not come back is reported once"
+description: >
+  The same 11:24-12:11 suspend, 34 minutes after the wake. One session resumed its
+  heartbeats after the wake and is left alone. The other has sent nothing since 11:23:30:
+  past the stale bar (30 minutes) of awake time after the wake, it really died while the
+  host slept. It is requeued once, saying it ended while the host slept, with the sleep and
+  the commit and branch to resume from. A session of another host (a `kelpie agent`, whose
+  machine did not sleep) silent since 11:23 is requeued as on any day: one host's sleep
+  says nothing about another's.
+rule: exit_contract
+config:
+  session_exit_grace: "10m"
+  session_stale_after: "30m"
+snapshot:
+  now: "2026-03-02T12:45:00+00:00"
+  owners:
+    - {id: agent-dev-1, role: developer}
+    - {id: agent-dev-2, role: developer}
+    - {id: "host-b:agent-dev-5", role: developer, host: host-b}
+  tasks:
+    - {id: T-F811, title: "Add CSV export", status: in_progress, status_since: "2026-03-02T11:00:00+00:00", owner_id: agent-dev-1}
+    - {id: T-F812, title: "Fix date parsing", status: in_progress, status_since: "2026-03-02T11:05:00+00:00", owner_id: agent-dev-2}
+    - {id: "host-b:T-F815", title: "Rotate staging certificate", status: in_progress, status_since: "2026-03-02T11:00:00+00:00", owner_id: "host-b:agent-dev-5", host: host-b, source: host-b/hermes}
+  sessions:
+    # Resumed after the wake.
+    - {id: S-F811, task_id: T-F811, owner_id: agent-dev-1, started_at: "2026-03-02T11:00:00+00:00", last_heartbeat: "2026-03-02T12:44:30+00:00"}
+    # Silent since just before the sleep, never back.
+    - {id: S-F812, task_id: T-F812, owner_id: agent-dev-2, started_at: "2026-03-02T11:05:00+00:00", last_heartbeat: "2026-03-02T11:23:30+00:00", branch: task/T-F812, last_commit: a1b2c3d}
+    # Another host, awake all along, silent as long.
+    - {id: "host-b:S-F815", task_id: "host-b:T-F815", owner_id: "host-b:agent-dev-5", started_at: "2026-03-02T11:00:00+00:00", last_heartbeat: "2026-03-02T11:23:30+00:00", source: host-b/hermes}
+  host_sleeps:
+    - {start: "2026-03-02T11:24:00+00:00", end: "2026-03-02T12:11:00+00:00"}
+expected_actions:
+  - kind: requeue
+    task_id: T-F812
+    reason_contains: "ended while the host slept (11:24-12:11 UTC, 47 min)"
+    params:
+      session_id: S-F812
+      host_slept: {start: "2026-03-02T11:24:00+00:00", end: "2026-03-02T12:11:00+00:00", minutes: 47}
+      resume: {branch: task/T-F812, commit: a1b2c3d}
+  - kind: requeue
+    task_id: "host-b:T-F815"
+    reason_contains: "stopped sending heartbeats at 2026-03-02 11:23 UTC without a final status"
+not_expected_actions:
+  - {kind: requeue, task_id: T-F811}
+  - {kind: requeue, task_id: "host-b:T-F815", reason_contains: "host slept"}
