@@ -14,7 +14,8 @@ one way, a GitHub Actions workflow file, and what Kelpie would propose for it.
 | `all-kinds` | `all` | all five, most minutes first | the three that can be placed, in that order |
 
 Each `<id>.yaml` holds `id`, `waste`, `description`, the rule's `config`, `default_branch`,
-`snapshot` (format: [../incidents/README.md](../incidents/README.md)), the `workflow` text,
+`snapshot` (format: [../incidents/README.md](../incidents/README.md); `builds_from` lists
+fixtures whose builds it takes), the `workflow` text,
 and `expected`: `changes` (in the rule's order), `applied` and `left_out` (`[change, why]`).
 `<id>.diff` beside it is the exact unified diff, empty when nothing is placed. The test checks
 the diff byte for byte, twice, so a change to the rule or the renderer that moves a line

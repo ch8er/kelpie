@@ -4,7 +4,8 @@ Each fixture in ``tests/fixtures/ci_config/`` is a snapshot whose builds waste m
 way (``waste``: a :data:`kelpie.rules.ci_economy.CATEGORIES` entry, or ``all``), a workflow
 file, and the expected outcome: the changes the rule names, the ones the GitHub renderer
 places and leaves out, and the exact diff (``<id>.diff`` beside it; empty when nothing is
-placed). The diff must be the same byte for byte on every run."""
+placed); ``snapshot.builds_from`` takes the builds of the fixtures it names. The diff must
+be the same byte for byte on every run."""
 
 from __future__ import annotations
 
@@ -27,6 +28,12 @@ PATHS = sorted(FIXTURES.glob("*.yaml"))
 def load(path: Path) -> dict[str, Any]:
     data = yaml.safe_load(path.read_text())
     assert isinstance(data, dict) and data["id"] == path.stem
+    snapshot = data["snapshot"]
+    # ``builds_from``: the builds of the other fixtures named, together.
+    for other in snapshot.pop("builds_from", ()):
+        snapshot.setdefault("builds", []).extend(
+            load(FIXTURES / f"{other}.yaml")["snapshot"]["builds"]
+        )
     return data
 
 
