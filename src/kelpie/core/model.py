@@ -13,6 +13,24 @@ from enum import StrEnum
 from types import MappingProxyType
 from typing import Any, Literal
 
+# Text agents write (a task title, a comment, a block, return or exit reason, a progress
+# note) keeps at most this many characters (audit L9): a 200 KB reason would otherwise go
+# whole into the ledger, the report and ``kelpie why``.
+MAX_AGENT_TEXT = 8000  # as far as acceptance criteria and evidence are searched
+CUT_MARK = "\u2026"
+
+
+def capped(text: str, limit: int = MAX_AGENT_TEXT) -> str:
+    """``text`` cut to ``limit`` characters, the cut marked with an ellipsis."""
+    return text if len(text) <= limit else text[: limit - 1] + CUT_MARK
+
+
+def _cap(obj: object, *names: str) -> None:
+    for name in names:
+        value = getattr(obj, name)
+        if isinstance(value, str) and len(value) > MAX_AGENT_TEXT:
+            object.__setattr__(obj, name, capped(value))
+
 
 class Status(StrEnum):
     """Normalized task status. Adapters map platform statuses onto these."""
@@ -101,6 +119,9 @@ class Block:
     condition_id: str | None = None
     kelpie: KelpieMark | None = None  # set only by an adapter that verified Kelpie's marker
 
+    def __post_init__(self) -> None:
+        _cap(self, "reason")
+
 
 @dataclass(frozen=True, slots=True)
 class Return:
@@ -109,6 +130,9 @@ class Return:
     at: datetime
     reason: str
     category: str | None = None
+
+    def __post_init__(self) -> None:
+        _cap(self, "reason")
 
 
 @dataclass(frozen=True, slots=True)
@@ -121,6 +145,9 @@ class Comment:
     text: str
     at: datetime
     human: bool = False
+
+    def __post_init__(self) -> None:
+        _cap(self, "text")
 
 
 @dataclass(frozen=True, slots=True)
@@ -182,6 +209,9 @@ class Task:
             elif prefix and prefix == self.board:
                 return None  # a board's task always carries its board's prefix
         return None if rest == self.id else rest
+
+    def __post_init__(self) -> None:
+        _cap(self, "title")
 
 
 class ResourceKind(StrEnum):
@@ -267,6 +297,9 @@ class Session:
     # (an adapter must not set it for every call; open TOOL spans are every call).
     running_tool: str | None = None
     running_tool_since: datetime | None = None
+
+    def __post_init__(self) -> None:
+        _cap(self, "exit_reason", "summary")
 
 
 # Lower bounds of the buckets a wait inside a session is kept in (SessionWait.waited).

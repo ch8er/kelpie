@@ -68,6 +68,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
   agent; host sleeps an agent reports are kept only when they ended and at most 64 per
   agent. One agent cannot grow the hub's executors, series, alerts or memory this way (audit M6, [#327](https://github.com/ch8er/kelpie/pull/327)).
 
+
+- Agent text is bounded: task titles, comments, block, return and exit reasons and
+  progress notes keep their first 8000 characters, and the ledger stores at most 16,000 of
+  an action's reason and cuts long params (audit L9); role and pre-work status labels on
+  `/metrics` are cut to 64 characters and the 33rd role on is summed under `other` (audit
+  L10) ([#329](https://github.com/ch8er/kelpie/pull/329)).
+
 ## [0.1.0a1] - 2026-11-03
 
 First public pre-release, an alpha: interfaces and configuration keys may still

@@ -72,7 +72,29 @@ still keeps its tasks out of the rules but is only counted, once per report
 (`kind="board"`), with no alert of its own. A fixed list was chosen over "the first names an agent reports": it holds
 across hub restarts and gives an agent no first report to abuse. Host sleeps an agent
 reports are kept only when they ended before its report, and at most 64 per agent. Role
-names on `/metrics` come from the agents' boards too; they are not bounded yet (audit L10).
+names on `/metrics` come from the agents' boards too; they are bounded too ([Text from agents](#text-from-agents), audit L10).
+
+## Text from agents
+
+Task titles, comments, block reasons, return reasons, exit reasons, progress notes and
+role names come from the agents and may be as long as they like. Kelpie keeps the first
+8000 characters of each title, comment, reason and note (as far as acceptance criteria and
+evidence are searched; cut with "…") wherever it reads them, from a board, a spool or a
+`kelpie agent` report. In a reason it cut, a quote left open counts as quoted to the end,
+so a cut never turns a quoted `until:` into a snooze marker. In the ledger it stores at
+most 16,000 characters of an action's reason and executor detail and of an alert's
+summary; an action's params over 32,000 characters of JSON have each text cut to 500, and
+when that is not enough only their numbers, flags and short texts are kept, with
+`"truncated": true`. A huge reason
+cannot swell the ledger, the daily report or `kelpie why` (audit L9). Task descriptions
+(`body`) are not cut: their acceptance criteria are read whole.
+
+On `/metrics` a role label is cut to 64 characters, and only the first 32 roles Kelpie sees
+(since it started) get series of their own; later ones are summed under the role `other`
+(with a role really named `other`), so the series stay bounded however many roles agents
+make up (audit L10). `unknown` and the configured `[report] review_roles` never need a
+place. A farm with more than 32 roles sees the later ones as `other` until `kelpie serve`
+restarts. A pre-work platform status label is cut to 64 characters too.
 
 ## Files Kelpie writes
 

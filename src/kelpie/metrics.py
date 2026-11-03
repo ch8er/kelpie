@@ -60,6 +60,12 @@ def _on(board: BoardKey, **labels: str) -> str:
 MAX_TASK_SERIES = 20
 MAX_PREWORK_SERIES = 10  # pre-work statuses exported (platform statuses are config data)
 MAX_SLOT_POOLS = 20  # tool slot pools exported (pools are config data)
+# Role labels come from the boards (and a hub's agents): at most this many roles, first seen
+# first, each cut to MAX_ROLE_CHARS; the rest are summed under OTHER_ROLE (audit L10).
+MAX_ROLES = 32
+MAX_ROLE_CHARS = 64
+OTHER_ROLE = "other"  # a real role of that name is summed with them
+MAX_STATUS_CHARS = 64  # a pre-work platform status label, cut the same way
 
 
 def _bounded(statuses: Iterable[BudgetStatus]) -> tuple[BudgetStatus, ...]:
@@ -118,6 +124,7 @@ class Metrics:
         self.stages: Counter[tuple[str, str, BoardKey]] = Counter()  # (stage, role, board)
         # with boards: (board, role) -> (done, returns, reopened) over the last 24h
         self.board_roles: dict[tuple[str, str], tuple[int, int, int]] = {}
+        self._role_labels: dict[str, str] = {}  # role -> its label; see MAX_ROLES
         self.fleet_seen = False
         self.dry_run = True
         self.rules: list[tuple[str, str, bool]] = []  # (name, mode, implemented)
@@ -463,7 +470,7 @@ class Metrics:
         for t in snapshot.tasks:
             if t.prework:
                 age = (snapshot.now - t.status_since).total_seconds()
-                key = (of_board[t.id], t.platform_status or "unknown")
+                key = (of_board[t.id], (t.platform_status or "unknown")[:MAX_STATUS_CHARS])
                 prework.setdefault(key, []).append(age)
         shown: dict[BoardKey, int] = {}  # series kept per board: one never crowds out another
         self.prework = {}
@@ -479,8 +486,48 @@ class Metrics:
                 held[holder] = held.get(holder, 0) + int(r.used)
         self.slots = dict(sorted(slots.items())[:MAX_SLOT_POOLS])
         loads = role_loads(snapshot)
-        self.idle_agents = Counter({r: len(load.idle) for r, load in loads.items()})
+        idle: Counter[str] = Counter()
+        for r, load in loads.items():
+            idle[self._role(r)] += len(load.idle)
+        self.idle_agents = idle
         self._throughput(snapshot, loads, of_board, boards)
+        self._fold_roles()
+
+    def _role(self, role: str) -> str:
+        """The label of ``role``: itself (cut to MAX_ROLE_CHARS) for the first MAX_ROLES
+        roles seen, OTHER_ROLE for later ones, so agents cannot grow /metrics."""
+        label = self._role_labels.get(role)
+        if label is None and (role == UNKNOWN_ROLE or role in self.review_roles):
+            return role[:MAX_ROLE_CHARS]  # Kelpie's own and configured roles take no slot
+        if role == OTHER_ROLE:
+            return OTHER_ROLE  # takes no slot of its own
+        if label is None:
+            known = len(self._role_labels) < MAX_ROLES
+            label = role[:MAX_ROLE_CHARS] if known and role != OTHER_ROLE else OTHER_ROLE
+            if known:
+                self._role_labels[role] = label
+        return label
+
+    def _fold_roles(self) -> None:
+        """Sum the per-role series of this tick under their labels (:meth:`_role`)."""
+        stages: Counter[tuple[str, str, BoardKey]] = Counter()
+        for (stage, role, board), n in self.stages.items():
+            stages[(stage, self._role(role), board)] += n
+        self.stages = stages
+        roles: dict[str, RoleGauges] = {}
+        for role, g in self.roles.items():
+            label = self._role(role)
+            had = roles.get(label)
+            roles[label] = (
+                g if had is None else RoleGauges(*(a + b for a, b in zip(had, g, strict=True)))
+            )
+        self.roles = dict(sorted(roles.items()))
+        board_roles: dict[tuple[str, str], tuple[int, int, int]] = {}
+        for (board, role), v in self.board_roles.items():
+            key = (board, self._role(role))
+            had3 = board_roles.get(key, (0, 0, 0))
+            board_roles[key] = (had3[0] + v[0], had3[1] + v[1], had3[2] + v[2])
+        self.board_roles = board_roles
 
     def _throughput(
         self,

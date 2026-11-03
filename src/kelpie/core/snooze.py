@@ -37,7 +37,7 @@ from typing import Any
 from kelpie.core.actions import ActionKind
 from kelpie.core.config import Mode
 from kelpie.core.ledger import LedgerEntry, Outcome, to_json
-from kelpie.core.model import Snapshot, Snooze, Task
+from kelpie.core.model import CUT_MARK, MAX_AGENT_TEXT, Snapshot, Snooze, Task
 from kelpie.core.serde import parse_duration
 
 DEFAULT_MAX_DAYS = 90  # how far ahead a snooze may reach, unless [snooze] max_days says less
@@ -56,6 +56,11 @@ _DATETIME = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2})?(?:Z|[+-]\d{2}:
 _MARKER = re.compile(r"(?<![\w:/.-])until:(\S+)", re.IGNORECASE)
 _TRAILING = ".,;:!?)]}>'\"\u2019\u201d"  # punctuation a sentence puts after the marker
 _QUOTED = re.compile('"[^"]*"|\u201c[^\u201d]*\u201d|\u2018[^\u2019]*\u2019|`[^`]*`')
+# In a reason Kelpie cut (MAX_AGENT_TEXT, audit L9) a quote left open runs to the end: the
+# cut may have dropped its closing quote, and what follows is still someone else's words.
+_QUOTED_CUT = re.compile(
+    '"[^"]*(?:"|$)|\u201c[^\u201d]*(?:\u201d|$)|\u2018[^\u2019]*(?:\u2019|$)|`[^`]*(?:`|$)'
+)
 _DURATION = re.compile(r"(?:\d+[dhms])+")
 
 
@@ -223,7 +228,8 @@ def _marker_time(token: str, tz: tzinfo) -> datetime | None:
 
 def _markers(reason: str, tz: tzinfo) -> tuple[tuple[datetime, str] | None, tuple[str, ...]]:
     """The latest valid marker (its time and its token as written) and the invalid tokens."""
-    text = _QUOTED.sub(" ", reason)
+    cut = len(reason) == MAX_AGENT_TEXT and reason.endswith(CUT_MARK)
+    text = (_QUOTED_CUT if cut else _QUOTED).sub(" ", reason)
     latest: tuple[datetime, str] | None = None
     invalid: list[str] = []
     for m in _MARKER.finditer(text):

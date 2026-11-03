@@ -19,7 +19,7 @@ import threading
 from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
-from typing import NamedTuple, cast
+from typing import Any, NamedTuple, cast
 
 from kelpie.core.actions import ActionKind, Severity
 from kelpie.core.config import Mode
@@ -33,6 +33,7 @@ from kelpie.core.model import (
     Span,
     SpanKind,
     SpanTotals,
+    capped,
 )
 from kelpie.core.snooze import EXPIRED_KEPT, MAX_BY, MAX_REASON, PRUNE_AFTER
 from kelpie.core.spans import (
@@ -243,6 +244,14 @@ MIGRATIONS: dict[int, str] = {
     1: _V1, 2: _V2, 3: _V3, 4: _V4, 5: _V5, 6: _V6, 7: _V7, 8: _V8, 9: _V9, 10: _V10,
 }  # fmt: skip
 SCHEMA_VERSION = max(MIGRATIONS)
+# Characters of an action's reason, its executor's detail and an alert state's summary
+# that are stored (audit L9): rules quote agent text, capped itself at MAX_AGENT_TEXT.
+MAX_STORED_TEXT = 16_000
+# An action's params as stored, in JSON characters: rules copy agent text into them (the
+# review returns of a ping-pong escalation). Over it each text is cut to MAX_PARAM_TEXT;
+# still over it, only {"truncated": true} is stored.
+MAX_STORED_PARAMS = 32_000
+MAX_PARAM_TEXT = 500
 
 _COLUMNS = (
     "at, fingerprint, subject, rule, kind, mode, outcome, reason, task_id, executor,"
@@ -398,7 +407,7 @@ class SqliteLedgerStore:
             _ts(state.last_seen),
             state.level,
             str(state.severity),
-            state.summary,
+            capped(state.summary, MAX_STORED_TEXT),
             state.key,
             str(state.mode),
         )
@@ -530,6 +539,37 @@ def _insert_snooze(db: sqlite3.Connection, snooze: Snooze) -> sqlite3.Cursor:
     )
 
 
+def _stored_params(params: Mapping[str, Any]) -> str:
+    """``params`` as stored: whole up to MAX_STORED_PARAMS, else with every text cut."""
+    text = to_json(params)
+    if len(text) <= MAX_STORED_PARAMS:
+        return text
+    text = to_json(_cut_texts(params))
+    if len(text) <= MAX_STORED_PARAMS:
+        return text
+    # Still too long (long id lists): keep the top-level scalars and short texts, which
+    # readers key on (observe_only, state, folded_under, ...), and drop the rest.
+    kept = {
+        capped(str(k), MAX_PARAM_TEXT): v
+        for k, v in params.items()
+        if v is None
+        or isinstance(v, bool | int | float)
+        or (isinstance(v, str) and len(v) <= MAX_PARAM_TEXT)
+    }
+    text = to_json({**kept, "truncated": True})
+    return text if len(text) <= MAX_STORED_PARAMS else to_json({"truncated": True})
+
+
+def _cut_texts(value: Any) -> Any:
+    if isinstance(value, str):
+        return capped(value, MAX_PARAM_TEXT)
+    if isinstance(value, Mapping):
+        return {capped(str(k), MAX_PARAM_TEXT): _cut_texts(v) for k, v in value.items()}
+    if isinstance(value, list | tuple):
+        return [_cut_texts(v) for v in value]
+    return value
+
+
 def _insert_entry(db: sqlite3.Connection, entry: LedgerEntry) -> sqlite3.Cursor:
     """Append ``entry`` to the action ledger."""
     values = (
@@ -540,13 +580,13 @@ def _insert_entry(db: sqlite3.Connection, entry: LedgerEntry) -> sqlite3.Cursor:
         entry.kind,
         entry.mode,
         entry.outcome,
-        entry.reason,
+        capped(entry.reason, MAX_STORED_TEXT),
         entry.task_id,
         entry.executor,
-        to_json(entry.params),
+        _stored_params(entry.params),
         entry.suppressed,
         entry.suppression,
-        entry.detail,
+        None if entry.detail is None else capped(entry.detail, MAX_STORED_TEXT),
     )
     sql = f"INSERT INTO actions ({_COLUMNS}) VALUES ({', '.join('?' * len(values))})"
     return db.execute(sql, values)
