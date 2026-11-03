@@ -11,7 +11,7 @@ itself ([runbook](runbook.md)). With docker compose both are provisioned for you
 
 | Row | Shows |
 | --- | --- |
-| Health | ledger, dry run, last tick age, tick failures and duration, adapter, rule and connector errors |
+| Health | ledger, dry run, last tick age, budget data stale, span store errors, ticks and their duration, adapter, rule and connector errors |
 | Hosts | Kelpie's version and uptime; with `kelpie agent` hosts, which are up and how old their last report is |
 | Actions, Open states | actions per rule, kind and outcome; the loaded rules and their modes; open alert states |
 | Tasks & agents, Throughput | tasks by status and stage, idle agents, cards before work, done per hour, returns and reopened tasks per role |
@@ -27,8 +27,9 @@ Rows of features you have not configured stay empty. The variables at the top fi
 
 ## Without docker compose
 
-Three things differ from the compose setup: Prometheus scrapes Kelpie at `127.0.0.1:9464`
-rather than `kelpie:9464`, Grafana's data source points at `http://127.0.0.1:9090` rather
+Four things differ from the compose setup: Prometheus scrapes Kelpie at `127.0.0.1:9464`
+rather than `kelpie:9464` and reads the rules from the clone rather than
+`/etc/prometheus/rules/`, Grafana's data source points at `http://127.0.0.1:9090` rather
 than `http://prometheus:9090`, and the dashboard is loaded from wherever you keep the
 repository rather than `/var/lib/grafana/dashboards`. Make local copies with those changes
 and leave the committed files as they are. Everything stays on `127.0.0.1`.
@@ -60,7 +61,8 @@ umask 077 && openssl rand -base64 24 > "$KELPIE_MON/grafana-admin-password"
 ```
 
 Point Homebrew's Prometheus at the copy. Its flags are in
-`$(brew --prefix)/etc/prometheus.args`; keep one flag per line:
+`$(brew --prefix)/etc/prometheus.args` (the service splits it on whitespace, so the paths
+must not contain spaces):
 
 ```text
 --config.file=/Users/you/.config/kelpie-monitoring/prometheus.yml
@@ -102,9 +104,15 @@ curl -s http://127.0.0.1:9090/api/v1/targets | grep -o '"health":"[a-z]*"'   # k
 ```
 
 `admin_password` only takes effect when Grafana creates its database. If Grafana ran
-before, change the password with
-`grafana cli --homepath "$(brew --prefix)/opt/grafana/share/grafana" admin reset-admin-password`
-or in the UI.
+before, change the password in the UI, or reset it in the database the service uses (its
+data path is set on the service's command line, not in `grafana.ini`):
+
+```bash
+grafana cli --homepath "$(brew --prefix)/opt/grafana/share/grafana" \
+  --config "$(brew --prefix)/etc/grafana/grafana.ini" \
+  --configOverrides cfg:default.paths.data="$(brew --prefix)/var/lib/grafana" \
+  admin reset-admin-password --password-from-stdin < "$KELPIE_MON/grafana-admin-password"
+```
 
 ### Linux packages
 
@@ -126,30 +134,43 @@ its API reads every metric, including task and budget names.
 
 ## The screenshot
 
-`docs/assets/dashboard.png` is the dashboard over the simulated farm's day from
-`kelpie demo`: synthetic tasks, agents and repository only. To make it again, on a machine
-with Prometheus (its `promtool`), Grafana and Playwright for Python:
+The screenshot is the dashboard over the simulated farm's day from `kelpie demo`: synthetic
+tasks, agents and repository only. It is made with a throwaway Prometheus and Grafana on
+ports of their own (9091 and 3001), so a Prometheus or Grafana you already run, with your
+farm's data, is never the one captured. You need Prometheus (with `promtool`), Grafana
+and Playwright for Python:
 
 ```bash
 cd ~/src/kelpie
-WORK=$(mktemp -d)
+WORK=$(mktemp -d) && mkdir -p "$WORK"/provisioning/{datasources,dashboards}
 uv run python scripts/demo_metrics.py "$WORK/demo.om"     # the demo's day as metrics
 promtool tsdb create-blocks-from openmetrics "$WORK/demo.om" "$WORK/data"
 printf 'global:\n  scrape_interval: 30s\nscrape_configs: []\n' > "$WORK/prometheus.yml"
 prometheus --config.file="$WORK/prometheus.yml" --storage.tsdb.path="$WORK/data" \
-  --storage.tsdb.retention.time=10y --web.listen-address=127.0.0.1:9090 &
+  --storage.tsdb.retention.time=10y --web.listen-address=127.0.0.1:9091 &
+sleep 3 && curl -sf http://127.0.0.1:9091/-/ready     # must answer before going on
+
+sed 's|http://prometheus:9090|http://127.0.0.1:9091|' \
+  deploy/grafana/provisioning/datasources/prometheus.yml > "$WORK/provisioning/datasources/p.yml"
+sed "s|/var/lib/grafana/dashboards|$PWD/deploy/grafana/dashboards|" \
+  deploy/grafana/provisioning/dashboards/kelpie.yml > "$WORK/provisioning/dashboards/k.yml"
+(umask 077 && openssl rand -base64 24 > "$WORK/password")
+GF_PATHS_DATA="$WORK/grafana" GF_PATHS_PROVISIONING="$WORK/provisioning" \
+GF_SERVER_HTTP_ADDR=127.0.0.1 GF_SERVER_HTTP_PORT=3001 GF_AUTH_ANONYMOUS_ENABLED=false \
+GF_SECURITY_ADMIN_PASSWORD__FILE="$WORK/password" \
+  grafana server --homepath "$(brew --prefix)/opt/grafana/share/grafana" &
+# On Linux: --homepath /usr/share/grafana (packages) or the unpacked release folder.
 ```
 
-Run Grafana as above (127.0.0.1, anonymous access off), then log in and capture the
-dashboard over the demo's day (8:00 to 16:30 UTC on 3 March 2026), here with
-`GRAFANA_ADMIN_PASSWORD` set from the password file:
+Then log in and capture the dashboard over the demo's day (8:00 to 18:00 UTC on 3 March
+2026), with `GRAFANA_ADMIN_PASSWORD="$(cat "$WORK/password")"`:
 
 ```python
 from playwright.sync_api import sync_playwright
 import os
 
-URL = "http://127.0.0.1:3000"
-DAY = "from=2026-03-03T07:50:00.000Z&to=2026-03-03T16:30:00.000Z&timezone=utc"
+URL = "http://127.0.0.1:3001"
+DAY = "from=2026-03-03T08:00:00.000Z&to=2026-03-03T18:00:00.000Z&timezone=utc"
 with sync_playwright() as p:
     # Grafana scrolls inside the page: a tall viewport rather than full_page.
     page = p.chromium.launch().new_page(viewport={"width": 1600, "height": 2400})
@@ -157,10 +178,11 @@ with sync_playwright() as p:
     page.fill("input[name=user]", "admin")
     page.fill("input[name=password]", os.environ["GRAFANA_ADMIN_PASSWORD"])
     page.click("button[type=submit]")
+    page.wait_for_url(lambda url: "/login" not in url)  # the login request has finished
     page.goto(f"{URL}/d/kelpie-overview/kelpie?orgId=1&{DAY}&kiosk")
     page.wait_for_timeout(8000)  # let the panels query
     page.screenshot(path="docs/assets/dashboard.png")
 ```
 
 Look at the image before committing it: it must show no host, path or name of a real
-farm. Stop both processes and remove `$WORK` afterwards.
+farm. Stop both processes (`kill %1 %2`) and remove `$WORK` afterwards.

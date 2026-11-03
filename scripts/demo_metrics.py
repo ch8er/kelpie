@@ -38,6 +38,8 @@ def record() -> list[tuple[datetime, str]]:
     taken: list[tuple[datetime, str]] = []
 
     def tick(farm: DemoFarm) -> list[Dispatched]:
+        # ControlLoop.tick_once (src/kelpie/app.py) without its failure branch, keeping the
+        # results the story reads; follow it when it changes.
         assert farm.app is not None
         loop = farm.app.loop
         snapshots: list[Snapshot] = []
@@ -85,9 +87,11 @@ def openmetrics(taken: list[tuple[datetime, str]]) -> str:
             times.append(t)
             t += SCRAPE
         for line in text.splitlines():
-            match = SAMPLE.match(line)
-            if line.startswith("#") or not match:
+            if line.startswith("#") or not line:
                 continue
+            match = SAMPLE.match(line)
+            if not match:
+                raise ValueError(f"not a sample line: {line!r}")
             name, labels, value = match.groups()
             label_text = f"{labels},{LABELS}" if labels else LABELS
             for t in times:
