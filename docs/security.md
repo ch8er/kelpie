@@ -78,12 +78,14 @@ names on `/metrics` come from the agents' boards too; they are bounded too ([Tex
 
 Task titles, comments, block reasons, return reasons, exit reasons, progress notes and
 role names come from the agents and may be as long as they like. Kelpie keeps the first
-4000 characters of each title, comment, reason and note (cut with "…") wherever it reads
-them, from a board, a spool or a `kelpie agent` report. A quote the cut leaves open counts
-as quoted to the end, so a cut never turns a quoted `until:` into a snooze marker. In the
-ledger it stores at most 8000 characters of an action's reason and executor detail and of
-an alert's summary; an action's params over 32,000 characters of JSON have each text cut
-to 500, and when that is not enough only `{"truncated": true}` is kept. A huge reason
+8000 characters of each title, comment, reason and note (as far as acceptance criteria and
+evidence are searched; cut with "…") wherever it reads them, from a board, a spool or a
+`kelpie agent` report. In a reason it cut, a quote left open counts as quoted to the end,
+so a cut never turns a quoted `until:` into a snooze marker. In the ledger it stores at
+most 16,000 characters of an action's reason and executor detail and of an alert's
+summary; an action's params over 32,000 characters of JSON have each text cut to 500, and
+when that is not enough only their numbers, flags and short texts are kept, with
+`"truncated": true`. A huge reason
 cannot swell the ledger, the daily report or `kelpie why` (audit L9). Task descriptions
 (`body`) are not cut: their acceptance criteria are read whole.
 

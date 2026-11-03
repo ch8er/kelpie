@@ -246,7 +246,7 @@ MIGRATIONS: dict[int, str] = {
 SCHEMA_VERSION = max(MIGRATIONS)
 # Characters of an action's reason, its executor's detail and an alert state's summary
 # that are stored (audit L9): rules quote agent text, capped itself at MAX_AGENT_TEXT.
-MAX_STORED_TEXT = 8000
+MAX_STORED_TEXT = 16_000
 # An action's params as stored, in JSON characters: rules copy agent text into them (the
 # review returns of a ping-pong escalation). Over it each text is cut to MAX_PARAM_TEXT;
 # still over it, only {"truncated": true} is stored.
@@ -545,6 +545,18 @@ def _stored_params(params: Mapping[str, Any]) -> str:
     if len(text) <= MAX_STORED_PARAMS:
         return text
     text = to_json(_cut_texts(params))
+    if len(text) <= MAX_STORED_PARAMS:
+        return text
+    # Still too long (long id lists): keep the top-level scalars and short texts, which
+    # readers key on (observe_only, state, folded_under, ...), and drop the rest.
+    kept = {
+        capped(str(k), MAX_PARAM_TEXT): v
+        for k, v in params.items()
+        if v is None
+        or isinstance(v, bool | int | float)
+        or (isinstance(v, str) and len(v) <= MAX_PARAM_TEXT)
+    }
+    text = to_json({**kept, "truncated": True})
     return text if len(text) <= MAX_STORED_PARAMS else to_json({"truncated": True})
 
 
@@ -552,7 +564,7 @@ def _cut_texts(value: Any) -> Any:
     if isinstance(value, str):
         return capped(value, MAX_PARAM_TEXT)
     if isinstance(value, Mapping):
-        return {k: _cut_texts(v) for k, v in value.items()}
+        return {capped(str(k), MAX_PARAM_TEXT): _cut_texts(v) for k, v in value.items()}
     if isinstance(value, list | tuple):
         return [_cut_texts(v) for v in value]
     return value

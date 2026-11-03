@@ -63,10 +63,29 @@ def test_a_cut_cannot_turn_a_quoted_marker_into_a_live_one() -> None:
     """The cut may drop a closing quote; what follows the opening one stays quoted."""
     from kelpie.core.snooze import parse_marker
 
-    raw = 'waiting on build. "copied error: until:2026-11-20 ' + "x" * 5000 + '"'
+    raw = 'waiting on build. "copied error: until:2026-11-20 ' + "x" * 9000 + '"'
     assert parse_marker(raw) == (None, ())
     assert parse_marker(Block(raw, NOW).reason) == (None, ())
     assert parse_marker("blocked until:2026-11-20")[0] is not None  # unquoted still counts
+
+
+def test_a_stray_quote_in_an_uncut_reason_hides_no_marker() -> None:
+    from kelpie.core.snooze import parse_marker
+
+    for reason in (
+        'Waiting on 27" monitor until:2026-11-10',
+        "run `make until:2026-11-10",
+        "\u201890s hardware until:2026-11-10",
+        'said "ok" and "maybe until:2026-11-10',
+    ):
+        assert parse_marker(reason)[0] is not None, reason
+
+
+def test_comments_and_notes_keep_what_acceptance_checks_read() -> None:
+    """Criteria and evidence are searched in the first 8000 characters of a text."""
+    from kelpie.rules._acceptance import MAX_TEXT
+
+    assert MAX_TEXT <= MAX_AGENT_TEXT
 
 
 def test_the_ledger_cuts_agent_text_in_params(tmp_path: Path) -> None:
@@ -90,11 +109,17 @@ def test_the_ledger_cuts_agent_text_in_params(tmp_path: Path) -> None:
 
     returns = [{"reason": "y" * 4000, "at": "2026-11-03"} for _ in range(40)]
     store.append(entry("a", {"returns": returns, "rounds": 40}))
-    store.append(entry("b", {"returns": [{"reason": "z"}] * 5000}))
+    store.append(
+        entry(
+            "b",
+            {"returns": [{"reason": "z"}] * 5000, "observe_only": True, "state": "s", "n": 3},
+        )
+    )
     store.append(entry("c", {"rounds": 3}))
     got = {e.fingerprint: e.params for e in store.since(NOW - timedelta(hours=1))}
     assert got["a"]["rounds"] == 40 and len(got["a"]["returns"]) == 40
     assert all(len(r["reason"]) == MAX_PARAM_TEXT for r in got["a"]["returns"])
-    assert got["b"] == {"truncated": True}  # still too large once every text is cut
+    # still too large once every text is cut: the scalars readers key on are kept
+    assert got["b"] == {"observe_only": True, "state": "s", "n": 3, "truncated": True}
     assert got["c"] == {"rounds": 3}
     assert MAX_STORED_PARAMS > 1000

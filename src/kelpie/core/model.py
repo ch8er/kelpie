@@ -16,12 +16,13 @@ from typing import Any, Literal
 # Text agents write (a task title, a comment, a block, return or exit reason, a progress
 # note) keeps at most this many characters (audit L9): a 200 KB reason would otherwise go
 # whole into the ledger, the report and ``kelpie why``.
-MAX_AGENT_TEXT = 4000
+MAX_AGENT_TEXT = 8000  # as far as acceptance criteria and evidence are searched
+CUT_MARK = "\u2026"
 
 
 def capped(text: str, limit: int = MAX_AGENT_TEXT) -> str:
     """``text`` cut to ``limit`` characters, the cut marked with an ellipsis."""
-    return text if len(text) <= limit else text[: limit - 1] + "\u2026"
+    return text if len(text) <= limit else text[: limit - 1] + CUT_MARK
 
 
 def _cap(obj: object, *names: str) -> None:

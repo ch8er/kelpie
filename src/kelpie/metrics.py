@@ -499,6 +499,8 @@ class Metrics:
         label = self._role_labels.get(role)
         if label is None and (role == UNKNOWN_ROLE or role in self.review_roles):
             return role[:MAX_ROLE_CHARS]  # Kelpie's own and configured roles take no slot
+        if role == OTHER_ROLE:
+            return OTHER_ROLE  # takes no slot of its own
         if label is None:
             known = len(self._role_labels) < MAX_ROLES
             label = role[:MAX_ROLE_CHARS] if known and role != OTHER_ROLE else OTHER_ROLE
