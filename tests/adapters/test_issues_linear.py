@@ -1217,3 +1217,76 @@ def test_tick_budget_is_configured_and_bounded() -> None:
     for bad in ("0s", "2m"):
         with pytest.raises(ValueError, match="tick_budget"):
             load_linear({**base, "tick_budget": bad})
+
+
+def test_a_request_cut_short_by_the_budget_is_no_fault_of_linear(lin: FakeLinear) -> None:
+    """A timeout on a request that only had the refresh's last moments is the budget: no
+    back-off, which would defer the actions' writes for a minute."""
+    from kelpie import net
+
+    client = LinearClient(lin.url, KEY, timeout=timedelta(seconds=10))
+
+    def timed_out(*a: Any, **k: Any) -> Any:
+        raise net.RequestError("timeout", "timed out")
+
+    client.post = timed_out
+    client.monotonic = lambda: 100.0
+    client.read_deadline = 100.2
+    with pytest.raises(LinearError) as exc:
+        client.query("KelpieTeams", TEAMS_QUERY, {"keys": ["ENG"]})
+    assert exc.value.kind == "budget" and not client.backing_off()
+    client.read_deadline = None  # a full-length request that times out is Linear's
+    with pytest.raises(LinearError) as exc:
+        client.query("KelpieTeams", TEAMS_QUERY, {"keys": ["ENG"]})
+    assert exc.value.kind == "network" and client.backing_off()
+
+
+def test_a_refresh_deadline_never_reaches_writes_or_another_thread(lin: FakeLinear) -> None:
+    """Under kelpie agent, actions run on another thread than the reads."""
+    import threading
+
+    lin.issue("ENG-1", "one", ago(days=1))
+    a = adapter(lin)
+    reader = a.tracker
+    assert isinstance(reader, LinearIssues)
+    tasks(a)
+    timeouts: list[float] = []
+    real_post = reader.client.post
+    reader.client.post = lambda *x, **k: timeouts.append(x[4]) or real_post(*x, **k)
+    reader.client.read_deadline = reader.client.monotonic() - 1  # spent, on this thread
+    seen: list[float | None] = []
+    t = threading.Thread(target=lambda: seen.append(reader.client.read_deadline))
+    t.start()
+    t.join()
+    assert seen == [None]
+    reader.fetch("ENG-1")  # the re-check before a write
+    reader.reserve(1)
+    reader.comment("ENG-1", "hello")
+    assert lin.issues["ENG-1"].comments == ["hello"]
+    assert timeouts and all(t == 10.0 for t in timeouts)
+    assert reader.client.read_deadline is not None  # put back after each
+
+
+def test_each_refresh_starts_with_the_next_team(lin: FakeLinear) -> None:
+    lin.team("OPS")
+    boards = (Board("ENG"), Board("OPS"))
+    a = adapter(lin, boards)
+    reader = a.tracker
+    assert isinstance(reader, LinearIssues)
+    firsts: list[str] = []
+    real_post = reader.client.post
+
+    def post(*x: Any, **k: Any) -> Any:
+        body = x[3].decode()
+        if "KelpieIssues" in body and len(firsts) < 3:
+            firsts.append("ENG" if '"ENG"' in body else "OPS")
+        return real_post(*x, **k)
+
+    reader.client.post = post
+    started: list[str] = []
+    for _ in range(2):
+        reader._next = None
+        firsts.clear()
+        tasks(a)
+        started.append(firsts[0])
+    assert sorted(started) == ["ENG", "OPS"]

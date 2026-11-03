@@ -51,6 +51,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import threading
 import time
 import urllib.parse
 from collections.abc import Callable, Mapping, Sequence
@@ -250,11 +251,22 @@ class LinearClient:
     requests_made: int = 0  # since the client was made
     # Until when the hour_* figures hold: their reset, at most LIMITS_TTL after they came.
     limits_until: datetime | None = None
-    # The end of this refresh's reads (``monotonic`` seconds); None: no refresh running.
-    read_deadline: float | None = None
     monotonic: Callable[[], float] = field(default=time.monotonic, repr=False)
     post: Callable[..., net.Response] = field(default=net.post, repr=False)
     _path: str = field(default="/", init=False, repr=False)
+    # Per thread: under ``kelpie agent`` actions run on another thread than the reads, and a
+    # refresh's deadline must not cut their writes short.
+    _local: threading.local = field(default_factory=threading.local, init=False, repr=False)
+
+    @property
+    def read_deadline(self) -> float | None:
+        """The end of this thread's refresh (``monotonic`` seconds); None: not in a refresh."""
+        deadline: float | None = getattr(self._local, "deadline", None)
+        return deadline
+
+    @read_deadline.setter
+    def read_deadline(self, value: float | None) -> None:
+        self._local.deadline = value
 
     def __post_init__(self) -> None:
         self.api_url = check_api_url(self.api_url)
@@ -294,9 +306,9 @@ class LinearClient:
             raise LinearError("backoff", f"{op}: backing off")
         if read and not self.may_read():
             raise LinearError("reserve", f"{op}: the rest of the hour's limit is kept for writes")
-        timeout = self.timeout.total_seconds()
-        if self.read_deadline is not None:
-            left = self.read_deadline - self.monotonic()
+        timeout = full = self.timeout.total_seconds()
+        if (deadline := self.read_deadline) is not None:
+            left = deadline - self.monotonic()
             if left <= 0:
                 raise LinearError("budget", f"{op}: the refresh's time budget is spent")
             timeout = min(timeout, left)
@@ -326,6 +338,9 @@ class LinearClient:
                 raise LinearError("redirect", f"{op}: {exc.detail}") from None
             if exc.cause in ("invalid_header", "invalid_request"):
                 raise LinearError("invalid_request", f"{op}: {exc.detail}") from None
+            if exc.cause == "timeout" and timeout < full:
+                # Cut short by the refresh's own budget, not Linear's fault: no back-off.
+                raise LinearError("budget", f"{op}: the refresh's time budget is spent") from None
             self._back_off(now + ERROR_BACKOFF, now)
             raise LinearError("network", f"{op}: {exc.detail}") from None
         status, raw = answer.status, answer.body
@@ -347,8 +362,6 @@ class LinearClient:
         if status >= 500:
             self._back_off(now + ERROR_BACKOFF, now)
             raise LinearError("server", f"{op}: HTTP {status}")
-        if status >= 300 and status < 400:
-            raise LinearError("redirect", f"{op}: HTTP {status} redirect (not followed)")
         if not isinstance(body, Mapping):
             raise LinearError("bad_response", f"{op}: not JSON")
         if codes or status >= 400:
@@ -518,6 +531,7 @@ class LinearIssues:
     _last_fetch: str | None = field(default=None, init=False, repr=False)  # an item id
     _stale: bool = field(default=False, init=False, repr=False)  # written since the last read
     _stretched: bool = field(default=False, init=False, repr=False)  # refresh > ``refresh``
+    _rotation: int = field(default=0, init=False, repr=False)  # the team a refresh starts with
 
     # --- reading -------------------------------------------------------------------------
 
@@ -554,7 +568,12 @@ class LinearIssues:
         # Lists are bounded by their page caps, not by max_requests (cutting them would drop
         # teams); that budget is for history.
         self.client.requests_left = None
-        for board in self.boards:
+        # Each refresh starts with the next team, so when the time budget runs out it is not
+        # always the same teams that go unread (and drop out after BOARD_GRACE).
+        boards = list(self.boards)
+        start = self._rotation % len(boards) if boards else 0
+        self._rotation += 1
+        for board in boards[start:] + boards[:start]:
             try:
                 raw = self._lists(board, now)
             except IssuesError as exc:
@@ -568,6 +587,8 @@ class LinearIssues:
             else:
                 self._good[board.key] = (now, raw)
             lists.append((board, raw))
+        order = {b.key: i for i, b in enumerate(boards)}
+        lists.sort(key=lambda pair: order[pair[0].key])  # items in the configured order
         self._stale = False
         if not lists and failures:
             self._last, self._failed = None, failures[0]
@@ -996,14 +1017,17 @@ class LinearIssues:
     def _lookup(self, op: str, document: str, variables: Mapping[str, Any]) -> Any:
         """A read an action makes: outside the reads' request budget and reserve."""
         saved, self.client.requests_left = self.client.requests_left, None
+        deadline, self.client.read_deadline = self.client.read_deadline, None
         try:
             return self._query(op, document, variables)
         finally:
             self.client.requests_left = saved
+            self.client.read_deadline = deadline
 
     def _write(self, op: str, document: str, variables: Mapping[str, Any]) -> Any:
         first = self.gate.begin()
         saved, self.client.requests_left = self.client.requests_left, None  # outside reads' budget
+        deadline, self.client.read_deadline = self.client.read_deadline, None
         try:
             return self.client.query(op, document, variables)
         except LinearError as exc:
@@ -1015,6 +1039,7 @@ class LinearIssues:
             ) from exc
         finally:
             self.client.requests_left = saved
+            self.client.read_deadline = deadline
             self.gate.done()
             self._stale = True
 
