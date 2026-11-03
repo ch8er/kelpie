@@ -27,6 +27,7 @@ from kelpie.core.model import HostSleep, Snapshot
 from kelpie.core.ports import Alerter, Deferred
 from kelpie.remote.hub import AgentView, Hub
 from kelpie.remote.protocol import (
+    MAX_BOARDS,
     TASK_REF_KINDS,
     Outcome,
     ProtocolError,
@@ -48,6 +49,8 @@ class FarmObserver(Protocol):
     def agent_state(self, agent: str, up: bool, last_report: datetime | None) -> None: ...
 
     def adapter_failed(self, name: str) -> None: ...
+
+    def refused(self, agent: str, kind: str, total: int) -> None: ...
 
 
 class Busy(Deferred):
@@ -101,6 +104,10 @@ class RemoteFarm:
     # only for a while after the wake.
     _sleeps: dict[str, set[HostSleep]] = field(init=False, default_factory=dict)
     _failing: set[str] = field(init=False, default_factory=set)  # boards told unreadable
+    # Per agent adapter: the board names it reported unreadable, first seen first, at most
+    # MAX_BOARDS (audit M6); later new names are counted, not alerted nor given a series.
+    _boards: dict[str, set[str]] = field(init=False, default_factory=dict)
+    _boards_refused: dict[str, int] = field(init=False, default_factory=dict)  # per agent
 
     def __post_init__(self) -> None:
         self.started = self.clock()
@@ -121,6 +128,8 @@ class RemoteFarm:
                 continue
             assert report is not None
             fresh.add(view.name)
+            if self.observer is not None and view.refused_adapters:
+                self.observer.refused(view.name, "adapter", view.refused_adapters)
             kept = self._sleeps.setdefault(view.name, set())
             kept.update(HostSleep(a, b, agent=view.name) for a, b in report.sleeps)
             for part in report.adapters:
@@ -145,6 +154,8 @@ class RemoteFarm:
                 for board in part.unobserved:  # one board of several the adapter reads
                     where = f"{source}:{board}"
                     unobserved.append(f"{view.name}:{board}")  # the prefix of its task ids
+                    if not self._known_board(view.name, source, board):
+                        continue
                     failing.add(where)
                     if self.observer is not None:
                         self.observer.adapter_failed(where)
@@ -180,6 +191,20 @@ class RemoteFarm:
             unobserved=tuple(unobserved),
             host_sleeps=self._recent_sleeps(now),
         )
+
+    def _known_board(self, agent: str, source: str, board: str) -> bool:
+        """Whether ``board`` of ``source`` is one of its first MAX_BOARDS board names; a
+        later new name is left out of rules all the same, but only counted."""
+        seen = self._boards.setdefault(source, set())
+        if board in seen:
+            return True
+        if len(seen) < MAX_BOARDS:
+            seen.add(board)
+            return True
+        total = self._boards_refused[agent] = self._boards_refused.get(agent, 0) + 1
+        if self.observer is not None:
+            self.observer.refused(agent, "board", total)
+        return False
 
     def _recent_sleeps(self, now: datetime) -> tuple[HostSleep, ...]:
         """The agents' sleeps that ended within a day, by end."""

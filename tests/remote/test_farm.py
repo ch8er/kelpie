@@ -76,12 +76,16 @@ class Observer:
     def __init__(self) -> None:
         self.states: dict[str, tuple[bool, datetime | None]] = {}
         self.failed: list[str] = []
+        self.refusals: dict[tuple[str, str], int] = {}
 
     def agent_state(self, agent: str, up: bool, last_report: datetime | None) -> None:
         self.states[agent] = (up, last_report)
 
     def adapter_failed(self, name: str) -> None:
         self.failed.append(name)
+
+    def refused(self, agent: str, kind: str, total: int) -> None:
+        self.refusals[(agent, kind)] = total
 
 
 def board(now: datetime = NOW) -> Snapshot:
@@ -795,3 +799,46 @@ def test_an_agents_sleep_is_kept_and_named_when_it_reports_again() -> None:
     rig.report("laptop")
     rig.report("vm-1")
     assert rig.tick().host_sleeps == ()
+
+
+# --- audit M6: adapter and board names an agent may report --------------------------------
+
+
+def test_adapter_names_that_are_not_kelpies_are_refused_and_counted() -> None:
+    """Audit M6: 50 reports of 16 new names gave 800 executors, series and alerts."""
+    rig = Rig()
+    for n in range(50):
+        names = [f"x{n}-{i}" for i in range(15)]
+        rig.report(
+            "laptop",
+            AdapterReport("hermes", KINDS, board()),
+            *(AdapterReport(name, KINDS, error="boom") for name in names),
+        )
+        snap = rig.tick()
+    assert set(rig.executors) == {"laptop/hermes"}
+    assert rig.observer.failed == []  # no series per name
+    assert rig.alerter.sent == []  # and no alert
+    assert {t.id for t in snap.tasks} == {"laptop:t_1a", "laptop:t_2b"}
+    assert rig.observer.refusals[("laptop", "adapter")] == 50 * 15
+
+
+def test_hub_agents_adapters_narrow_what_an_agent_may_report() -> None:
+    rig = Rig(agents=(HubAgent("laptop", "T1", frozenset({"claude-code"})), HubAgent("vm-1", "T2")))
+    rig.report("laptop")  # hermes, which this agent may not report
+    rig.report("vm-1")
+    snap = rig.tick()
+    assert {t.id for t in snap.tasks} == {"vm-1:t_1a", "vm-1:t_2b"}
+    assert set(rig.executors) == {"vm-1/hermes"}
+    assert rig.observer.refusals == {("laptop", "adapter"): 1}
+
+
+def test_unreadable_board_names_past_the_first_16_are_only_counted() -> None:
+    rig = Rig()
+    for n in range(3):
+        boards = tuple(f"b{n}-{i}" for i in range(16))
+        rig.report("laptop", AdapterReport("hermes", KINDS, board(), unobserved=boards))
+        snap = rig.tick()
+        assert len([u for u in snap.unobserved if u.startswith("laptop:b")]) == 16  # all out
+    assert len(rig.alerter.sent) == 16 + 16  # the first 16 told, then resolved; no more
+    assert len(set(rig.observer.failed)) == 16
+    assert rig.observer.refusals[("laptop", "board")] == 32

@@ -20,6 +20,7 @@ from urllib.parse import urlsplit
 from kelpie.core.actions import ActionKind
 from kelpie.core.serde import parse_duration
 from kelpie.remote.protocol import (
+    ADAPTER_NAMES,
     DEFAULT_PORT,
     MIN_TOKEN,
     PLATFORM_ACTIONS,
@@ -54,7 +55,7 @@ HUB_KEYS = frozenset(
         "agents",
     }
 )
-HUB_AGENT_KEYS = frozenset({"name", "token_env"})
+HUB_AGENT_KEYS = frozenset({"name", "token_env", "adapters"})
 DEFAULT_AGENT_TOKEN_ENV = "KELPIE_AGENT_TOKEN"
 DEFAULT_MAX_BODY_BYTES = 16 * 1024 * 1024
 MAX_MAX_BODY_BYTES = 256 * 1024 * 1024
@@ -158,6 +159,9 @@ def _resolve(host: str) -> list[str]:
 class HubAgent:
     name: str
     token_env: str
+    # The adapters the hub takes from this agent; by default every platform adapter Kelpie
+    # has (:data:`kelpie.remote.protocol.ADAPTER_NAMES`). Others are refused and counted.
+    adapters: frozenset[str] = ADAPTER_NAMES
 
 
 @dataclass(frozen=True, slots=True)
@@ -329,7 +333,18 @@ def load_hub(section: Any) -> HubSettings | None:
         assert isinstance(name, str)
         if "token_env" not in item:
             raise ValueError(f"[[hub.agents]] {name}: token_env is required")
-        agents.append(HubAgent(name, _env(item, "token_env", "", f"[[hub.agents]] {name}")))
+        adapters = item.get("adapters", sorted(ADAPTER_NAMES))
+        if (
+            not isinstance(adapters, list)
+            or not adapters
+            or not all(isinstance(a, str) and a in ADAPTER_NAMES for a in adapters)
+        ):
+            raise ValueError(
+                f"[[hub.agents]] {name}: adapters must be a non-empty list among "
+                f"{sorted(ADAPTER_NAMES)}"
+            )
+        token_env = _env(item, "token_env", "", f"[[hub.agents]] {name}")
+        agents.append(HubAgent(name, token_env, frozenset(adapters)))
     if len({a.name for a in agents}) != len(agents):
         raise ValueError("[[hub.agents]] names must be distinct")
     if len({a.token_env for a in agents}) != len(agents):

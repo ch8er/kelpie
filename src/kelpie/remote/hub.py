@@ -92,6 +92,9 @@ class _Pending:
 @dataclass(slots=True)
 class _Agent:
     name: str
+    allowed: frozenset[str] = frozenset()  # adapter names taken from this agent
+    refused: int = 0  # adapter parts refused, since the hub started
+    refused_warned: float = -_LOG_EVERY  # monotonic time of the last warning about them
     last_contact: datetime | None = None  # any authenticated request
     report: Report | None = None
     report_at: datetime | None = None
@@ -112,6 +115,7 @@ class AgentView:
     last_contact: datetime | None
     report: Report | None
     report_at: datetime | None  # when the hub accepted ``report``
+    refused_adapters: int = 0  # adapter parts refused from its reports (audit M6)
 
 
 @dataclass(frozen=True, slots=True)
@@ -135,7 +139,7 @@ class Hub:
         self.tls = tls  # loaded once by whoever checked the config; else when listening
         self._tokens = [(name, token.encode()) for name, token in tokens.items()]
         self._clock = clock
-        self._agents = {a.name: _Agent(a.name) for a in settings.agents}
+        self._agents = {a.name: _Agent(a.name, a.adapters) for a in settings.agents}
         self._cond = threading.Condition()
         self._closed = False
 
@@ -231,7 +235,28 @@ class Hub:
                     agent,
                     int((now - state.report_at).total_seconds()),
                 )
-            state.report, state.report_at = report, now
+            state.report, state.report_at = self._allowed(state, report), now
+
+    def _allowed(self, state: _Agent, report: Report) -> Report:
+        """``report`` with only the adapters the agent may report (audit M6): Kelpie's own
+        adapter names, narrowed by ``[[hub.agents]] adapters``. Others are refused, counted
+        and logged at most once a minute, never merged, alerted or given an executor."""
+        kept = tuple(p for p in report.adapters if p.name in state.allowed)
+        if len(kept) == len(report.adapters):
+            return report
+        refused = sorted(p.name for p in report.adapters if p.name not in state.allowed)
+        state.refused += len(refused)
+        if time.monotonic() - state.refused_warned > _LOG_EVERY:
+            state.refused_warned = time.monotonic()
+            log.warning(
+                "hub: agent %s reports adapters it may not (%s); refused, as %d so far "
+                "(allowed: %s)",
+                state.name,
+                ", ".join(refused),
+                state.refused,
+                ", ".join(sorted(state.allowed)),
+            )
+        return replace(report, adapters=kept)
 
     def poll(
         self, agent: str, results: list[Result], wait: float, generation: int = 0
@@ -298,7 +323,7 @@ class Hub:
     def agents(self) -> list[AgentView]:
         with self._cond:
             return [
-                AgentView(a.name, a.last_contact, a.report, a.report_at)
+                AgentView(a.name, a.last_contact, a.report, a.report_at, a.refused)
                 for a in self._agents.values()
             ]
 

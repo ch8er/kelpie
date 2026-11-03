@@ -63,6 +63,13 @@ MAX_COUNTS = {
 # Agent names end up in task ids ("<agent>:<id>") and executor names ("<agent>/<adapter>").
 _AGENT_NAME = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?")
 _ADAPTER_NAME = re.compile(r"[a-z0-9_-]{1,64}")
+# The names of Kelpie's platform adapters, the only ones a hub takes from an agent (audit
+# M6: an agent reporting ever new names grew the hub's executors, metric series and alerts
+# without bound). A new adapter adds its name here; tests/remote check it matches.
+ADAPTER_NAMES = frozenset({"hermes", "claude-code", "openclaw", "github-issues", "linear"})
+# Boards of one adapter whose failure the hub tells apart (alerts, metric series); boards
+# beyond these, by first sight, are still left out of rules but told only as a count.
+MAX_BOARDS = 16
 # Control characters and lone UTF-16 surrogates (JSON can carry "\ud800"; nothing can
 # encode it as UTF-8 later, so SQLite and every log line would fail on it).
 _CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f\ud800-\udfff]")  # line breaks, tabs stay

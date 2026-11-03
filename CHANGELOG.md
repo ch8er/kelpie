@@ -62,6 +62,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
   `kelpie spool scrub` cleans the `echo` and credential-word leaks in spools written
   before, but not a value an escaped blank already split off (an old `hunter2 make` reads
   as an ordinary command): delete or rotate spools from farms that use such assignments.
+- The multi-host hub takes from an agent only Kelpie's own adapter names (narrowed by
+  `[[hub.agents]] adapters`) and tells apart at most 16 unreadable boards per adapter;
+  other names are refused and counted in `kelpie_hub_refused_total`, so one agent cannot
+  grow the hub's executors, series and alerts without bound (audit M6, #PR_M6).
 
 ## [0.1.0a1] - 2026-11-03
 

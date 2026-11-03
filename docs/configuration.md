@@ -2068,9 +2068,15 @@ the agents' relays).
 
 `[[hub.agents]]`: one entry per machine, `name` (as in its `[agent] name`) and `token_env`
 (the variable holding its token on the server). Names and variables must be distinct, and
-so must the tokens.
+so must the tokens. Optional `adapters`: the adapters this agent may report, among
+`hermes`, `claude-code`, `openclaw`, `github-issues` and `linear` (the default: all of
+them). The hub refuses any other adapter name in a report, and counts it, so one agent
+cannot grow the hub's executors, metric series and alerts with made-up names; of the boards
+an adapter reports unreadable, the first 16 names are told apart and later new ones only
+counted ([security.md](security.md#hub-names)).
 
-`/metrics` gains `kelpie_agent_up{agent}` and
+`/metrics` gains `kelpie_agent_up{agent}`, `kelpie_hub_refused_total{agent,kind}` (kind
+`adapter` or `board`) and
 `kelpie_agent_last_report_timestamp_seconds{agent}`; adapter errors on an agent are counted
 as `kelpie_adapter_errors_total{adapter="<agent>/<adapter>"}`.
 

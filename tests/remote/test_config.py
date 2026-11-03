@@ -202,3 +202,32 @@ def test_relay() -> None:
 
 def test_relay_true_is_the_default_address() -> None:
     assert agent(relay=True).relay == ("127.0.0.1", 4318)
+
+
+def test_hub_agents_take_kelpies_adapters_unless_narrowed() -> None:
+    from kelpie.remote.protocol import ADAPTER_NAMES
+
+    settings = load_hub(hub())
+    assert all(a.adapters == ADAPTER_NAMES for a in settings.agents)
+    raw = hub()
+    raw["agents"][0]["adapters"] = ["hermes"]
+    assert load_hub(raw).agents[0].adapters == frozenset({"hermes"})
+    for bad in ([], ["custom"], "hermes", [1]):
+        raw["agents"][0]["adapters"] = bad
+        with pytest.raises(ValueError, match="adapters must be a non-empty list"):
+            load_hub(raw)
+
+
+def test_every_platform_adapter_is_one_a_hub_takes(tmp_path: Path) -> None:
+    """A new adapter must add its name to ADAPTER_NAMES, or a hub refuses its boards."""
+    from kelpie.app import build_adapters
+    from kelpie.remote.protocol import ADAPTER_NAMES
+
+    path = tmp_path / "kelpie.toml"
+    path.write_text(
+        "[adapters.hermes]\n[adapters.claude_code]\n[adapters.openclaw]\n"
+        '[connectors.github]\nrepos = ["example/repo"]\n[adapters.github_issues]\n'
+        '[adapters.linear]\nteams = ["ENG"]\n'
+    )
+    names = {a.name for a in build_adapters(load_settings(path), {"LINEAR_API_KEY": "k" * 40})}
+    assert names == ADAPTER_NAMES

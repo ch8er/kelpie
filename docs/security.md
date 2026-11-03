@@ -57,6 +57,20 @@ is a firewall's job. `/metrics` and `/healthz` stay unauthenticated: keep the ma
 loopback or a private network, or behind an authenticating proxy, when it carries anything
 you would not publish.
 
+### Hub names
+
+What a `kelpie agent` reports names its adapters and, for an adapter with several boards,
+the boards it could not read. The hub keeps an executor, a metric series and alerts per
+name, so it bounds them (audit M6): it takes only Kelpie's own adapter names (`hermes`,
+`claude-code`, `openclaw`, `github-issues`, `linear`), narrowed per agent by
+`[[hub.agents]] adapters`; a report's other adapters are refused, never merged or given
+an executor, logged at most once a minute and counted in
+`kelpie_hub_refused_total{kind="adapter"}`. Of an adapter's unreadable boards, the first 16
+names (first seen first, until the hub restarts) get alerts and series; a later new name
+still keeps its tasks out of the rules but is only counted (`kind="board"`). A fixed list
+was chosen over "the first names an agent reports": it holds across hub restarts and gives
+an agent no first report to abuse.
+
 ## Files Kelpie writes
 
 What Kelpie stores names tasks, block reasons, roles and commands ([privacy.md](privacy.md)),
@@ -241,9 +255,6 @@ front that limits connections and request time. Do not publish it with a bare
 
 ### Other open medium findings
 
-- **M6:** one authenticated `kelpie agent` can grow the hub's executors, metric series and
-  alerts without bound by reporting new adapter names. Give hub tokens only to agents you
-  run. Follow-up on [#275](https://github.com/ch8er/kelpie/issues/275).
 - **M7, what is left:** one acting instance per board is now enforced on one machine
   ([above](#one-acting-instance-per-board)), not across machines for a GitHub repository
   or Linear team, nor across users for those. Run one acting Kelpie per tracker.
