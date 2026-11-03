@@ -12,8 +12,9 @@ owner's), else its session owner's, else the role its usage record names, else
 :data:`kelpie.core.stages.UNKNOWN_ROLE`: the order the throughput section has always priced
 roles by (a session's task is never used for its role: a task in review often carries the
 reviewer's role by then), so a line that moves spend away from a role moves it from the
-same role. The session's task only finds the call's task, as an outage needs. Pure and
-deterministic.
+same role. The session's task only finds the call's task, as an outage needs. Rework
+(#197 item 7) asks who made the call instead (:meth:`CallOwners.doer_of`): the session's
+role first, else the role of the call's task. Pure and deterministic.
 """
 
 from __future__ import annotations
@@ -46,6 +47,16 @@ class CallOwners:
         role = self.task_roles.get(task_id) if task_id else None
         if role is None and session_id:
             role = self.session_roles.get(session_id)
+        return role or UNKNOWN_ROLE
+
+    def doer_of(self, task_id: str | None, session_id: str | None) -> str:
+        """Who made a call: its session's role, else its task's, else unknown. For rework
+        (#197 item 7), where the reviewer's next look and the developer's redo are told
+        apart; a task in review often carries the reviewer's role by then."""
+        role = self.session_roles.get(session_id) if session_id else None
+        if role is None:
+            task = self.task_of(task_id, session_id)
+            role = self.task_roles.get(task) if task else None
         return role or UNKNOWN_ROLE
 
     def span_task(self, span: Span) -> str | None:

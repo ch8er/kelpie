@@ -25,6 +25,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
   its session, now including the platform's usage records (`Snapshot.usage`, #271)
   ([#325](https://github.com/ch8er/kelpie/pull/325)).
 
+### Added
+
+- Tokens per return (#197 item 7): the "Farm throughput" section lists "Tokens on rework",
+  the model calls on each task returned within the day after its first return, per role
+  (who made the call) and per task, with tokens per return
+  ([#326](https://github.com/ch8er/kelpie/pull/326)).
+
 ### Safety
 
 - One acting Kelpie per board is enforced: `kelpie serve` with `dry_run` off and a rule in

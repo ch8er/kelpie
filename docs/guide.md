@@ -317,7 +317,15 @@ board the report is unchanged.
   runs the connector steps that read only the board (`task_status`, human tasks from block
   reasons), and a block reason a `[[block_conditions]]` pattern matches counts as a CI or
   merge wait by the pattern's kind, without a PR lookup. The "Farm throughput" section
-  breaks each role's waiting time down by cause.
+  breaks each role's waiting time down by cause. Under it, "Tokens on rework" (#197 item
+  7) lists what returned work cost: for each task sent back within the day, its model calls
+  after its first return of the day (one that ended at the return is the review that sent
+  it back), to the end of the day, by the role that made them (the session's, else the
+  task's; the reviewer's next look included), with tokens per return, per role and for the
+  costliest tasks; a call names its task itself, else through its session (on Hermes, each
+  profile's `state.db`). Calls an outage held are the outage's, not rework. A lower bound:
+  a return before the day, a task no longer on the board and a call that names no task are
+  not counted.
 - **Context and model fit** (from traces, `kelpie.traces.fit`): content a read-like tool
   loaded unchanged into many sessions of a role (same tool, arguments hash and size); tools
   offered but never called, when the platform lists them in the span attribute
