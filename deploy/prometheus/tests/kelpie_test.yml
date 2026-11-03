@@ -55,13 +55,21 @@ tests:
           not evaluated.'
         runbook_url: https://github.com/ch8er/kelpie/blob/main/docs/runbook.md#kelpienotticking
         summary: Kelpie on a has not completed a tick for 13m 0s
-- name: ticks failing while none completes
+- name: ticks failing while none completes, not paged as not ticking too
   interval: 1m
   input_series:
   - series: kelpie_engine_tick_failures_total{job="kelpie", instance="a"}
     values: 0+2x30
   - series: kelpie_engine_ticks_total{job="kelpie", instance="a"}
     values: 5x30
+  - series: kelpie_engine_tick_failures_total{job="kelpie", instance="b"}
+    values: 0+1x30
+  - series: kelpie_engine_ticks_total{job="kelpie", instance="b"}
+    values: 0+1x30
+  - series: kelpie_engine_last_tick_timestamp_seconds{job="kelpie", instance="a"}
+    values: 240x30
+  - series: kelpie_start_time_seconds{job="kelpie", instance="a"}
+    values: '0x30'
   alert_rule_test:
   - eval_time: 20m
     alertname: KelpieTicksFailing
@@ -75,6 +83,9 @@ tests:
           kelpie_engine_ticks_total does not). See kelpie's log ("tick failed").
         runbook_url: https://github.com/ch8er/kelpie/blob/main/docs/runbook.md#kelpieticksfailing
         summary: Every Kelpie tick on a has failed for 15 minutes
+  - eval_time: 20m
+    alertname: KelpieNotTicking
+    exp_alerts: []
 - name: an agent host silent for five minutes, another one fine
   interval: 1m
   input_series:
@@ -145,21 +156,27 @@ tests:
           See kelpie''s log ("connector github failed").'
         runbook_url: https://github.com/ch8er/kelpie/blob/main/docs/runbook.md#kelpieconnectorfailing
         summary: Kelpie connector github has failed for over 15 minutes
-- name: spend gap past warn_gap, small bills and small gaps left out
+- name: spend gap past warn_gap and warn_min_usd, small dollar gaps and ratios left out
   interval: 1m
   input_series:
   - series: kelpie_spend_gap_ratio{job="kelpie", instance="a", provider="provider-a"}
     values: -0.4x40
   - series: kelpie_spend_reported_usd{job="kelpie", instance="a", provider="provider-a"}
     values: 120x40
+  - series: kelpie_spend_estimated_usd{job="kelpie", instance="a", provider="provider-a"}
+    values: 72x40
   - series: kelpie_spend_gap_ratio{job="kelpie", instance="a", provider="provider-b"}
     values: 0.5x40
   - series: kelpie_spend_reported_usd{job="kelpie", instance="a", provider="provider-b"}
-    values: 0.2x40
+    values: 2x40
+  - series: kelpie_spend_estimated_usd{job="kelpie", instance="a", provider="provider-b"}
+    values: 3x40
   - series: kelpie_spend_gap_ratio{job="kelpie", instance="a", provider="provider-c"}
     values: 0.1x40
   - series: kelpie_spend_reported_usd{job="kelpie", instance="a", provider="provider-c"}
     values: 50x40
+  - series: kelpie_spend_estimated_usd{job="kelpie", instance="a", provider="provider-c"}
+    values: 55x40
   alert_rule_test:
   - eval_time: 35m
     alertname: KelpieSpendGapLarge
@@ -220,6 +237,8 @@ tests:
   input_series:
   - series: kelpie_traces_token_file_ok{job="kelpie", instance="a"}
     values: 1 0x20
+  - series: kelpie_traces_token_file_ok{job="kelpie", instance="b"}
+    values: 1x20
   alert_rule_test:
   - eval_time: 18m
     alertname: KelpieTracesTokenFileUnreadable
@@ -263,6 +282,8 @@ tests:
     values: 0 0 3x10
   - series: kelpie_alerts_dropped_total{job="kelpie", instance="a", channel="chat", reason="duplicate"}
     values: 0 0 9x10
+  - series: kelpie_alerts_dropped_total{job="kelpie", instance="b", channel="chat", reason="duplicate"}
+    values: 0 0 9x10
   alert_rule_test:
   - eval_time: 5m
     alertname: KelpieAlertsDropped
@@ -277,4 +298,3 @@ tests:
           human may have missed them; see kelpie''s log.'
         runbook_url: https://github.com/ch8er/kelpie/blob/main/docs/runbook.md#kelpiealertsdropped
         summary: Kelpie dropped alerts for channel chat (queue_full)
-

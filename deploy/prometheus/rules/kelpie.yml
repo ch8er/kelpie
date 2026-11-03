@@ -28,10 +28,12 @@ groups:
 
       - alert: KelpieNotTicking
         # The last completed tick, or the start time before the first one. Ten minutes is
-        # 20 ticks at the default [engine] interval (30s).
+        # 20 ticks at the default [engine] interval (30s): raise it for a long interval. Ticks
+        # that start and raise are KelpieTicksFailing instead, not paged twice.
         expr: |
           time() - (kelpie_engine_last_tick_timestamp_seconds > 0 or kelpie_start_time_seconds)
             > 600
+          unless on (instance) increase(kelpie_engine_tick_failures_total[10m]) > 0
         for: 2m
         labels:
           severity: critical
@@ -114,13 +116,14 @@ groups:
   - name: kelpie-spend
     rules:
       - alert: KelpieSpendGapLarge
-        # 0.25 is the default warn_gap of [[connectors.cost_reports]]; rule 10 warns about the
-        # same day through Kelpie's channels. Bills under $1 are left out (warn_min_usd).
-        # The metric changes once a day: `for` only rides out a restart.
+        # The defaults of [[connectors.cost_reports]], as rule 10 judges the same day through
+        # Kelpie's channels: a gap of at least warn_gap (0.25) of the bill and at least
+        # warn_min_usd ($5). Change both numbers if you changed them. The metric changes once
+        # a day: `for` only rides out a restart.
         expr: |
-          abs(kelpie_spend_gap_ratio) > 0.25
+          abs(kelpie_spend_gap_ratio) >= 0.25
           and
-          kelpie_spend_reported_usd >= 1
+          abs(kelpie_spend_estimated_usd - kelpie_spend_reported_usd) >= 5
         for: 30m
         labels:
           severity: warning
@@ -196,8 +199,9 @@ groups:
           runbook_url: https://github.com/ch8er/kelpie/blob/main/docs/runbook.md#kelpiealertdeliveryfailed
 
       - alert: KelpieAlertsDropped
-        # Dropped before any delivery attempt: the send queue was full, or Kelpie stopped
-        # with alerts queued. A duplicate merged into an alert already sent is not a loss.
+        # Dropped before any delivery attempt because the send queue was full. A duplicate
+        # merged into an alert already sent is not a loss. Drops at shutdown are counted after
+        # /metrics stops answering, so they show in the log only.
         expr: |
           sum by (instance, channel, reason) (increase(kelpie_alerts_dropped_total{reason!="duplicate"}[15m])) > 0
           or

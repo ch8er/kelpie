@@ -5,7 +5,13 @@ watch the watchdog: Kelpie down or stuck, a part of the farm it cannot see, and 
 could not deliver. Each alert's `runbook_url` points at its section here. Route them
 through an Alertmanager of your own to a receiver that does not depend on Kelpie's chat
 channels (email, a pager): several of them fire exactly when those channels are the problem.
-The [Grafana dashboard](../deploy/grafana/dashboards/kelpie.json) has a panel for every metric they read.
+The [Grafana dashboard](../deploy/grafana/dashboards/kelpie.json) shows the metrics they read.
+
+Two caveats hold for several rules. A counter that appears with its first event (lost and
+dropped alerts, refused OTLP requests) is caught by a "new series" branch, which also fires
+once for every non-zero series after Prometheus or Kelpie was not scraped for 15 minutes
+(a fresh Prometheus, a long outage). And the rules match the scrape job `kelpie` of
+`deploy/prometheus/prometheus.yml`: with a job of another name, change `KelpieDown`.
 
 Problems on the farm itself (a full disk, a stuck task, an expired provider key) are
 Kelpie's rules, not Prometheus alerts: they reach you through Kelpie's own alerts and the
@@ -16,7 +22,8 @@ names the directories that grow (incident 19), so there is no Prometheus disk ru
 ## KelpieDown
 
 Prometheus has not been able to scrape `kelpie serve` for 2 minutes. Nothing watches the
-farm meanwhile.
+farm meanwhile. A target removed from the scrape config does not fire it (no `up` series at
+all).
 
 1. Is the process running? `docker compose ps kelpie`, `systemctl status kelpie` or
    `launchctl print gui/$(id -u)/<label>`, depending on how you run it.
@@ -28,7 +35,9 @@ farm meanwhile.
 ## KelpieNotTicking
 
 `/metrics` answers, but no tick has completed for 10 minutes (20 ticks at the default
-`[engine] interval`). Rules are not evaluated.
+`[engine] interval`; with an interval of several minutes, raise the 600 in the rule) and
+none raised either: a tick is hung. Rules are not evaluated. The threshold compares
+Kelpie's clock with Prometheus': keep both hosts on NTP.
 
 1. Kelpie's log: the last `tick` lines and any `tick failed` traceback.
 2. A tick blocked on I/O: an adapter reading a board on a slow or hung filesystem, a
@@ -75,7 +84,7 @@ answers then. Lower the 900 in the rule if you configured a shorter age.
 ## KelpieSpendGapLarge
 
 For a provider's newest reconciled day, its cost report and what Kelpie priced from traces
-differ by more than 25% of a bill of at least $1 (the defaults of
+differ by at least 25% of the bill and at least $5 (the defaults of
 [`[[connectors.cost_reports]]`](configuration.md#connectorscost_reports) `warn_gap` and
 `warn_min_usd`; change the rule if you changed them). Dollar budgets of that provider follow
 the traces, so they are off by as much. Rule 10 sends the same warning through Kelpie's
@@ -112,7 +121,8 @@ listed by `kelpie status` and in the daily report.
 
 ## KelpieAlertsDropped
 
-Alerts for a channel were dropped before any delivery attempt: its queue was full (a burst,
-or a channel that is slow for a long time) or Kelpie stopped with alerts still queued.
-Duplicates merged into an alert already sent are not counted here. Check the log and, for a
+Alerts for a channel were dropped before any delivery attempt because its queue was full (a
+burst, or a channel that is slow for a long time). Duplicates merged into an alert already
+sent are not counted here. Alerts still queued when Kelpie stops are counted after `/metrics`
+has stopped answering, so no scrape sees them: they are in the log only. Check the log and, for a
 full queue, what produced the burst (`sum by (rule) (increase(kelpie_actions_total[1h]))`).

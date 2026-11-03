@@ -438,10 +438,12 @@ Transient failures (429, 5xx, network) are retried for `retry_horizon` (default 
 (`deploy/prometheus/rules/kelpie.yml`) fires on it, and the Grafana dashboard has an Alerts
 row. The same file has the other rules about Kelpie itself (down, not ticking, a silent
 agent host, a failing adapter or connector, a spend gap, an old traces token, dropped
-alerts); each links its section of the [runbook](runbook.md). Drops (full queue, duplicates, shutdown) are counted in `kelpie_alerts_dropped_total`.
-Alerts still waiting when Kelpie shuts down during a chat outage are counted as
+alerts); each links its section of the [runbook](runbook.md). Drops (full queue,
+duplicates, shutdown) are counted in `kelpie_alerts_dropped_total`. Alerts still waiting
+when Kelpie shuts down during a chat outage are counted as
 `kelpie_alerts_dropped_total{reason="shutdown"}`, not as failed, so `KelpieAlertDeliveryFailed`
-does not fire for them.
+does not fire for them; that count is taken after `/metrics` has stopped answering, so it
+shows in the log only.
 
 A connector step that fails (a bug or an unexpected error in it; GitHub's own outages are
 not failures, its step serves its last answers) keeps, for that tick, the conditions of waits
