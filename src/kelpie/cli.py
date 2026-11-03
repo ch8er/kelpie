@@ -14,6 +14,7 @@ from kelpie import __version__
 from kelpie.app import (
     ConfigError,
     Settings,
+    board_locks,
     build_adapters,
     build_app,
     check_exposure,
@@ -24,7 +25,10 @@ from kelpie.app import (
     read_models,
     read_unpriced,
     render_status,
+    serve_act_locks,
+    take_act_locks,
 )
+from kelpie.core.actlock import ActLockError
 
 log = logging.getLogger("kelpie.cli")
 
@@ -332,9 +336,17 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0
         load_rules(settings.engine)  # rule errors first: they are the likelier mistake
         check_exposure(settings, args.host)
-        app = build_app(settings)
+        locks = serve_act_locks(settings)  # one acting instance per board (audit M7)
+        try:
+            app = build_app(settings)
+        except BaseException:
+            locks.release()
+            raise
     except ConfigError as exc:
         print(f"kelpie: config error: {exc}", file=sys.stderr)
+        return 2
+    except ActLockError as exc:
+        print(f"kelpie: cannot start: {exc}", file=sys.stderr)
         return 2
     if settings.db_path is not None and settings.source is not None:
         from kelpie.report.fixes import record_config_change
@@ -349,7 +361,10 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     from kelpie.server import serve as run
 
-    run(app, args.host, args.port)
+    try:
+        run(app, args.host, args.port)
+    finally:
+        locks.release()
     return 0
 
 
@@ -390,6 +405,14 @@ def _agent(settings: Settings) -> int:
             f"[agent] relay cannot listen on {host}:{port}: {exc} (another OTLP receiver "
             "there? set [agent] relay to another port, or relay = false)"
         ) from exc
+    # An agent that carries out actions on a board holds its act lock (audit M7); one with
+    # ``[agent] actions = []`` only reports and takes none.
+    try:
+        locks = take_act_locks(board_locks(a for a in agent.adapters if agent.offered[a.name]))
+    except BaseException:
+        if relay is not None:
+            relay.server_close()
+        raise
     if config.plain_http:
         log.warning("[agent] reports over plain http: the token crosses the network in clear")
 
@@ -416,6 +439,7 @@ def _agent(settings: Settings) -> int:
         if relay is not None:
             relay.shutdown()
             relay.server_close()
+        locks.release()
     log.info("kelpie agent stopped")
     return 0
 

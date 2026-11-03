@@ -85,7 +85,9 @@ from typing import Any, ClassVar
 from kelpie.adapters import _spool
 from kelpie.adapters.claude_code import hook
 from kelpie.adapters.claude_code.process import process_state
+from kelpie.core import actlock
 from kelpie.core.actions import ActionKind, ActionResult
+from kelpie.core.actlock import ActLock
 from kelpie.core.model import (
     Dependency,
     Owner,
@@ -330,6 +332,16 @@ class ClaudeCodeAdapter:
             self.spool = Path(self.spool).expanduser()
         if self.stop_dir is not None:
             self.stop_dir = Path(self.stop_dir).expanduser()
+
+    def act_locks(self) -> tuple[ActLock, ...]:
+        """The act lock next to the spool (audit M7): instances that read one spool see the
+        same sessions, and both would stop them. None without a spool or a stop folder:
+        nothing can be stopped then."""
+        if self.spool is None or self.stop_dir is None:
+            return ()
+        # The hook makes the spool's folder (0700) on its first line: a fresh host has none.
+        lock = ActLock(f"{self.name} ({self.spool})", actlock.beside(self.spool), True)
+        return (lock,)
 
     # --- status --------------------------------------------------------------------------
 

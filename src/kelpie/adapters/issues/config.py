@@ -20,6 +20,8 @@ from kelpie.adapters.issues.github import GitHubIssues
 from kelpie.adapters.issues.linear import DEFAULT_API_URL as LINEAR_API_URL
 from kelpie.adapters.issues.linear import DEFAULT_MAX_REQUESTS as LINEAR_MAX_REQUESTS
 from kelpie.adapters.issues.linear import DEFAULT_REFRESH as LINEAR_REFRESH
+from kelpie.adapters.issues.linear import DEFAULT_TICK_BUDGET as LINEAR_TICK_BUDGET
+from kelpie.adapters.issues.linear import MAX_TICK_BUDGET as LINEAR_MAX_TICK_BUDGET
 from kelpie.adapters.issues.linear import LinearClient, LinearIssues
 from kelpie.adapters.issues.mapping import (
     DEFAULT_BLOCKED_LABELS,
@@ -361,7 +363,7 @@ LINEAR_TOKEN_ENV = "LINEAR_API_KEY"
 LINEAR_KEYS = frozenset(
     {
         *("enabled", "teams", "api_url", "token_env", "timeout", "refresh"),
-        *("lookback", "max_requests_per_tick", "pull_repos"),
+        *("lookback", "max_requests_per_tick", "tick_budget", "pull_repos"),
         *("label", "blocked_labels", "ready_labels", "ready_states", "role", "agents", "boards"),
     }
 )
@@ -382,6 +384,7 @@ class LinearSettings:
     refresh: timedelta = LINEAR_REFRESH
     lookback: timedelta = DEFAULT_LOOKBACK
     max_requests_per_tick: int = LINEAR_MAX_REQUESTS
+    tick_budget: timedelta = LINEAR_TICK_BUDGET
     pull_repos: frozenset[str] = frozenset()  # "host/owner/repo"; empty: github.com, any repo
     enabled: bool = True
 
@@ -403,6 +406,7 @@ class LinearSettings:
             self.lookback,
             refresh=self.refresh,
             max_requests=self.max_requests_per_tick,
+            tick_budget=self.tick_budget,
             pull_repos=self.pull_repos,
             agents=self.agents,
         )
@@ -450,6 +454,13 @@ def load_linear(section: Any) -> LinearSettings:
         or not 0 <= max_requests <= MAX_REQUESTS
     ):
         raise ValueError(f"{sect} max_requests_per_tick must be 0 to {MAX_REQUESTS}")
+    tick_budget = _duration(section, "tick_budget", LINEAR_TICK_BUDGET, sect)
+    if not timeout <= tick_budget <= LINEAR_MAX_TICK_BUDGET:
+        # Below one request's timeout, a dead server would never count as down (no back-off).
+        raise ValueError(
+            f"{sect} tick_budget must be at least timeout and at most "
+            f"{LINEAR_MAX_TICK_BUDGET.seconds}s"
+        )
     agents_section = section.get("agents", {})
     if not isinstance(agents_section, Mapping) or len(agents_section) > MAX_AGENTS:
         raise ValueError(f"{sect} agents must be a table of at most {MAX_AGENTS} agents")
@@ -509,6 +520,7 @@ def load_linear(section: Any) -> LinearSettings:
         refresh=refresh,
         lookback=_duration(section, "lookback", DEFAULT_LOOKBACK, sect),
         max_requests_per_tick=max_requests,
+        tick_budget=tick_budget,
         pull_repos=_pull_repos(section.get("pull_repos", []), f"{sect} pull_repos"),
         enabled=enabled,
     )

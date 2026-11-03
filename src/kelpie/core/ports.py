@@ -7,6 +7,7 @@ from datetime import datetime
 from typing import Protocol, runtime_checkable
 
 from kelpie.core.actions import Action, ActionKind, ActionResult
+from kelpie.core.actlock import ActLock
 from kelpie.core.alerts import AlertEvent
 from kelpie.core.model import (
     Condition,
@@ -94,6 +95,18 @@ class SnapshotSource(Protocol):
     """
 
     def snapshot(self, now: datetime) -> Snapshot: ...
+
+
+@runtime_checkable
+class SupportsActLock(Protocol):
+    """Optional adapter capability: the lock files of the boards it acts on.
+
+    An instance that may act holds each of them (:mod:`kelpie.core.actlock`), so a second
+    acting instance on the same board refuses to start. An adapter that cannot act here (no
+    stop folder, no actions) returns none.
+    """
+
+    def act_locks(self) -> Sequence[ActLock]: ...
 
 
 @runtime_checkable

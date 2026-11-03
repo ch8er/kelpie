@@ -32,6 +32,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
   (who made the call) and per task, with tokens per return
   ([#326](https://github.com/ch8er/kelpie/pull/326)).
 
+### Safety
+
+- One acting Kelpie per board is enforced: `kelpie serve` with `dry_run` off and a rule in
+  `act` whose actions an adapter carries out (not one that only alerts or cancels CI
+  builds), and `kelpie agent` unless `[agent] actions = []`, hold a lock per board; a second
+  acting instance on the same board refuses to start, naming the board and the holder's
+  pid. Observe and suggest instances are unaffected (audit M7, [#321](https://github.com/ch8er/kelpie/pull/321)).
+- The Linear client goes through Kelpie's HTTP helper: one deadline per request however
+  slowly the server answers, and a time budget for all the reads of one refresh
+  (`[adapters.linear] tick_budget`, 30s), so a slow Linear cannot stall the control loop
+  (audit M4, [#324](https://github.com/ch8er/kelpie/pull/324)).
+
 ## [0.1.0a1] - 2026-11-03
 
 First public pre-release, an alpha: interfaces and configuration keys may still

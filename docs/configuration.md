@@ -1040,7 +1040,8 @@ issue is **delegated** to: name the app user as an agent's `assignee`.
 | `teams` | (required) | list of team keys | The teams whose issues are tasks (`ENG`), one board each. |
 | `token_env` | `"LINEAR_API_KEY"` | variable name | A Linear API key (personal, `lin_api_…`; an OAuth token is sent as Bearer). Required: Linear has no anonymous access. Writes need a key that may comment and edit issues. |
 | `api_url` | `"https://api.linear.app/graphql"` | URL | https, or http on loopback; a different one needs `token_env` set here. |
-| `timeout` | `"10s"` | duration, <= 60s | One request. |
+| `timeout` | `"10s"` | duration, <= 60s | One request: one deadline for all of it (connecting, TLS, headers and body), however slowly the server answers. |
+| `tick_budget` | `"30s"` | duration, >= `timeout`, <= 60s | All the reads of one refresh together (lists and history); past it nothing more is asked until the next refresh, and a team not read keeps its last read for 10 minutes. Each refresh starts with the next team, so the same teams are not always the ones left unread. A slow Linear holds the control loop about this long at most (DNS lookups aside); an action's lookups and writes are outside it. |
 | `refresh` | `"2m"` | duration, >= 30s | How often the issues are read again (GraphQL has no conditional requests, and Linear meters requests and query complexity per hour); between refreshes the last read is served. A write makes the next tick read again, unless reads are stretched: they take at most half the hour's complexity limit (25 minutes apart at most). |
 | `lookback` | `"7d"` | duration, > 0 | Closed issues updated within this are read (the most recently updated page of 25). |
 | `max_requests_per_tick` | `20` | count, 0–5000 | Per-issue history reads per refresh (who was assigned, labels put on, who edited the description); the rest use what was read before. The lists are always read, bounded by their page caps (pages of 25, at most 20 open and 1 closed per team). |
@@ -1992,7 +1993,7 @@ and the report.
 | `allow_plain_http` | `false` | Allow `http://`; the server name must resolve to loopback or private addresses only (RFC 1918, `100.64.0.0/10`, IPv6 ULA). The token then crosses the network in clear. |
 | `interval` | `15s` | Between reports (1s–5m). The server merges a report for 2 × interval + 10s. |
 | `timeout` | `30s` | One request to the hub (1s–5m). |
-| `actions` | every kind the adapters declare | Narrows the action kinds this agent carries out, e.g. `["comment"]`. |
+| `actions` | every kind the adapters declare | Narrows the action kinds this agent carries out, e.g. `["comment"]`. `[]`: the agent only reports and takes no [act lock](security.md#one-acting-instance-per-board). |
 | `max_body_bytes` | 16 MiB | Largest report sent; must not exceed the hub's. |
 | `relay` | `"127.0.0.1:4318"` | Loopback address of the OTLP relay (spans from this machine go through it to the hub); `false`: none. |
 
