@@ -1040,7 +1040,8 @@ issue is **delegated** to: name the app user as an agent's `assignee`.
 | `teams` | (required) | list of team keys | The teams whose issues are tasks (`ENG`), one board each. |
 | `token_env` | `"LINEAR_API_KEY"` | variable name | A Linear API key (personal, `lin_api_…`; an OAuth token is sent as Bearer). Required: Linear has no anonymous access. Writes need a key that may comment and edit issues. |
 | `api_url` | `"https://api.linear.app/graphql"` | URL | https, or http on loopback; a different one needs `token_env` set here. |
-| `timeout` | `"10s"` | duration, <= 60s | One request. |
+| `timeout` | `"10s"` | duration, <= 60s | One request. | One deadline for all of it (connecting, TLS, headers and body), however slowly the server answers.
+| `tick_budget` | `"30s"` | duration, > 0, <= 60s | All the reads of one refresh together (lists and history); past it nothing more is asked until the next refresh, and a team not read keeps its last read for 10 minutes. A slow Linear cannot hold the control loop longer than this plus one request's `timeout`. |
 | `refresh` | `"2m"` | duration, >= 30s | How often the issues are read again (GraphQL has no conditional requests, and Linear meters requests and query complexity per hour); between refreshes the last read is served. A write makes the next tick read again, unless reads are stretched: they take at most half the hour's complexity limit (25 minutes apart at most). |
 | `lookback` | `"7d"` | duration, > 0 | Closed issues updated within this are read (the most recently updated page of 25). |
 | `max_requests_per_tick` | `20` | count, 0–5000 | Per-issue history reads per refresh (who was assigned, labels put on, who edited the description); the rest use what was read before. The lists are always read, bounded by their page caps (pages of 25, at most 20 open and 1 closed per team). |

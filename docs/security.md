@@ -241,9 +241,6 @@ front that limits connections and request time. Do not publish it with a bare
 
 ### Other open medium findings
 
-- **M4:** the Linear client has no overall deadline: a server that answers one byte at a
-  time can stall the control loop. Only farms with `[adapters.linear]` are affected.
-  Follow-up on [#275](https://github.com/ch8er/kelpie/issues/275).
 - **M6:** one authenticated `kelpie agent` can grow the hub's executors, metric series and
   alerts without bound by reporting new adapter names. Give hub tokens only to agents you
   run. Follow-up on [#275](https://github.com/ch8er/kelpie/issues/275).

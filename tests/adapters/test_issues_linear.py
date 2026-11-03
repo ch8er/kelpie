@@ -1112,3 +1112,108 @@ def test_an_action_whose_lookups_fail_keeps_the_agents_known(lin: FakeLinear, br
     assert "KelpieUpdate" not in lin.ops()
     t = {x.id: x for x in a.snapshot(NOW + timedelta(minutes=3)).tasks}
     assert t["ENG-2"].owner_id == "codex"
+
+
+# --- audit M4: one deadline per request, one budget per refresh ------------------------------
+
+
+def test_a_server_that_drips_bytes_is_cut_at_the_timeout() -> None:
+    """Audit M4: the client had only a per-socket-operation timeout, so a server sending a
+    byte every few seconds held the control loop until 4 MiB or EOF."""
+    import socket
+    import threading
+    import time
+
+    listener = socket.create_server(("127.0.0.1", 0))
+    stop = threading.Event()
+
+    def drip() -> None:
+        conn, _ = listener.accept()
+        with conn:
+            conn.recv(65536)
+            conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 1000000\r\n\r\n")
+            while not stop.is_set():
+                try:
+                    conn.sendall(b"{")
+                except OSError:
+                    return
+                stop.wait(0.3)  # under the timeout: every socket read gets a byte in time
+
+    threading.Thread(target=drip, daemon=True).start()
+    port = listener.getsockname()[1]
+    client = LinearClient(f"http://127.0.0.1:{port}/graphql", KEY, timeout=timedelta(seconds=1))
+    started = time.monotonic()
+    try:
+        with pytest.raises(LinearError) as exc:
+            client.query("Viewer", "query Viewer { viewer { id } }", {})
+    finally:
+        stop.set()
+        listener.close()
+    assert exc.value.kind == "network"
+    assert time.monotonic() - started < 3.0
+    assert client.backing_off()  # and the next tick does not ask again at once
+
+
+def test_a_refresh_stops_asking_once_its_time_budget_is_spent(lin: FakeLinear) -> None:
+    """Audit M4: every read of one refresh together takes at most tick_budget; past it no
+    request is sent and a team keeps its last good read."""
+    for n in range(1, 4):
+        lin.issue(f"ENG-{n}", f"issue {n}", ago(days=1), assignee="dana", updated=ago(minutes=1))
+    a = adapter(lin)
+    reader = a.tracker
+    assert isinstance(reader, LinearIssues)
+    clock = [0.0]
+    reader.client.monotonic = lambda: clock[0]
+    sent: list[str] = []
+    real_post = reader.client.post
+
+    def slow_post(*args: Any, **kwargs: Any) -> Any:
+        sent.append(kwargs.get("timeout", args[4] if len(args) > 4 else None))
+        clock[0] += 8.0  # each request takes 8s of the 30s budget
+        return real_post(*args, **kwargs)
+
+    reader.client.post = slow_post
+    first = tasks(a)
+    assert set(first) == {"ENG-1", "ENG-2", "ENG-3"}
+    assert len(sent) <= 4  # 30s / 8s, rounded up: then the budget is spent
+    assert all(t is not None and t <= 10 for t in sent)  # never past the timeout
+    assert reader.client.read_deadline is None  # only during a refresh
+
+    # The next refresh starts with its budget spent at once: nothing is asked, the team is
+    # served from its last good read.
+    reader._next, reader.tick_budget, before = None, timedelta(seconds=1), len(sent)
+
+    def ticking() -> float:  # every look at the clock is 2s later: past the 1s budget
+        clock[0] += 2.0
+        return clock[0]
+
+    reader.client.monotonic = ticking
+    assert set(tasks(a)) == {"ENG-1", "ENG-2", "ENG-3"}
+    assert len(sent) == before
+
+
+TEAMS_QUERY = "query KelpieTeams { teams { nodes { key } } }"
+
+
+def test_the_last_request_of_a_refresh_gets_only_the_time_left(lin: FakeLinear) -> None:
+    client = LinearClient(lin.url, KEY, timeout=timedelta(seconds=10))
+    timeouts: list[float] = []
+    real_post = client.post
+    client.post = lambda *a, **k: timeouts.append(a[4]) or real_post(*a, **k)
+    client.monotonic = lambda: 100.0
+    client.read_deadline = 102.5
+    client.query("KelpieTeams", TEAMS_QUERY, {"keys": ["ENG"]})
+    assert timeouts == [2.5]
+    client.read_deadline = 100.0
+    with pytest.raises(LinearError) as exc:
+        client.query("KelpieTeams", TEAMS_QUERY, {"keys": ["ENG"]})
+    assert exc.value.kind == "budget" and timeouts == [2.5]
+
+
+def test_tick_budget_is_configured_and_bounded() -> None:
+    base = {"teams": ["ENG"]}
+    assert load_linear(base).tick_budget == timedelta(seconds=30)
+    assert load_linear({**base, "tick_budget": "45s"}).tick_budget == timedelta(seconds=45)
+    for bad in ("0s", "2m"):
+        with pytest.raises(ValueError, match="tick_budget"):
+            load_linear({**base, "tick_budget": bad})
