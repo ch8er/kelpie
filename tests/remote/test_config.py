@@ -212,7 +212,7 @@ def test_hub_agents_take_kelpies_adapters_unless_narrowed() -> None:
     raw = hub()
     raw["agents"][0]["adapters"] = ["hermes"]
     assert load_hub(raw).agents[0].adapters == frozenset({"hermes"})
-    for bad in ([], ["custom"], "hermes", [1]):
+    for bad in ([], ["custom"], "hermes", [1], ["hermes", "hermes"]):
         raw["agents"][0]["adapters"] = bad
         with pytest.raises(ValueError, match="adapters must be a non-empty list"):
             load_hub(raw)
@@ -220,14 +220,22 @@ def test_hub_agents_take_kelpies_adapters_unless_narrowed() -> None:
 
 def test_every_platform_adapter_is_one_a_hub_takes(tmp_path: Path) -> None:
     """A new adapter must add its name to ADAPTER_NAMES, or a hub refuses its boards."""
-    from kelpie.app import build_adapters
+    from kelpie.app import ADAPTER_SECTIONS, build_adapters
     from kelpie.remote.protocol import ADAPTER_NAMES
 
+    sections = {
+        "hermes": "",
+        "claude_code": "",
+        "openclaw": "",
+        "github_issues": "",
+        "linear": 'teams = ["ENG"]\n',
+    }
+    # A new [adapters.*] section must be added here, and its adapter's name to ADAPTER_NAMES.
+    assert set(sections) == ADAPTER_SECTIONS
     path = tmp_path / "kelpie.toml"
     path.write_text(
-        "[adapters.hermes]\n[adapters.claude_code]\n[adapters.openclaw]\n"
-        '[connectors.github]\nrepos = ["example/repo"]\n[adapters.github_issues]\n'
-        '[adapters.linear]\nteams = ["ENG"]\n'
+        '[connectors.github]\nrepos = ["example/repo"]\n'
+        + "".join(f"[adapters.{k}]\n{v}" for k, v in sections.items())
     )
     names = {a.name for a in build_adapters(load_settings(path), {"LINEAR_API_KEY": "k" * 40})}
     assert names == ADAPTER_NAMES

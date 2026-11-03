@@ -95,6 +95,7 @@ class _Agent:
     allowed: frozenset[str] = frozenset()  # adapter names taken from this agent
     refused: int = 0  # adapter parts refused, since the hub started
     refused_warned: float = -_LOG_EVERY  # monotonic time of the last warning about them
+    refused_names: tuple[str, ...] = ()  # in the latest accepted report (at most 16)
     last_contact: datetime | None = None  # any authenticated request
     report: Report | None = None
     report_at: datetime | None = None
@@ -116,6 +117,7 @@ class AgentView:
     report: Report | None
     report_at: datetime | None  # when the hub accepted ``report``
     refused_adapters: int = 0  # adapter parts refused from its reports (audit M6)
+    refused_names: tuple[str, ...] = ()  # those of its latest report
 
 
 @dataclass(frozen=True, slots=True)
@@ -242,9 +244,10 @@ class Hub:
         adapter names, narrowed by ``[[hub.agents]] adapters``. Others are refused, counted
         and logged at most once a minute, never merged, alerted or given an executor."""
         kept = tuple(p for p in report.adapters if p.name in state.allowed)
-        if len(kept) == len(report.adapters):
-            return report
         refused = sorted(p.name for p in report.adapters if p.name not in state.allowed)
+        state.refused_names = tuple(refused)
+        if not refused:
+            return report
         state.refused += len(refused)
         if time.monotonic() - state.refused_warned > _LOG_EVERY:
             state.refused_warned = time.monotonic()
@@ -323,7 +326,7 @@ class Hub:
     def agents(self) -> list[AgentView]:
         with self._cond:
             return [
-                AgentView(a.name, a.last_contact, a.report, a.report_at, a.refused)
+                AgentView(a.name, a.last_contact, a.report, a.report_at, a.refused, a.refused_names)
                 for a in self._agents.values()
             ]
 

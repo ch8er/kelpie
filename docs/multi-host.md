@@ -257,7 +257,12 @@ and `requeue` are idempotent there; `comment` may repeat once.
 - **Silent** means: no fresh report for `[hub] silent_after` (default 90 s). On the
   transition the hub alerts once (warning: "agent a silent since …; its tasks are not
   evaluated"), and sends a short "resolved" when it is back. `/metrics`:
-  `kelpie_agent_up{agent}`, `kelpie_agent_last_report_timestamp_seconds{agent}`.
+  `kelpie_agent_up{agent}`, `kelpie_agent_last_report_timestamp_seconds{agent}`,
+  `kelpie_hub_refused_total{agent,kind}`.
+- **Only Kelpie's adapters.** The hub takes from an agent only Kelpie's adapter names
+  (`hermes`, `claude-code`, `openclaw`, `github-issues`, `linear`), narrowed by
+  `[[hub.agents]] adapters`; other adapters in a report are refused, counted and alerted
+  once ([security.md](security.md#hub-names)).
 - **Its tasks are not treated as abandoned.** A board that is not fresh is left out of the
   merge rather than kept stale (a stale board with an advancing `now` is exactly what
   rules read as an orphaned task or a dead session). An adapter that fails on a live agent

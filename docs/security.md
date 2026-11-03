@@ -64,12 +64,15 @@ the boards it could not read. The hub keeps an executor, a metric series and ale
 name, so it bounds them (audit M6): it takes only Kelpie's own adapter names (`hermes`,
 `claude-code`, `openclaw`, `github-issues`, `linear`), narrowed per agent by
 `[[hub.agents]] adapters`; a report's other adapters are refused, never merged or given
-an executor, logged at most once a minute and counted in
+an executor, logged at most once a minute, alerted once per agent (until its reports carry
+only adapters the hub takes) and counted, once per report, in
 `kelpie_hub_refused_total{kind="adapter"}`. Of an adapter's unreadable boards, the first 16
 names (first seen first, until the hub restarts) get alerts and series; a later new name
-still keeps its tasks out of the rules but is only counted (`kind="board"`). A fixed list
-was chosen over "the first names an agent reports": it holds across hub restarts and gives
-an agent no first report to abuse.
+still keeps its tasks out of the rules but is only counted, once per report
+(`kind="board"`). A fixed list was chosen over "the first names an agent reports": it holds
+across hub restarts and gives an agent no first report to abuse. Host sleeps an agent
+reports are kept only when they ended before its report, and at most 64 per agent. Role
+names on `/metrics` come from the agents' boards too; they are not bounded yet (audit L10).
 
 ## Files Kelpie writes
 

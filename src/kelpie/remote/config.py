@@ -338,9 +338,10 @@ def load_hub(section: Any) -> HubSettings | None:
             not isinstance(adapters, list)
             or not adapters
             or not all(isinstance(a, str) and a in ADAPTER_NAMES for a in adapters)
+            or len(set(adapters)) != len(adapters)
         ):
             raise ValueError(
-                f"[[hub.agents]] {name}: adapters must be a non-empty list among "
+                f"[[hub.agents]] {name}: adapters must be a non-empty list of distinct names among "
                 f"{sorted(ADAPTER_NAMES)}"
             )
         token_env = _env(item, "token_env", "", f"[[hub.agents]] {name}")

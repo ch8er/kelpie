@@ -676,9 +676,10 @@ class Metrics:
                 metric(
                     "kelpie_hub_refused_total",
                     "counter",
-                    "Names the hub refused from the agent's reports: adapters that are not "
-                    "Kelpie's or not in [[hub.agents]] adapters (kind adapter), unreadable "
-                    "boards past the first 16 of an adapter (kind board).",
+                    "Parts the hub refused from the agent's reports, counted once per report: "
+                    "adapters that are not Kelpie's or not in [[hub.agents]] adapters (kind "
+                    "adapter), unreadable boards past the first 16 names of an adapter (kind "
+                    "board).",
                     [
                         f"kelpie_hub_refused_total{_labels(agent=a, kind=k)} "
                         f"{self.hub_refused.get((a, k), 0)}"

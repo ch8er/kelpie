@@ -817,7 +817,8 @@ def test_adapter_names_that_are_not_kelpies_are_refused_and_counted() -> None:
         snap = rig.tick()
     assert set(rig.executors) == {"laptop/hermes"}
     assert rig.observer.failed == []  # no series per name
-    assert rig.alerter.sent == []  # and no alert
+    # one alert about the refusals, not one per name
+    assert rig.titles() == ["[kelpie] agent laptop adapters refused"]
     assert {t.id for t in snap.tasks} == {"laptop:t_1a", "laptop:t_2b"}
     assert rig.observer.refusals[("laptop", "adapter")] == 50 * 15
 
@@ -830,6 +831,12 @@ def test_hub_agents_adapters_narrow_what_an_agent_may_report() -> None:
     assert {t.id for t in snap.tasks} == {"vm-1:t_1a", "vm-1:t_2b"}
     assert set(rig.executors) == {"vm-1/hermes"}
     assert rig.observer.refusals == {("laptop", "adapter"): 1}
+    assert rig.titles() == ["[kelpie] agent laptop adapters refused"]
+    assert "hermes" in rig.alerter.sent[0][1]
+    rig.clock.now += timedelta(seconds=5)
+    rig.report("laptop", AdapterReport("claude-code", KINDS, board()))
+    rig.tick()
+    assert rig.alerter.sent[-1][1].startswith("Resolved: ")
 
 
 def test_unreadable_board_names_past_the_first_16_are_only_counted() -> None:
@@ -858,3 +865,25 @@ def test_refusals_are_on_metrics_per_agent_and_kind() -> None:
     assert 'kelpie_hub_refused_total{agent="laptop",kind="adapter"} 1' in text
     assert 'kelpie_hub_refused_total{agent="laptop",kind="board"} 0' in text
     assert "evil" not in text
+
+
+def test_an_agents_sleeps_cannot_grow_the_hub() -> None:
+    """A sleep ending after its report was kept for ever; every report could add 16."""
+    rig = Rig()
+    for n in range(40):
+        rig.clock.now = NOW + timedelta(seconds=n)
+        future = tuple(
+            (NOW + timedelta(days=400 + n, minutes=i), NOW + timedelta(days=401 + n, minutes=i))
+            for i in range(8)
+        )
+        past = tuple(
+            (
+                NOW - timedelta(hours=2, minutes=n * 16 + i),
+                NOW - timedelta(hours=1, minutes=n * 16 + i),
+            )
+            for i in range(8)
+        )
+        rig.report("laptop", sleeps=future + past)
+        snap = rig.tick()
+    assert all(s.end <= rig.clock.now for s in snap.host_sleeps)
+    assert len(snap.host_sleeps) <= 64
