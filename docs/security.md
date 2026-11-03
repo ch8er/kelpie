@@ -163,7 +163,9 @@ holding it):
 - **Where.** Hermes: `<kanban.db>.kelpie-act.lock` next to each board's database. Claude
   Code and OpenClaw: `<spool>.kelpie-act.lock` next to the hook spool (instances reading one
   spool would stop the same sessions; its folder is created 0700 when the hook has not run
-  yet); none without a spool or with `stop_dir = false`. A board or spool reached through a
+  yet); none without a spool or with `stop_dir = false`. A Hermes board whose folder does
+  not exist stops an acting instance from starting (a mistyped `db_path`), where an
+  observing one leaves that board out and watches the others. A board or spool reached through a
   symlink is locked next to the file it points to, so both names find one lock.
   GitHub Issues and Linear: one file per repository or team under
   `$XDG_STATE_HOME/kelpie/locks/` (by default `~/.local/state/kelpie/locks/`, created 0700),

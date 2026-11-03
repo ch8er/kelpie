@@ -22,8 +22,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ### Safety
 
-- One acting Kelpie per board is enforced: an instance with a rule in `act` (and
-  `kelpie agent`, unless `[agent] actions = []`) holds a lock per board, and a second
+- One acting Kelpie per board is enforced: `kelpie serve` with `dry_run` off and a rule in
+  `act` whose actions an adapter carries out (not one that only alerts or cancels CI
+  builds), and `kelpie agent` unless `[agent] actions = []`, hold a lock per board; a second
   acting instance on the same board refuses to start, naming the board and the holder's
   pid. Observe and suggest instances are unaffected (audit M7, [#321](https://github.com/ch8er/kelpie/pull/321)).
 

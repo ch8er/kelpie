@@ -29,7 +29,7 @@ def test_a_second_holder_is_refused_with_the_board_and_the_pid(tmp_path: Path) -
         with pytest.raises(ActLockError) as exc:  # flock is per open file: same process too
             acquire([lock])
         text = str(exc.value)
-        assert "another Kelpie acts on board qr (pid 4242)" in text
+        assert "another Kelpie acts on board qr (pid 4242, as its lock file says)" in text
         assert str(lock.path) in text
     finally:
         held.release()
@@ -233,6 +233,8 @@ def test_hermes_boards_each_get_a_lock(tmp_path: Path) -> None:
         (ACTING, True),
         # a rule in act that only alerts acts on no board
         ('[engine]\ndry_run = false\n[engine.rules.ping_pong]\nmode = "act"\n', False),
+        # cancelling CI builds touches no board either
+        ('[engine]\ndry_run = false\n[engine.rules.ci_economy]\nmode = "act"\n', False),
         ('[engine]\ndry_run = false\n[engine.rules.loop_breaker]\nmode = "suggest"\n', False),
         ('[engine]\ndry_run = true\n[engine.rules.loop_breaker]\nmode = "act"\n', False),
     ],
@@ -272,3 +274,15 @@ def test_an_observing_serve_starts_next_to_an_acting_one(
         assert serve_act_locks(observing).boards == ()
     finally:
         acting.release()
+
+
+def test_a_symlink_loop_is_a_clean_refusal(tmp_path: Path) -> None:
+    (tmp_path / "a").symlink_to(tmp_path / "b")
+    (tmp_path / "b").symlink_to(tmp_path / "a")
+    path = beside(tmp_path / "a")  # no RuntimeError from pathlib
+    assert path.name == "a.kelpie-act.lock"
+    held = acquire([ActLock("loop", path)])  # the lock file itself is no link
+    held.release()
+    (tmp_path / "c").symlink_to(tmp_path / "c")
+    with pytest.raises(ActLockError):
+        acquire([ActLock("loop", tmp_path / "c" / "x.lock")])

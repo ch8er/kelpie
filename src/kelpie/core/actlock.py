@@ -49,7 +49,7 @@ def beside(path: Path) -> Path:
     path = Path(path).expanduser()
     try:
         path = path.resolve(strict=False)
-    except OSError:  # a link loop: the name as given
+    except (OSError, RuntimeError):  # a link loop (RuntimeError on 3.12): the name as given
         path = path.absolute()
     return path.with_name(path.name + SUFFIX)
 
@@ -85,6 +85,8 @@ class HeldLocks:
             _, fd = self.held.pop()
             try:
                 fcntl.flock(fd, fcntl.LOCK_UN)
+            except OSError:
+                pass  # closing the file lets the lock go anyway
             finally:
                 os.close(fd)
 
@@ -103,12 +105,13 @@ def acquire(locks: Iterable[ActLock], pid: int | None = None) -> HeldLocks:
                 continue
             seen.add(path)
             fd = _open(lock, path)
+            held.held.append((lock, fd))  # released with the others if a later step fails
             st = os.fstat(fd)
             if (st.st_dev, st.st_ino) in files:
+                held.held.pop()
                 os.close(fd)
                 continue
             files.add((st.st_dev, st.st_ino))
-            held.held.append((lock, fd))  # released with the others if the lock fails
             _take(lock, path, fd, os.getpid() if pid is None else pid)
     except BaseException:
         held.release()
@@ -120,7 +123,7 @@ def _canonical(path: Path) -> Path:
     path = Path(path).expanduser()
     try:  # the folder may be reached through a link; the lock file itself never is
         return path.parent.resolve(strict=False) / path.name
-    except OSError:
+    except (OSError, RuntimeError):  # a link loop
         return path.absolute()
 
 
@@ -143,13 +146,20 @@ def _open(lock: ActLock, path: Path) -> int:
     except PermissionError:
         try:  # left by another user (a run under sudo): flock needs no write access
             fd = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK)
+        except FileNotFoundError as exc:
+            raise ActLockError(_cannot(lock, path, exc) + " (its folder is not writable)") from None
         except OSError as exc:
             raise ActLockError(
                 _cannot(lock, path, exc) + " (another user's file: remove it if no Kelpie runs)"
             ) from None
     except OSError as exc:
         raise ActLockError(_cannot(lock, path, exc)) from None
-    if not stat.S_ISREG(os.fstat(fd).st_mode):  # a FIFO or device someone put there
+    try:
+        regular = stat.S_ISREG(os.fstat(fd).st_mode)
+    except OSError as exc:
+        os.close(fd)
+        raise ActLockError(_cannot(lock, path, exc)) from None
+    if not regular:  # a FIFO or device someone put there
         os.close(fd)
         raise ActLockError(
             f"cannot take the act lock of board {lock.board}: {path} is not a regular file"
@@ -190,7 +200,7 @@ def _holder(fd: int) -> str:
         text = os.pread(fd, MAX_HOLDER_BYTES, 0).decode("ascii", "replace").strip()
     except OSError:
         return ""
-    return f" (pid {text})" if text.isdigit() else ""
+    return f" (pid {text}, as its lock file says)" if text.isdigit() else ""
 
 
 def _cannot(lock: ActLock, path: Path, exc: OSError) -> str:
