@@ -10,6 +10,7 @@ import re
 import shutil
 import subprocess
 from collections.abc import Callable
+from datetime import timedelta
 from pathlib import Path
 
 import pytest
@@ -91,3 +92,55 @@ def test_the_growth_query_in_prometheus(tmp_path: Path) -> None:
     assert min(got["cleanup"]) > 20  # a small cleanup does not end a forecast
     assert all(20 < v < 28 for v in got["sawtooth"])
     assert max(got["builds"]) < 1  # bursts with gaps longer than a slice: no growth
+
+
+def path_readings(tmp_path: Path, interval: timedelta) -> list[float]:
+    """path_growth (GB a day) of a directory growing 30 GB a day, measured by the script
+    every hour (#281): its size is a step that changes once an hour."""
+    query = PrometheusConfig(url="http://x", hosts={}, path_interval=interval).query_text(
+        "path_growth"
+    )
+    evals = [h * 3600 + 7 + m * 60 for h in (12, 13) for m in (0, 20, 40)]
+    end = evals[-1] + 60
+    size = [30 * 1e9 * ((i * SCRAPE) // 3600 * 3600) / DAY for i in range(end // SCRAPE + 1)]
+    spec = {
+        "rule_files": [],
+        "evaluation_interval": "1m",
+        "tests": [
+            {
+                "interval": f"{SCRAPE}s",
+                "input_series": [
+                    {
+                        "series": 'kelpie_path_bytes{instance="a",path="/p",mountpoint="/"}',
+                        "values": " ".join(f"{v:.0f}" for v in size),
+                    }
+                ],
+                "promql_expr_test": [
+                    {"expr": query, "eval_time": f"{e}s", "exp_samples": [{"labels": "x{}"}]}
+                    for e in evals
+                ],
+            }
+        ],
+    }
+    path = tmp_path / "path_test.json"
+    path.write_text(json.dumps(spec))
+    assert PROMTOOL is not None
+    run = subprocess.run(
+        [PROMTOOL, "test", "rules", str(path)], capture_output=True, text=True, timeout=120
+    )
+    out = run.stdout + run.stderr
+    blocks = re.split(r"\n\s*expr: ", out)[1:]
+    assert len(blocks) == len(evals), out
+    values = []
+    for block in blocks:
+        got = re.findall(r'path="/p"\} ([-+0-9.eE]+)', block.split("got:", 1)[1])
+        values.append(float(got[0]) / 1e9 if got else 0.0)
+    return values
+
+
+def test_directory_growth_from_hourly_sizes(tmp_path: Path) -> None:
+    hourly = path_readings(tmp_path, timedelta(hours=1))
+    assert all(15 < v < 40 for v in hourly), hourly  # 2h slices of hourly steps: 0.75x-1.1x
+    # With quarter-hour slices (the old query), most slices of hourly steps hold no growth.
+    old = path_readings(tmp_path, timedelta(minutes=1))
+    assert max(old) < 10, old

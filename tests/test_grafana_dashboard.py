@@ -41,7 +41,10 @@ SCRAPE_LABELS = {"instance", "job"}
 # Exported metrics deliberately not on the dashboard, with the reason. Keep it short: a
 # metric added to the code fails test_every_metric_is_on_the_dashboard until it gets a
 # panel or a line here.
-NOT_ON_DASHBOARD: dict[str, str] = {}
+NOT_ON_DASHBOARD: dict[str, str] = {
+    # The collector's own cost (#281): kelpie doctor reads it ("path scans cheap").
+    "kelpie_path_scan_seconds": "the path-sizes script's scan time, checked by kelpie doctor",
+}
 
 
 def _dashboard() -> dict[str, Any]:

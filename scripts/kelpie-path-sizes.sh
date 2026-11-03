@@ -3,13 +3,19 @@
 # Kelpie's rule 7 can name what is filling a disk (incident 19):
 #
 #   kelpie_path_bytes{path="/Users/agent/Library/Developer/CoreSimulator/Devices",mountpoint="/System/Volumes/Data"} 36507222016
+#   kelpie_path_scan_seconds{path="/Users/agent/Library/Developer/CoreSimulator/Devices"} 4
 #
 # Usage: kelpie-path-sizes.sh OUTPUT_DIR DIRECTORY [DIRECTORY ...]
 #
 # OUTPUT_DIR is node_exporter's --collector.textfile.directory. The file is written to a
-# temporary name and renamed, so node_exporter never reads half of it. Run it every 15
-# minutes (deploy/textfile has a launchd agent and a systemd timer): du walks every file,
-# so pick the few directories that grow (simulators, caches, worktrees), not the whole disk.
+# temporary name and renamed, so node_exporter never reads half of it. Run it every hour
+# (deploy/textfile has a launchd agent and a systemd timer; [resources.prometheus]
+# path_interval says how often). du walks every file, so it must stay cheap: pick the few
+# narrow directories that grow (simulator devices, Xcode DerivedData, build caches, system
+# caches), never a worktree root, a whole agent home or the whole disk, which hold hundreds
+# of thousands of files (node_modules, build output). kelpie_path_scan_seconds is how long
+# each du took (whole seconds), and kelpie doctor warns about one over a minute. A disk's
+# growth alert works without this script; the sizes only name what grows.
 # Each size stays on the directory's own filesystem (du -x), and ``mountpoint`` names that
 # filesystem as node_exporter does, so Kelpie lists a directory under the disk it fills.
 # Directories must be absolute paths without a newline; one that does not exist, or that du
@@ -44,6 +50,7 @@ tmp=$(mktemp "$out_dir/.kelpie_paths.XXXXXX")
   echo "# TYPE kelpie_path_bytes gauge"
   seen='
 '
+  scans=  # kelpie_path_scan_seconds lines, written after (one group per metric)
   for dir in "$@"; do
     case "$dir" in
       /*) ;;
@@ -62,19 +69,26 @@ $dir
     seen="$seen$dir
 "
     [ -d "$dir" ] || { echo "$0: skipped $dir: not a directory" >&2; continue; }
+    # Label values escape backslash and double quote (Prometheus text format).
+    label=$(printf '%s' "$dir" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g')
     # -H: a directory given as a symlink (/var/lib/docker on a data disk) is measured.
+    started=$(date +%s)
     kb=$($limit du -skxH -- "$dir" 2>/dev/null | head -n 1 | cut -f1 || true)
+    # Written for a du that timed out or gave no size too: that is the costly case.
+    scans="${scans}kelpie_path_scan_seconds{path=\"$label\"} $(($(date +%s) - started))
+"
     case "$kb" in
       '' | *[!0-9]*) echo "$0: skipped $dir: du gave no size" >&2; continue ;;
     esac
     # The mountpoint follows the capacity column ("45%"); a device name may hold spaces.
     # macOS pads the columns with several spaces.
     mount=$(df -P -- "$dir" 2>/dev/null | sed -n '2s/^.* [0-9][0-9]*%  *//p')
-    # Label values escape backslash and double quote (Prometheus text format).
-    label=$(printf '%s' "$dir" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g')
     mlabel=$(printf '%s' "$mount" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g')
     printf 'kelpie_path_bytes{path="%s",mountpoint="%s"} %s\n' "$label" "$mlabel" "$((kb * 1024))"
   done
+  echo "# HELP kelpie_path_scan_seconds How long measuring a directory took (scripts/kelpie-path-sizes.sh)."
+  echo "# TYPE kelpie_path_scan_seconds gauge"
+  printf '%s' "$scans"
 } >"$tmp"
 chmod 0644 "$tmp"
 mv "$tmp" "$out_dir/kelpie_paths.prom"

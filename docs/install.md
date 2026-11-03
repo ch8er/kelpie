@@ -168,10 +168,28 @@ to `[resources.prometheus] hosts`.
 
 **What grows.** The time-to-full alert names the fastest-growing directories when they are
 measured: copy `scripts/kelpie-path-sizes.sh` to `/usr/local/share/kelpie/` and run it every
-15 minutes with node_exporter's textfile directory and the directories that grow (simulator
-devices, Xcode DerivedData, caches, `~/.hermes`, Docker). `deploy/textfile/` has a launchd
-agent (`com.kelpie.path-sizes.plist`, macOS) and a systemd service and timer (Linux): edit the
-paths in them first. Pick a few directories, not the whole disk: `du` walks every file.
+hour with node_exporter's textfile directory and the directories that grow. `deploy/textfile/`
+has a launchd agent (`com.kelpie.path-sizes.plist`, macOS) and a systemd service and timer
+(Linux), both hourly: edit the paths in them first. The disk's own growth alert works without
+this script; the sizes only say what grows, and hourly is enough for that.
+
+Keep it cheap: `du` walks every file of each directory on every run, while builds are
+running. Point it at a few narrow directories that grow:
+
+- simulator devices (`~/Library/Developer/CoreSimulator/Devices`) and Xcode DerivedData
+  (`~/Library/Developer/Xcode/DerivedData`) on macOS;
+- build caches (`~/.cache`, `~/.gradle/caches`, a Bazel output base) and container volumes
+  (`/var/lib/docker/volumes`);
+- system caches (`~/Library/Caches`, `/var/cache`).
+
+Never point it at a worktree root, a whole agent home (`~/.hermes`, `~/.claude`) or the whole
+disk: they hold the agents' worktrees with `node_modules` and build output, hundreds of
+thousands of files, and one run then walks a large part of the disk (on a live farm, every 15
+minutes, at a load average of several hundred). The script has no exclude list (`du` options
+for that differ between macOS and Linux): measure the directories under such a root that grow
+instead. It writes how long each directory took (`kelpie_path_scan_seconds`), and
+`kelpie doctor` warns about one over a minute ("path scans cheap"), naming the directory. If you
+run it more or less often than hourly, set `[resources.prometheus] path_interval` to match.
 
 **What changed.** An outage that starts soon after a toolchain update names the update as
 its likely cause (incident 20: an automatic Xcode update broke every iOS build). Copy
@@ -273,6 +291,7 @@ with a `pip` install, read them on GitHub.
 | worktrees readable | git can read the workspaces of live tasks (skipped with `git_state = false`). |
 | PR blocks have conditions | No block reason on the board names a PR (`PR #12`, `owner/repo#12`, a `/pull/12` link, `#12` next to PR or merge wording; `guard:` blocks are left out), or every one that does matches a `[[block_conditions]]` pattern whose `pr` names a PR of `[connectors.github] repos`, as `kelpie serve` resolves it. Otherwise a WARN: those blocks would look like stuck tasks or questions for a person (on a live farm, most of the noise of a 24 h review). |
 | disk watched | Rule 7 is loaded and `[resources.prometheus]` is set, and that Prometheus has `node_filesystem_size_bytes` for every configured host (FAIL otherwise: incident 19, a disk filled with no node_exporter). WARN, with every cause at once, when the `disk_growth` query fails (when Prometheus rejects it: its subqueries need 2.7 or later), there is no `kelpie_path_bytes` for a host (the alert cannot say what grows) or the token goes over plain http; also when Prometheus does not answer (doctor may run where Prometheus is out of reach). A host with no growth rate yet is a note, not a warning: a new Prometheus or host has none for half of `growth_window`. |
+| path scans cheap | No directory measured by `scripts/kelpie-path-sizes.sh` on a configured host took over 60 s (`kelpie_path_scan_seconds`). WARN otherwise, slowest first with the host: point the script at narrower directories that grow. Skipped without rule 7, Prometheus, an answer or the metric (an older script, or none installed); it reads the metric name as shipped, whatever `[resources.prometheus.queries]` says. |
 | process counts fresh | Every macOS host (`node_uname_info`) among `[resources.prometheus] hosts` has a process count from `scripts/kelpie-process-limit.sh` written in the last 5 minutes. WARN otherwise, with when it was last written: rule 7 ignores an older file, so a stopped script leaves the process limit unwatched (keep the hosts' clocks in sync with Prometheus's). With a custom `processes` query the check judges by that query. Skipped without rule 7, Prometheus, a macOS host or an answer. |
 | claude code task lists | Every list in `[adapters.claude_code] task_lists` is readable (only with that section, like the next three). |
 | claude code hooks fire | The hook's spool has a line from the last hour, from a hook that can enforce stops (unless `stop_dir = false`). |

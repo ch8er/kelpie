@@ -1,12 +1,17 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
-  Directory sizes for Kelpie's rule 7, every 15 minutes (macOS). Replace YOU and the paths
+  Directory sizes for Kelpie's rule 7, every hour (macOS). Replace YOU and the paths
   (and /opt/homebrew with /usr/local on an Intel Mac), copy to
   ~/Library/LaunchAgents/ and load it with:
     launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.kelpie.path-sizes.plist
   The output directory is node_exporter's textfile directory
   (brew services: node_exporter's collector.textfile.directory flag, see docs/install.md).
+  du walks every file of each path: list only narrow directories that grow (simulator
+  devices, DerivedData, caches), never a worktree root or a whole agent home such as
+  ~/.hermes, whose node_modules and build output hold hundreds of thousands of files.
+  Hourly is enough to name what fills a disk; kelpie doctor warns when one scan takes
+  over a minute.
 -->
 <plist version="1.0">
 <dict>
@@ -19,7 +24,6 @@
     <string>/Users/YOU/Library/Developer/CoreSimulator/Devices</string>
     <string>/Users/YOU/Library/Developer/Xcode/DerivedData</string>
     <string>/Users/YOU/Library/Caches</string>
-    <string>/Users/YOU/.hermes</string>
   </array>
   <key>EnvironmentVariables</key>
   <dict>
@@ -28,7 +32,7 @@
     <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
   </dict>
   <key>StartInterval</key>
-  <integer>900</integer>
+  <integer>3600</integer>
   <key>RunAtLoad</key>
   <true/>
   <key>LowPriorityIO</key>
