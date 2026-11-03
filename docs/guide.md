@@ -250,7 +250,10 @@ board the report is unchanged.
   with its age, and not counted in the hours or dollars (it delays no work). Agent tasks
   planned for later (not started: a pre-work status or a planned label; incident 20) never
   count as waiting: rule 13 leaves them out of its count, and those behind a person's open
-  inbox are listed under "Planned waits" in agent-hours, never counted. Humans (owners of
+  inbox are listed under "Planned waits" in agent-hours, never counted. A host that slept
+  (a laptop lid closed: issue #296, `[engine] host_sleep_min_gap`) lost no hours: the time
+  it slept is taken out of every state on its tasks (an agent's sleep out of that agent's
+  tasks only) and listed under "Host asleep" per host. Humans (owners of
   kind `human`) never count as idle agents. `[report] hour_usd` prices them all.
 - **Cost of chaos, dollars**: tokens burned by runaway and no-progress sessions while
   flagged, and by every session `exit_contract` requeued (a restart). Spend follows each

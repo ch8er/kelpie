@@ -24,7 +24,15 @@ from typing import NamedTuple, cast
 from kelpie.core.actions import ActionKind, Severity
 from kelpie.core.config import Mode
 from kelpie.core.ledger import LedgerEntry, Outcome, Suppression, to_json
-from kelpie.core.model import ReportedCost, Snooze, SnoozeSource, Span, SpanKind, SpanTotals
+from kelpie.core.model import (
+    HostSleep,
+    ReportedCost,
+    Snooze,
+    SnoozeSource,
+    Span,
+    SpanKind,
+    SpanTotals,
+)
 from kelpie.core.snooze import EXPIRED_KEPT, MAX_BY, MAX_REASON, PRUNE_AFTER
 from kelpie.core.spans import (
     MAX_LINK_DEPTH,
@@ -312,6 +320,28 @@ class SqliteLedgerStore:
 
     def append(self, entry: LedgerEntry) -> None:
         self._write(lambda db: _insert_entry(db, entry))
+
+    def record_sleeps(self, sleeps: Sequence[HostSleep]) -> None:
+        """Store host sleeps (issue #296) for the daily report; one already stored is kept
+        once. Rows older than ``HOST_SLEEPS_KEEP`` go."""
+        if not sleeps:
+            return
+
+        def write(db: sqlite3.Connection) -> sqlite3.Cursor:
+            db.execute(_HOST_SLEEPS)
+            db.executemany(
+                "INSERT OR IGNORE INTO host_sleeps (agent, start_at, end_at, source)"
+                " VALUES (?, ?, ?, ?)",
+                [(s.agent or "", _ts(s.start), _ts(s.end), s.source) for s in sleeps],
+            )
+            oldest = max(s.end for s in sleeps) - HOST_SLEEPS_KEEP
+            return db.execute("DELETE FROM host_sleeps WHERE end_at < ?", (_ts(oldest),))
+
+        self._write(write)
+
+    def host_sleeps(self, start: datetime, end: datetime) -> list[HostSleep]:
+        with self._lock:
+            return read_host_sleeps(self._db, start, end)
 
     def by_fingerprint(self, fingerprint: str, after: datetime) -> Sequence[LedgerEntry]:
         sql = f"SELECT {_COLUMNS} FROM actions WHERE fingerprint = ? AND at > ? ORDER BY at, id"
@@ -1265,3 +1295,37 @@ def read_instruction_tokens(
             return []
         raise
     return [TokenRow(datetime.fromisoformat(r[0]), r[1] or None, r[2], r[3], r[4]) for r in found]
+
+
+# Host sleeps (issue #296): created on the first write, like ``instruction_tokens``, so a
+# farm whose hosts never sleep has no table and no schema change; readers treat a missing
+# table as no rows. ``agent`` '' : the host kelpie serve runs on.
+_HOST_SLEEPS = """
+CREATE TABLE IF NOT EXISTS host_sleeps (
+    agent    TEXT NOT NULL,
+    start_at TEXT NOT NULL,
+    end_at   TEXT NOT NULL,
+    source   TEXT NOT NULL,
+    PRIMARY KEY (agent, start_at, end_at)
+);
+"""
+HOST_SLEEPS_KEEP = timedelta(days=30)
+
+
+def read_host_sleeps(db: sqlite3.Connection, start: datetime, end: datetime) -> list[HostSleep]:
+    """Sleeps that overlap ``[start, end)``, by start; none when the table was never
+    created."""
+    try:
+        found = db.execute(
+            "SELECT agent, start_at, end_at, source FROM host_sleeps"
+            " WHERE end_at > ? AND start_at < ? ORDER BY start_at, agent",
+            (_ts(start), _ts(end)),
+        ).fetchall()
+    except sqlite3.OperationalError as exc:
+        if "no such table" in str(exc):
+            return []
+        raise
+    return [
+        HostSleep(datetime.fromisoformat(r[1]), datetime.fromisoformat(r[2]), r[0] or None, r[3])
+        for r in found
+    ]

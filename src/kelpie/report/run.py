@@ -17,7 +17,7 @@ from typing import Protocol
 
 from kelpie.core.budgets import PriceTable
 from kelpie.core.config import Mode
-from kelpie.core.model import Reconciliation, Snapshot, Snooze
+from kelpie.core.model import HostSleep, Reconciliation, Snapshot, Snooze
 from kelpie.core.spend import SpendConfig
 from kelpie.core.storage import TokenRow
 from kelpie.report.config import ReportSettings
@@ -96,6 +96,7 @@ def load_inputs(sources: ReportSources, day: date, board: Snapshot) -> ReportInp
     actions, states, spans, fixes, attribution = [], [], [], [], None
     snoozes: list[Snooze] = []
     tokens: list[TokenRow] = []
+    sleeps: list[HostSleep] = []
     if sources.db_path is not None and sources.db_path.exists():
         with ReportStore(sources.db_path) as store:
             actions = store.actions(history, end)
@@ -105,6 +106,7 @@ def load_inputs(sources: ReportSources, day: date, board: Snapshot) -> ReportInp
             attribution = store.attribution()
             snoozes = store.snoozes(start)
             tokens = store.instruction_tokens(history, end)
+            sleeps = store.host_sleeps(history, end)
     # Hook spans (platforms without OTLP) live in the adapters, not in the store; the same
     # call reported both ways is kept once.
     merged = merge_hook_spans(
@@ -145,6 +147,7 @@ def load_inputs(sources: ReportSources, day: date, board: Snapshot) -> ReportInp
         instruction_duplicates=board.instruction_duplicates,
         instructions_at=board.now if board.instruction_files else None,
         instruction_tokens=tokens,
+        host_sleeps=sleeps,
     )
 
 

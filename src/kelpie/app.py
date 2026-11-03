@@ -1851,6 +1851,7 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
         state_store=states,
         fallback=hub is None,
         sleep_watch=sleep_watch(settings.engine, clock),
+        sleep_log=store.record_sleeps if isinstance(store, SqliteLedgerStore) else None,
     )
     farm = None
     if hub is not None:

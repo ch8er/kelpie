@@ -2,8 +2,10 @@
 
 import gzip
 import json
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -24,9 +26,11 @@ from kelpie.core.model import (
     slept,
     source_agent,
 )
+from kelpie.core.storage import SqliteLedgerStore
 from kelpie.remote.agent import Agent
 from kelpie.remote.config import AgentSettings
 from kelpie.remote.protocol import decode_report
+from kelpie.report.store import ReportStore
 from kelpie.rules._tasks import awake, is_live, slept_since, task_awake
 from kelpie.rules.checkpoints import Checkpoints
 from kelpie.rules.orphan_status import OrphanStatus
@@ -262,3 +266,43 @@ def test_kelpie_agent_reports_its_hosts_sleep() -> None:
     first, woke, later = bodies
     assert "sleeps" not in first and "sleeps" not in later  # sent only right after a wake
     assert decode_report(woke).sleeps == ((clocks.wall - 16 * M - 47 * M, clocks.wall - 16 * M),)
+
+
+def test_sleeps_are_stored_once_for_the_report(tmp_path: Path) -> None:
+    db = tmp_path / "kelpie.db"
+    store = SqliteLedgerStore(db)
+    other = HostSleep(T0 + 30 * M, T0 + 80 * M, agent="host-b")
+    calls: list[int] = []
+
+    def log(sleeps: Sequence[HostSleep]) -> None:
+        calls.append(len(sleeps))
+        store.record_sleeps(sleeps)
+
+    engine = Engine([Seen()], sleep_log=log)
+    engine.tick(lambda: Snapshot(now=T0 + 90 * M, host_sleeps=(SLEEP,)))
+    engine.tick(lambda: Snapshot(now=T0 + 91 * M, host_sleeps=(SLEEP, other)))
+    engine.tick(lambda: Snapshot(now=T0 + 92 * M, host_sleeps=(SLEEP, other)))
+    assert calls == [1, 1]
+    store.record_sleeps([SLEEP])  # stored once
+    store.close()
+    with ReportStore(db) as report:
+        assert report.host_sleeps(T0, T0 + 2 * timedelta(hours=1)) == [SLEEP, other]
+        assert report.host_sleeps(T0 + 75 * M, T0 + 2 * timedelta(hours=1)) == [other]
+    empty = tmp_path / "empty.db"
+    SqliteLedgerStore(empty).close()
+    with ReportStore(empty) as report:
+        assert report.host_sleeps(T0, T0 + M) == []  # never slept: no table
+
+
+def test_a_failing_sleep_log_is_retried() -> None:
+    calls: list[int] = []
+
+    def log(sleeps: Sequence[HostSleep]) -> None:
+        calls.append(len(sleeps))
+        if len(calls) == 1:
+            raise OSError("disk full")
+
+    engine = Engine([Seen()], sleep_log=log)
+    for minute in (90, 91, 92):
+        engine.tick(lambda m=minute: Snapshot(now=T0 + m * M, host_sleeps=(SLEEP,)))
+    assert calls == [1, 1]
