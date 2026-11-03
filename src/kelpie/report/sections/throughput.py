@@ -147,6 +147,7 @@ def throughput_section(ctx: SectionContext) -> Section | None:
         "(Hermes `lookback`), and a session with no end or heartbeat counts until midnight. "
         "A task's waiting time counts under what it waits (or last waited) for now: a hold "
         "label, a person (rule 13), else the kind of its condition; the part inside an open "
-        "CI outage (rule 9) counts under the outage.",
+        "outage counts under it (a CI outage of rule 9, a block storm of rule 4, a tool "
+        "failure of rule 10).",
     ]
     return Section(TITLE, tuple(lines))

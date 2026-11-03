@@ -12,6 +12,7 @@ import pytest
 from kelpie.report.daily import (
     CHAOS_CAUSES,
     CHAOS_PRECEDENCE,
+    OUTAGE,
     PEOPLE,
     PREWORK,
     build_report,
@@ -110,8 +111,8 @@ def test_waits_past_the_listed_ids_still_count() -> None:
     assert lines["stale_blocks"].hours == 0 and lines["stale_blocks"].also_hours == 8.0
 
 
-def test_a_person_comes_first_then_a_stale_block() -> None:
-    assert CHAOS_PRECEDENCE[:2] == (PEOPLE, "stale_blocks")
+def test_an_outage_comes_first_then_a_person_then_a_stale_block() -> None:
+    assert CHAOS_PRECEDENCE[:3] == (OUTAGE, PEOPLE, "stale_blocks")
     assert sorted(CHAOS_PRECEDENCE) == sorted(CHAOS_CAUSES)
 
 

@@ -16,7 +16,8 @@ that (:func:`kelpie.report.daily.build_report`, without the extra sections), so 
 counted as the farm's are. Its biggest wait is classified with the farm's wait causes: a
 person's inbox, a CI outage or a snooze names no board, yet says what a board's task waited
 for. Owners are shared: a Hermes home's profiles work on every board. What names no board
-(a forgotten hold's idle agents, a person's inbox, a state without a task) counts only in
+(a forgotten hold's idle agents, a person's inbox, an outage's tasks: its state and
+alerts name no task of their own, a state without a task) counts only in
 the farm total, and the difference is shown as "not on one board".
 """
 

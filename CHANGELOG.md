@@ -6,6 +6,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 [PEP 440](https://peps.python.org/pep-0440/), so a pre-release is written `0.1.0a1`, not
 `0.1.0-alpha.1`. The release process is in [docs/release.md](docs/release.md).
 
+## [Unreleased]
+
+### Changed
+
+- Every outage kind in the report (#229, incident 20): a block storm's waits count under "a
+  shared blocker" for the tasks it names, even when its reason names a person (a tool
+  failing for many tasks, under "a shared tool failure"), and in the cost of chaos an
+  outage's tasks (a CI outage's too; a finished one until it finished) count once, under
+  "farm outages", from the outage's first alert that counts, ahead of the person's inbox and
+  their stale blocks. The "Outages" list names each outage's kind, scope and who can end it;
+  an outage whose check is still in observe is listed, and its waits stay where they were
+  (until it is switched on; switched back to observe, it stops counting)
+  ([#270](https://github.com/ch8er/kelpie/pull/270)).
+
 ## [0.1.0a1] - 2026-11-03
 
 First public pre-release, an alpha: interfaces and configuration keys may still
@@ -535,4 +549,5 @@ control loop. Each rule runs in `observe`, `suggest` or `act` mode.
   mode and the daily report ([#62](https://github.com/ch8er/kelpie/pull/62), [#73](https://github.com/ch8er/kelpie/pull/73), [#74](https://github.com/ch8er/kelpie/pull/74), [#81](https://github.com/ch8er/kelpie/pull/81)).
 - A code health and security audit plan was written before the first release ([#92](https://github.com/ch8er/kelpie/pull/92)).
 
+[Unreleased]: https://github.com/ch8er/kelpie/compare/v0.1.0a1...HEAD
 [0.1.0a1]: https://github.com/ch8er/kelpie/releases/tag/v0.1.0a1

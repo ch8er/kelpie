@@ -1,4 +1,4 @@
-"""The report's list of the day's CI outages (rule 9, ``kelpie.core.incidents``).
+"""The report's list of the day's outages (``kelpie.core.incidents``).
 
 The day is test_waits' (2026-03-02, UTC): an outage's waiting time comes from its tasks
 R1-R3, which wait on CI in ``example/app`` from 08:00.
@@ -38,7 +38,7 @@ def test_the_report_names_each_outage_with_its_folded_alerts() -> None:
     entries = (sample, folded(4, "a"), folded(5, "a"), folded(6, "b"), folded(21, "late"))
     report = build_report(inputs(states=(state,), actions=entries), sections={})
     [line] = report.outages
-    assert (line.signature, line.prs, line.folded, line.open) == (
+    assert (line.signature, line.scope, line.folded, line.open) == (
         SIGNATURE,
         2,
         2,  # alert "a" twice (hourly repeat) counts once; "late" is after the outage
@@ -46,7 +46,7 @@ def test_the_report_names_each_outage_with_its_folded_alerts() -> None:
     )
     assert report.outage_wait_hours == pytest.approx(3 * 12)  # R1-R3 from 08:00 to 20:00
     markdown = render_markdown(report)
-    assert "**CI outages** (rule 9; 36.0 task-hours of waiting fell inside them" in markdown
+    assert "**Outages** (36.0 task-hours of waiting fell inside them" in markdown
     assert f"`{SIGNATURE}` since 2026-03-02 02:00 UTC, until 2026-03-02 20:00 UTC" in markdown
     assert "2 PR(s), 2 alert(s) folded under it" in markdown
 
@@ -72,7 +72,7 @@ def test_an_outage_from_yesterday_counts_only_the_days_prs_and_folds() -> None:
     )
     report = build_report(inputs(states=(state,), actions=entries), sections={})
     [line] = report.outages
-    assert line.since == at(-5) and (line.prs, line.folded) == (3, 1)
+    assert line.since == at(-5) and (line.scope, line.folded) == (3, 1)
     assert "since 2026-03-01 19:00 UTC, until 2026-03-02 06:00 UTC" in render_markdown(report)
 
 
@@ -110,7 +110,7 @@ def test_an_outage_outside_the_day_is_not_listed() -> None:
 
 def test_no_outage_no_list() -> None:
     report = build_report(inputs(), sections={})
-    assert report.outages == () and "CI outages" not in render_markdown(report)
+    assert report.outages == () and "**Outages**" not in render_markdown(report)
 
 
 def test_folds_after_the_last_sighting_count_until_the_outage_closes() -> None:
@@ -156,6 +156,36 @@ def test_an_outage_after_a_toolchain_change_names_it_as_the_likely_cause() -> No
     markdown = render_markdown(report)
     assert "**Toolchain changes before outages**" in markdown
     assert f"- block storm `xcodebuild fails` since 2026-03-02 02:00 UTC: {XCODE}" in markdown
+
+
+def test_a_toolchain_cause_survives_a_since_that_moved_past_its_alert() -> None:
+    """A storm's ``since`` moves forward as its early blocks age out (rule 4): the alert
+    that named the change, before the new ``since``, still names it, from the Outages
+    list's start."""
+    from kelpie.core.incidents import BLOCK_STORM, Outage, incident_state_id
+
+    storm = incident_state_id("stale_blocks", "xcodebuild fails")
+    row = StateRow(
+        replace(outage_state(storm, at(5), at(9)).state, rule="stale_blocks", opened_at=at(2.1)),
+        at(9.5),
+    )
+
+    def alert(hour: float, toolchain: str | None) -> LedgerEntry:
+        params = Outage(
+            state=storm,
+            signature="xcodebuild fails",
+            kind=BLOCK_STORM,
+            tasks=("T-1",),
+            toolchain=toolchain,
+        ).to_params()
+        return replace(ledger("stale_blocks", **params), at=at(hour))
+
+    report = build_report(
+        inputs(states=(row,), actions=(alert(2.1, XCODE), alert(6, None))), sections={}
+    )
+    [line] = report.outages
+    [cause] = report.toolchain_causes
+    assert cause.change == XCODE and cause.since == line.since == at(2.1)
 
 
 def test_no_change_named_no_toolchain_lines() -> None:

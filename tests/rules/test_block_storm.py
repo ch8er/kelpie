@@ -340,9 +340,9 @@ def test_with_the_engine_the_storm_folds_the_per_task_alerts_once_switched_on() 
 
 
 def test_the_storm_s_hours_are_never_counted_twice_in_the_cost_of_chaos() -> None:
-    """Its tasks' hours count where they count without it: their own states, or rule 13's
-    inbox when it takes their blocks. Switched on, it folds their alerts and they open no
-    state: those hours wait for the report's attribution by kind (roadmap, #229)."""
+    """In observe its tasks' hours count where they count without it: their own states, or
+    rule 13's inbox when it takes their blocks. Switched on, it folds their alerts and they
+    open no state: the report counts their hours under the outage, once (#229)."""
     from datetime import date
 
     from kelpie.core.config import EngineConfig, Mode
@@ -372,7 +372,8 @@ def test_the_storm_s_hours_are_never_counted_twice_in_the_cost_of_chaos() -> Non
         return {c.rule: c.hours for c in report.chaos if c.hours}
 
     assert chaos(StaleBlocks()) == {"stale_blocks": pytest.approx(5 * 4)}  # 05:30 to 09:30
-    assert chaos(StaleBlocks(storm_mode="rule")) == {}  # folded: the known gap
+    # folded: the tasks' hours under the outage, from its first sighting (01:30 to 09:30)
+    assert chaos(StaleBlocks(storm_mode="rule")) == {"outage": pytest.approx(5 * 8)}
     inbox = NeedsYou(default_approver="ceo")
     handed = chaos(StaleBlocks(inbox=inbox), inbox)  # rule 13 takes the blocks
     assert set(handed) == {"needs_you"}  # once, not again under the storm

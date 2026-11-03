@@ -66,7 +66,7 @@ Cost per completed task: all the role's spend of the day (work still in progress
 
 - developer: an unknown cause (no condition registered) 14.0 (1)
 
-Stages are rebuilt from the board's current statuses, the sessions and their declared end statuses, and Kelpie's own alert states: the board keeps no status history, so a status change between sessions is placed at the next known change. A task counts from its first known moment of the day, so queue time before its first pickup is left out (a lower bound); the board only looks back so far (Hermes `lookback`), and a session with no end or heartbeat counts until midnight. A task's waiting time counts under what it waits (or last waited) for now: a hold label, a person (rule 13), else the kind of its condition; the part inside an open CI outage (rule 9) counts under the outage.
+Stages are rebuilt from the board's current statuses, the sessions and their declared end statuses, and Kelpie's own alert states: the board keeps no status history, so a status change between sessions is placed at the next known change. A task counts from its first known moment of the day, so queue time before its first pickup is left out (a lower bound); the board only looks back so far (Hermes `lookback`), and a session with no end or heartbeat counts until midnight. A task's waiting time counts under what it waits (or last waited) for now: a hold label, a person (rule 13), else the kind of its condition; the part inside an open outage counts under it (a CI outage of rule 9, a block storm of rule 4, a tool failure of rule 10).
 
 ## Token optimization
 
