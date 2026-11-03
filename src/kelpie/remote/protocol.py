@@ -396,6 +396,13 @@ class Report:
     # a counter within it.
     boot: str = ""
     seq: int = 0
+    # Stretches the agent's host slept (issue #296), (start, end) on its wall clock: the
+    # recent ones only, so a hub of the release before refuses a report only right after one.
+    sleeps: tuple[tuple[datetime, datetime], ...] = ()
+
+
+# At most this many sleeps in one report.
+MAX_SLEEPS = 16
 
 
 def encode_report(
@@ -405,6 +412,7 @@ def encode_report(
     adapters: Iterable[AdapterReport],
     boot: str = "",
     seq: int = 0,
+    sleeps: Iterable[tuple[datetime, datetime]] = (),
 ) -> dict[str, Any]:
     parts: list[dict[str, Any]] = []
     for a in adapters:
@@ -416,7 +424,7 @@ def encode_report(
         if a.unobserved:  # left out when empty: a hub of the release before reads the rest
             part["unobserved"] = list(a.unobserved)
         parts.append(part)
-    return {
+    body: dict[str, Any] = {
         "version": VERSION,
         "agent_version": agent_version,
         "sent_at": sent_at.isoformat(),
@@ -425,13 +433,17 @@ def encode_report(
         "seq": seq,
         "adapters": parts,
     }
+    slept = [{"start": a.isoformat(), "end": b.isoformat()} for a, b in sleeps][-MAX_SLEEPS:]
+    if slept:  # left out when empty: a hub of the release before reads the rest
+        body["sleeps"] = slept
+    return body
 
 
 def decode_report(data: object) -> Report:
     body = _object(
         data,
         "report",
-        {"version", "agent_version", "sent_at", "interval", "boot", "seq", "adapters"},
+        {"version", "agent_version", "sent_at", "interval", "boot", "seq", "adapters", "sleeps"},
     )
     _check_version(body)
     version = body.get("agent_version")
@@ -487,7 +499,22 @@ def decode_report(data: object) -> Report:
                 tuple(unobserved),
             )
         )
-    return Report(version, sent_at, timedelta(seconds=interval), tuple(parts), boot, seq)
+    sleeps = _sleeps(body.get("sleeps", []))
+    return Report(version, sent_at, timedelta(seconds=interval), tuple(parts), boot, seq, sleeps)
+
+
+def _sleeps(raw: object) -> tuple[tuple[datetime, datetime], ...]:
+    if not isinstance(raw, list) or len(raw) > MAX_SLEEPS:
+        raise ProtocolError(f"report: sleeps must be a list of up to {MAX_SLEEPS} entries")
+    out: list[tuple[datetime, datetime]] = []
+    for item in raw:
+        entry = _object(item, "sleep", {"start", "end"})
+        start = _datetime(entry.get("start"), "sleep: start")
+        end = _datetime(entry.get("end"), "sleep: end")
+        if not start < end:
+            raise ProtocolError("sleep: start must be before end")
+        out.append((start, end))
+    return tuple(out)
 
 
 # --- actions ------------------------------------------------------------------------------

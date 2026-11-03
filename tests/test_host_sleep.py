@@ -1,11 +1,15 @@
 """Host sleep and wake (issue #296): the clock watch, awake ages and the rules that use them."""
 
+import gzip
+import json
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import pytest
 
-from kelpie.app import _sleep_watch, utc_now
+from kelpie import net
+from kelpie.app import sleep_watch, utc_now
 from kelpie.core.actions import Action
 from kelpie.core.config import EngineConfig
 from kelpie.core.engine import Engine
@@ -20,9 +24,13 @@ from kelpie.core.model import (
     slept,
     source_agent,
 )
+from kelpie.remote.agent import Agent
+from kelpie.remote.config import AgentSettings
+from kelpie.remote.protocol import decode_report
 from kelpie.rules._tasks import awake, is_live, slept_since, task_awake
 from kelpie.rules.checkpoints import Checkpoints
 from kelpie.rules.orphan_status import OrphanStatus
+from tests.fakes import FakeAdapter
 
 T0 = datetime(2026, 3, 2, 11, tzinfo=UTC)
 M = timedelta(minutes=1)
@@ -223,7 +231,34 @@ def test_engine_config_reads_the_min_gap() -> None:
 
 
 def test_the_app_watches_only_the_real_clock() -> None:
-    on = _sleep_watch(EngineConfig(), utc_now)
+    on = sleep_watch(EngineConfig(), utc_now)
     assert on is not None and on.min_gap == 2 * M
-    assert _sleep_watch(EngineConfig(host_sleep_min_gap=timedelta(0)), utc_now) is None
-    assert _sleep_watch(EngineConfig(), lambda: T0) is None  # an injected clock
+    assert sleep_watch(EngineConfig(host_sleep_min_gap=timedelta(0)), utc_now) is None
+    assert sleep_watch(EngineConfig(), lambda: T0) is None  # an injected clock
+
+
+def test_kelpie_agent_reports_its_hosts_sleep() -> None:
+    """Issue #296: ``kelpie agent`` watches its own host and sends a sleep in its reports
+    for a while after the wake."""
+    clocks = Clocks()
+    bodies: list[dict[str, Any]] = []
+
+    def post(server: str, path: str, headers: Any, data: bytes, *a: Any, **kw: Any) -> Any:
+        bodies.append(json.loads(gzip.decompress(data)))
+        return net.Response(200, body=b"{}")
+
+    watch = SleepWatch(monotonic=clocks.monotonic, boottime=None)
+    settings = AgentSettings(name="laptop", server="https://hub.example.internal:9465")
+    adapter = FakeAdapter()
+    agent = Agent(
+        settings, [adapter], "t" * 40, clock=lambda: clocks.wall, post=post, sleep_watch=watch
+    )
+    agent.report()
+    clocks.run(15 * timedelta(seconds=1))
+    clocks.sleep(47 * M)
+    agent.report()
+    clocks.run(16 * M)
+    agent.report()
+    first, woke, later = bodies
+    assert "sleeps" not in first and "sleeps" not in later  # sent only right after a wake
+    assert decode_report(woke).sleeps == ((clocks.wall - 16 * M - 47 * M, clocks.wall - 16 * M),)
