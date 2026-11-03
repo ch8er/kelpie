@@ -1000,9 +1000,9 @@ Before publishing, check that the name is usable. The PyPI package is `kelpie-sr
 `kelpie` is taken.
 
 **Acceptance criteria**
-- [ ] Domain availability checked and the result recorded
-- [ ] USPTO search for conflicting marks in software classes recorded
-- [ ] Decision: keep the name or pick an alternative before the release
+- [x] Domain availability checked and the result recorded (kelpie.dev/.io/.sh/.app taken; no domain needed for the open-source release)
+- [ ] USPTO search for conflicting marks in software classes recorded (manual; before any commercial use)
+- [x] Decision: keep the name or pick an alternative before the release (keep Kelpie, package `kelpie-sre`, owner decision Nov 2)
 
 ### report: optional LLM root-cause section
 labels: P1, area:report

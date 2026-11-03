@@ -159,7 +159,7 @@ Metrics: tasks per hour per role, task time by stage (queue, review, waiting for
 - **Decision (Oct 16): Kelpie is published free and open source; no monetization for now.** Success is measured by adoption: farms running Kelpie, incidents and fixes they report, contributed adapters. The paid tier and the farm audit are out of scope until this decision is revisited.
 - Segments: engineering teams running fleets of coding agents; self-hosted farms on Hermes, OpenClaw, Paperclip
 - **P1** feedback: talk to 10 people who run agent farms — as a source of incidents and requirements, not as demand validation
-- **P1** naming: check domains and USPTO for Kelpie; the PyPI package is `kelpie-sre` because `kelpie` is taken
+- **Naming — decided (Nov 2):** keep Kelpie; the PyPI package is `kelpie-sre` (`kelpie` is taken). Four small GitHub projects share the name (0–3 stars, one archived, one renamed); kelpie.dev/.io/.sh/.app are taken, and no domain is needed for an open-source release (repo, PyPI and docs suffice). One CLI clash is possible: another agent-coordination tool also installs a `kelpie` command. USPTO not searched yet (manual, classes 9 and 42) — before any commercial use
 
 ### Risks
 
