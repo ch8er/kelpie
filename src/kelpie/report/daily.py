@@ -81,6 +81,10 @@ by dollars and the best by hours.
 task-hours waiting for conditions, with a suggestion (:mod:`kelpie.report.waits`); a known
 cause also competes for the top 3.
 
+**Per board** (#283). With several boards (``[[adapters.hermes.boards]]``), the cost of
+chaos, tasks completed and biggest wait of each board beside the farm total
+(:mod:`kelpie.report.boards`); nothing for one board.
+
 **Sections.** Analyses registered in :mod:`kelpie.report.sections` (token optimization,
 ...) add their own section after the top 3, and their advice competes for it; they follow
 the same rules: pure, deterministic, no clock and no LLM.
@@ -130,6 +134,7 @@ from kelpie.core.spans import (
 from kelpie.core.spend import SpendConfig, SpendMode, gap_causes
 from kelpie.core.states import OpenState
 from kelpie.report import farm, intervals, md
+from kelpie.report.boards import BoardLine, board_lines, rest_line
 from kelpie.report.farm import UNKNOWN_FARM, FarmFacts
 from kelpie.report.fixes import FixEvent
 from kelpie.report.sections import (
@@ -463,6 +468,8 @@ class DailyReport:
     reconciliations: tuple[Reconciliation, ...] = ()  # as in ReportInputs
     reconcile_error: str | None = None  # why the bills could not be read
     bill_day: date | None = None  # as in ReportInputs
+    # several boards (#283): each board's day (kelpie.report.boards); () for one board
+    boards: tuple[BoardLine, ...] = ()
 
     @property
     def chaos_hours(self) -> float:
@@ -496,10 +503,13 @@ def build_report(
     inputs: ReportInputs,
     sections: Mapping[str, SectionBuilder] | None = None,
     section_keys: Mapping[str, frozenset[str]] | None = None,
+    *,
+    per_board: bool = True,
 ) -> DailyReport:
     """The day's report. ``sections`` are the extra section builders (default: every one
     registered in :mod:`kelpie.report.sections`), ``section_keys`` the config keys each
-    accepts (default: as registered)."""
+    accepts (default: as registered). With ``per_board`` and several boards, each board's
+    line is built too (:mod:`kelpie.report.boards`)."""
     start, end = day_bounds(inputs.day, inputs.tz)
     spans = [s for s in inputs.spans if start <= last_at(s) < end]
     index = {span_key(s): s for s in inputs.spans}
@@ -580,7 +590,35 @@ def build_report(
         ),
         bill_day=inputs.bill_day,
         act_blockers=inputs.act_blockers,
+        boards=_boards(inputs, start, end, context.roles) if per_board else (),
     )
+
+
+def _boards(
+    inputs: ReportInputs, start: datetime, end: datetime, roles: Mapping[str, str]
+) -> tuple[BoardLine, ...]:
+    """Each board's line (#283): its chaos and completed tasks counted over its part of the
+    inputs, its biggest wait classified with the farm's wait causes (a person's inbox, a CI
+    outage, a snooze name no board but say what a board's task waited for)."""
+    causes: list[WaitCauses] = []
+
+    def wait(part: ReportInputs) -> BiggestWait | None:
+        if not causes:
+            causes.append(wait_causes(inputs, start, end))
+        per_role = throughput(
+            part.tasks,
+            part.sessions,
+            inputs.owners,
+            [row.state for row in part.states],
+            start,
+            end,
+            inputs.review_roles,
+            roles,
+            causes[0].split,
+        )
+        return biggest_wait(per_role, part.tasks, causes[0], inputs.farm)
+
+    return board_lines(inputs, lambda part: build_report(part, {}, {}, per_board=False), wait)
 
 
 def _planned_waits(inputs: ReportInputs, start: datetime, end: datetime) -> PlannedWaits | None:
@@ -1532,6 +1570,7 @@ def render_markdown(report: DailyReport, task_url: str | None = None) -> str:
             f"at most 20 ids per alert){listed}",
         ]
     lines += _snoozed_lines(report, tasks)
+    lines += _board_lines(report)
     lines += ["", "## Spend", ""]
     note = " (as the board reports them now; adapters only look back so far)"
     if _plans_only(report.spend):
@@ -1976,6 +2015,62 @@ def _bill_line(r: Reconciliation) -> str:
             f" {r.unknown_tokens:,} tokens of calls with no known provider may belong to this bill."
         )
     return line
+
+
+def _board_lines(report: DailyReport) -> list[str]:
+    """The "Per board" section (#283): nothing for a farm with one board."""
+    if not report.boards:
+        return []
+    est = _mark(report)
+    hours = (report.end - report.start).total_seconds() / 3600
+
+    def row(name: str, b: BoardLine) -> str:
+        burned = f"{b.chaos_tokens:,}" + (
+            f" + {b.chaos_plan_tokens:,} plan" if b.chaos_plan_tokens else ""
+        )
+        usd = f"${b.chaos_usd:,.2f}" if report.priced else "n/a"
+        done = f"{b.completed} ({b.completed / hours:.2f}/h)" if hours > 0 else str(b.completed)
+        w = b.biggest_wait
+        wait = (
+            f"{md.short_text(w.role)}: {md.text(w.label)}, {w.hours:.1f} task-h"
+            if w is not None
+            else "-"
+        )
+        return f"| {name} | {b.chaos_hours:.1f} | {burned} | {usd} | {done} | {wait} |"
+
+    lines = [
+        "",
+        "## Per board",
+        "",
+        f"| Board | Hours lost | Tokens burned | Cost of chaos, USD{est} | Tasks done | "
+        "Biggest wait |",
+        "|---|---:|---:|---:|---:|---|",
+    ]
+    lines += [row(md.code(b.board, cell=True), b) for b in report.boards]
+    if (rest := rest_line(report, report.boards)) is not None:
+        lines.append(row("not on one board", rest))
+    spend = report.chaos_spend
+    total = BoardLine(
+        board="",
+        chaos_hours=report.chaos_hours,
+        chaos_tokens=spend.billed_tokens,
+        chaos_plan_tokens=spend.plan_tokens,
+        chaos_usd=report.chaos_usd,
+        completed=len(report.completed),
+        biggest_wait=report.biggest_wait,
+    )
+    lines.append(row("**Farm total**", total))
+    stuck = (
+        f", plus stuck hours at ${report.hour_usd:,.2f}/hour" if report.hour_usd is not None else ""
+    )
+    lines += [
+        "",
+        "Each board counted as the farm is, over its own tasks, sessions and alerts: cost of "
+        f"chaos in tokens burned{stuck}; tasks that reached done (per hour of the day); the "
+        "role and cause its tasks waited longest for. What names no board (a forgotten hold, "
+        "a person's inbox, spans of no board's session) counts only in the farm total.",
+    ]
+    return lines
 
 
 def _usd(spend: Spend, report: DailyReport) -> str:

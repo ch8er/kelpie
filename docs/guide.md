@@ -221,6 +221,13 @@ report it now. It prints Markdown, writes `kelpie-report-<date>.md` to `[report]
 with `--send` posts a short summary to the alert channels. The same data gives the same
 report; no LLM is involved.
 
+On a farm with several boards (`[[adapters.hermes.boards]]`) a **Per board** section shows,
+for each board and for the farm, the hours lost, tokens burned and cost of chaos, the tasks
+that reached done (and per hour), and the biggest wait. Each board is counted as the farm
+is, over its own tasks, sessions, alert states and spans; what names no board (a forgotten
+hold, a person's inbox, a state without a task) is a "not on one board" line. With one
+board the report is unchanged.
+
 - **Cost of chaos, hours**: long-lived alert states of the rules that describe stuck work
   (ownerless tasks, blocks that outlived their cause, waits past their limit, review
   ping-pong, idle capacity behind bottlenecks and human gates, runaway loops, activity
