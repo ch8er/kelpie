@@ -72,3 +72,14 @@ def test_elsewhere_without_tools_no_versions(tmp_path: Path) -> None:
 def test_usage_errors(tmp_path: Path) -> None:
     assert run().returncode == 2
     assert run(str(tmp_path / "missing")).returncode == 2
+
+
+def test_long_versions_are_cut_and_slow_commands_bounded(tmp_path: Path) -> None:
+    env = {**os.environ, "KELPIE_TOOL_TIMEOUT": "1"}
+    long = "x" * 300
+    result = run(str(tmp_path), f"long=echo {long}", "slow=sleep 5; echo late", env=env)
+    assert result.returncode == 0, result.stderr
+    assert metrics(tmp_path) == [f'kelpie_toolchain_info{{tool="long",version="{"x" * 100}"}} 1']
+    assert "skipped slow" in result.stderr
+    bad = run(str(tmp_path), env={**os.environ, "KELPIE_TOOL_TIMEOUT": "soon"})
+    assert bad.returncode == 2

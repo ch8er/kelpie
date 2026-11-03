@@ -118,3 +118,23 @@ def test_outage_params_carry_it_and_old_entries_read_without_it() -> None:
     del params["toolchain"]
     found = Outage.from_params(params)
     assert found is not None and found.toolchain is None
+
+
+def test_a_change_with_a_silent_stretch_covers_the_whole_stretch() -> None:
+    # the old version last seen 30 min before the outage, the new one an hour after it
+    # (the tool reported nothing while it was being replaced)
+    c = ToolchainChange("mac-1", "xcode", "16.1", T0 + H, "16.0", T0 - 30 * timedelta(minutes=1))
+    assert likely_change(snap(c), T0, 6 * H) == c
+    assert describe(c, T0) == (
+        "xcode changed from 16.0 to 16.1 on mac-1 between 2026-03-02 09:30 and "
+        "2026-03-02 11:00 UTC, 30 min before it began"
+    )
+    # a stretch that ended long before: not it
+    old = replace(c, at=T0 - 7 * H, last_before=T0 - 8 * H)
+    assert likely_change(snap(old), T0, 6 * H) is None
+
+
+def test_odd_versions_stay_one_bounded_line() -> None:
+    c = ToolchainChange("mac-1", "xcode", "1." + "9" * 200 + "\n(x)", T0 - H, "16.0")
+    line = describe(c, T0)
+    assert "\n" not in line and len(line) < 220 and "…" in line

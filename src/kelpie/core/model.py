@@ -477,14 +477,16 @@ class BudgetStatus:
 class ToolchainChange:
     """A host's toolchain version changed (incident 20: an Xcode update broke every iOS
     build): ``tool`` (a name from config data, e.g. ``xcode``) went from ``before`` to
-    ``after`` at ``at``, as first seen by the source. ``before`` is None when the old
-    version is not known (the reading began with the new one)."""
+    ``after``, first seen at ``at``. ``last_before`` is when ``before`` was last seen: the
+    change happened between the two (a tool that could not report a version while it was
+    being replaced leaves a gap). ``before`` is None when the old version is not known."""
 
     host: str
     tool: str
     after: str
     at: datetime
     before: str | None = None
+    last_before: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)

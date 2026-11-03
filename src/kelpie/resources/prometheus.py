@@ -126,17 +126,13 @@ DEFAULT_QUERIES: Mapping[str, str] = {
         + " and kelpie_path_bytes offset {half_window}"
     ),
     "path_written": 'node_textfile_mtime_seconds{file=~"(.*/)?kelpie_paths[.]prom"}',
-    # Toolchain versions per host (incident 20), e.g. from scripts/kelpie-toolchain.sh:
-    # when each version was first and last seen within ``toolchain_lookback``. A version
-    # that first shows up inside it, after another, is a change. ``{toolchain_metric}``,
-    # ``{tool_label}`` and ``{version_label}`` are config data.
-    "toolchain_first": (
-        "min by ({host_label}, {tool_label}, {version_label})"
-        " (min_over_time(timestamp({toolchain_metric})[{lookback}:{step}]))"
-    ),
-    "toolchain_last": (
+    # Toolchain versions per host (incident 20), e.g. from scripts/kelpie-toolchain.sh: at
+    # each step of ``toolchain_lookback``, when each version was last scraped. Read as a
+    # timeline, so a version that comes back (a rollback) is a change too.
+    # ``{toolchain_metric}``, ``{tool_label}`` and ``{version_label}`` are config data.
+    "toolchain": (
         "max by ({host_label}, {tool_label}, {version_label})"
-        " (max_over_time(timestamp({toolchain_metric})[{lookback}:{step}]))"
+        " (timestamp({toolchain_metric}))[{lookback}:{step}]"
     ),
 }
 DEFAULT_TOOLCHAIN_METRIC = "kelpie_toolchain_info"
@@ -183,8 +179,9 @@ class PrometheusClient:
     timeout: float = DEFAULT_TIMEOUT
     token: str | None = field(default=None, repr=False)
 
-    def query(self, promql: str) -> list[Sample]:
-        """Run one instant query; raises :class:`QueryError`."""
+    def query(self, promql: str, matrix: bool = False) -> list[Sample]:
+        """Run one instant query; raises :class:`QueryError`. With ``matrix``, the query is a
+        subquery and every point of every series is a sample."""
         parts = urllib.parse.urlsplit(self.url)
         path = f"{parts.path.rstrip('/')}/api/v1/query?{urllib.parse.urlencode({'query': promql})}"
         headers = {"User-Agent": f"kelpie/{__version__}", "Accept": "application/json"}
@@ -194,10 +191,13 @@ class PrometheusClient:
         if response.status >= 400:
             cause = "http_auth" if response.status in (401, 403) else "http_error"
             raise QueryError(cause, f"HTTP {response.status}")
-        return _parse(response.body)
+        return _parse(response.body, matrix)
 
 
-def _parse(body: bytes) -> list[Sample]:
+MAX_POINTS = 1_000_000  # of a matrix answer, all series together
+
+
+def _parse(body: bytes, matrix: bool = False) -> list[Sample]:
     try:
         payload = json.loads(body)
     except (ValueError, RecursionError):  # RecursionError: absurdly nested JSON
@@ -209,12 +209,13 @@ def _parse(body: bytes) -> list[Sample]:
         what = error_type if isinstance(error_type, str) and error_type.isidentifier() else "?"
         raise QueryError("query_failed", f"Prometheus rejected the query ({what})")
     data = payload.get("data")
+    wanted = "matrix" if matrix else "vector"
     if (
         not isinstance(data, dict)
-        or data.get("resultType") != "vector"
+        or data.get("resultType") != wanted
         or not isinstance(data.get("result"), list)
     ):
-        raise QueryError("invalid_response", "unexpected result type (an instant vector is needed)")
+        raise QueryError("invalid_response", f"unexpected result type (a {wanted} is needed)")
     if len(data["result"]) > MAX_SERIES:
         log.warning(
             "a Prometheus query returned %d series; only the first %d are read, so some hosts "
@@ -223,6 +224,8 @@ def _parse(body: bytes) -> list[Sample]:
             MAX_SERIES,
         )
     samples: list[Sample] = []
+    if matrix:
+        return _points(data["result"][:MAX_SERIES])
     for item in data["result"][:MAX_SERIES]:
         try:
             labels = item["metric"]
@@ -237,6 +240,28 @@ def _parse(body: bytes) -> list[Sample]:
         )
         samples.append(Sample({str(k): str(v) for k, v in labels.items()}, value, timestamp))
     return samples
+
+
+def _points(result: list[object]) -> list[Sample]:
+    """Every finite point of a matrix answer as a sample (value and time)."""
+    out: list[Sample] = []
+    for item in result:
+        if not isinstance(item, dict):
+            continue
+        labels, values = item.get("metric"), item.get("values")
+        if not isinstance(labels, dict) or not isinstance(values, list):
+            continue
+        clean = {str(k): str(v) for k, v in labels.items()}
+        for point in values:
+            if len(out) >= MAX_POINTS:
+                return out
+            try:
+                stamp, value = float(point[0]), float(point[1])
+            except (IndexError, KeyError, TypeError, ValueError):
+                continue
+            if math.isfinite(stamp) and math.isfinite(value):
+                out.append(Sample(clean, value, stamp))
+    return out
 
 
 @dataclass(frozen=True, slots=True)
@@ -345,54 +370,40 @@ class PrometheusSource:
     # --- queries ------------------------------------------------------------------------
 
     def _toolchain(self, now: datetime) -> tuple[ToolchainChange, ...]:
-        """Changes from when each (host, tool, version) was first and last seen: a version
-        first seen after the lookback began, while another was seen before it, is a change
-        from the one seen last before it. A version seen from the start of the lookback is
-        no change, nor is the only version a host ever reported (the script was just
-        installed). Optional: no metric, no changes."""
+        """Changes from each (host, tool)'s timeline: the versions scraped at each step of
+        ``toolchain_lookback``, in time order. A version other than the one seen before it
+        is a change, timed to its first scrape, with ``gap_from`` the last scrape of the
+        version before it (a tool that reported nothing for a while changed somewhere in
+        between). The version a timeline starts with is no change. Optional: no metric, no
+        changes; a failure of only this query is logged once."""
         tool, version = self.config.toolchain_tool_label, self.config.toolchain_version_label
-        first = self._optional_labelled("toolchain_first", (tool, version), now)
-        last = self._optional_labelled("toolchain_last", (tool, version), now)
-        start = now - self.config.toolchain_lookback + TOOLCHAIN_STEP
-        seen: dict[tuple[str, str], list[tuple[datetime, datetime, str]]] = {}
-        for (host, (name, ver)), at in first.items():
-            if name and ver and (host, (name, ver)) in last:
-                seen.setdefault((host, name), []).append((at, last[(host, (name, ver))], ver))
-        out: list[ToolchainChange] = []
-        for (host, name), versions in sorted(seen.items()):
-            versions.sort()
-            for at, _, ver in versions[1:]:
-                if at <= start:
-                    continue
-                older = [(end, v) for begin, end, v in versions if begin < at and v != ver]
-                if older:
-                    out.append(ToolchainChange(host, name, ver, at, max(older)[1]))
-        return tuple(out)
-
-    def _optional_labelled(
-        self, name: str, labels: tuple[str, str], now: datetime
-    ) -> dict[tuple[str, tuple[str, str]], datetime]:
-        """A query whose value is a Unix time, per (Kelpie host, two label values); a
-        failure of only this query is logged once and yields nothing."""
         try:
-            samples = self.client.query(self.config.query_text(name))
+            samples = self.client.query(self.config.query_text("toolchain"), matrix=True)
         except QueryError as exc:
-            if name not in self._optional_warned:
-                self._optional_warned.add(name)
+            if "toolchain" not in self._optional_warned:
+                self._optional_warned.add("toolchain")
                 log.warning(
-                    "Prometheus query %s failed (%s); readings come without it", name, exc.cause
+                    "Prometheus query toolchain failed (%s); readings come without it", exc.cause
                 )
             if self.observer is not None:
-                self.observer.resource_query_failed(f"{name}_{exc.cause}")
-            return {}
-        out: dict[tuple[str, tuple[str, str]], datetime] = {}
+                self.observer.resource_query_failed(f"toolchain_{exc.cause}")
+            return ()
+        seen: dict[tuple[str, str], set[tuple[datetime, str]]] = {}
         for sample in samples:
             host = self._hosts.get(sample.labels.get(self.config.host_label, ""))
-            if host is None or not math.isfinite(sample.value):
+            name = sample.labels.get(tool, "")
+            ver = sample.labels.get(version, "")
+            if host is None or not name or not ver:
                 continue
-            key = (host, (sample.labels.get(labels[0], ""), sample.labels.get(labels[1], "")))
-            out[key] = _when(sample.value, now)
-        return out
+            seen.setdefault((host, name), set()).add((_when(sample.value, now), ver))
+        out: list[ToolchainChange] = []
+        for (host, name), points in sorted(seen.items()):
+            last: tuple[datetime, str] | None = None  # the previous scrape and its version
+            for at, ver in sorted(points):
+                if last is not None and ver != last[1]:
+                    out.append(ToolchainChange(host, name, ver, at, last[1], last[0]))
+                last = (at, ver)
+        return tuple(out)
 
     def _optional(
         self, name: str, now: datetime, by_mount: bool = False, label: str = "mountpoint"

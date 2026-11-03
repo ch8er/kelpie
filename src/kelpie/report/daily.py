@@ -802,10 +802,9 @@ def _toolchain_causes(
             (x for x in named.get(st.id, ()) if st.since <= x[0] <= st.last_seen),
             key=lambda x: x[0],
         )
-        if found:
+        if found and (line := found[0][1].toolchain):
             o = found[0][1]
-            assert o.toolchain is not None
-            out.append(ToolchainCause(o.signature, o.kind, st.since, o.toolchain))
+            out.append(ToolchainCause(o.signature, o.kind, st.since, line))
     return tuple(sorted(out, key=lambda c: (c.since, c.signature)))
 
 

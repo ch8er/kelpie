@@ -9,15 +9,19 @@
 #
 # OUTPUT_DIR is node_exporter's --collector.textfile.directory. Each TOOL=COMMAND runs
 # COMMAND with sh -c and takes the first line it prints as TOOL's version (TOOL: lower-case
-# letters, digits, ".", "_" and "-"), e.g. 'node=node --version'. Without any, on macOS it
-# reads the active Xcode (xcodebuild -version: "16.1 (16B40)") and CoreSimulator (its
-# framework's CFBundleVersion); elsewhere it writes no versions. A command that fails or
-# prints nothing is skipped with a message on stderr. Each gets at most KELPIE_TOOL_TIMEOUT
-# seconds (20) when timeout(1) or gtimeout is on the PATH. The file is written to a
-# temporary name and renamed, so node_exporter never reads half of it. Run it every few
-# minutes (deploy/textfile has a launchd agent): a change is timed to the run that sees it.
-# Kelpie reads only the metric name and the two labels, all config data
-# ([resources.prometheus] toolchain_metric, toolchain_tool_label, toolchain_version_label).
+# letters, digits, ".", "_" and "-"), e.g. 'node=node --version'; at most 100 characters of
+# it are kept. Without any, on macOS it reads the active Xcode (xcodebuild -version:
+# "16.1 (16B40)"; when xcodebuild itself fails, as a broken install does, the version in
+# the selected Xcode's Info.plist followed by "(xcodebuild fails)", which reads as a change
+# too) and CoreSimulator (its framework's CFBundleVersion); elsewhere it writes no versions.
+# Report one version per tool: two at once read as changes back and forth. A command that
+# fails or prints nothing is skipped with a message on stderr. Each gets at most
+# KELPIE_TOOL_TIMEOUT seconds (20), through timeout(1), gtimeout or else perl's alarm (macOS
+# ships perl, not timeout). The file is written to a temporary name and renamed, so
+# node_exporter never reads half of it. Run it every few minutes (deploy/textfile has a
+# launchd agent): a change is timed to the run that sees it. Kelpie reads only the metric
+# name and the two labels, all config data ([resources.prometheus] toolchain_metric,
+# toolchain_tool_label, toolchain_version_label).
 set -eu
 
 if [ "$#" -lt 1 ]; then
@@ -28,20 +32,54 @@ out_dir=$1
 shift
 [ -d "$out_dir" ] || { echo "$0: $out_dir is not a directory" >&2; exit 2; }
 
-limit=
-for t in timeout gtimeout; do
-  if command -v "$t" >/dev/null 2>&1; then
-    limit="$t ${KELPIE_TOOL_TIMEOUT:-20}"
-    break
-  fi
-done
+seconds=${KELPIE_TOOL_TIMEOUT:-20}
+case "$seconds" in
+  '' | *[!0-9]*) echo "$0: KELPIE_TOOL_TIMEOUT must be whole seconds" >&2; exit 2 ;;
+esac
 
-if [ "$#" -eq 0 ] && [ "$(uname -s)" = Darwin ]; then
-  plist=/Library/Developer/PrivateFrameworks/CoreSimulator.framework/Versions/A/Resources/Info.plist
-  set -- \
-    'xcode=xcodebuild -version | awk '\''NR==1{v=$2} /^Build version/{b=$3} END{if (v) print v (b ? " (" b ")" : "")}'\''' \
-    "coresimulator=/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' $plist"
-fi
+# Runs "$@" for at most $seconds.
+bounded() {
+  if command -v timeout >/dev/null 2>&1; then
+    timeout "$seconds" "$@"
+  elif command -v gtimeout >/dev/null 2>&1; then
+    gtimeout "$seconds" "$@"
+  elif command -v perl >/dev/null 2>&1; then
+    perl -e 'alarm shift; exec @ARGV or exit 127' "$seconds" "$@"
+  else
+    "$@"
+  fi
+}
+
+xcode_version() {
+  v=$(bounded xcodebuild -version 2>/dev/null \
+    | awk 'NR==1{v=$2} /^Build version/{b=$3} END{if (v) print v (b ? " (" b ")" : "")}' || true)
+  if [ -z "$v" ]; then
+    dir=$(xcode-select -p 2>/dev/null || true)
+    [ -z "$dir" ] || p=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' \
+      "$dir/../Info.plist" 2>/dev/null || true)
+    [ -z "${p:-}" ] || v="$p (xcodebuild fails)"
+  fi
+  printf '%s\n' "$v"
+}
+
+coresimulator_version() {
+  /usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' \
+    /Library/Developer/PrivateFrameworks/CoreSimulator.framework/Versions/A/Resources/Info.plist \
+    2>/dev/null || true
+}
+
+# One metric line for tool $1 with the first line of $2 as its version, or a message.
+emit() {
+  version=$(printf '%s\n' "$2" | head -n 1 | tr -d '\000-\037\177' \
+    | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' | cut -c1-100)
+  if [ -z "$version" ]; then
+    echo "$0: skipped $1: no version" >&2
+    return 0
+  fi
+  # Label values escape backslash and double quote (Prometheus text format).
+  label=$(printf '%s' "$version" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g')
+  printf 'kelpie_toolchain_info{tool="%s",version="%s"} 1\n' "$1" "$label"
+}
 
 tmp=
 trap '[ -z "$tmp" ] || rm -f "$tmp"' EXIT
@@ -50,6 +88,10 @@ tmp=$(mktemp "$out_dir/.kelpie_toolchain.XXXXXX")
 {
   echo "# HELP kelpie_toolchain_info Active toolchain versions (scripts/kelpie-toolchain.sh)."
   echo "# TYPE kelpie_toolchain_info gauge"
+  if [ "$#" -eq 0 ] && [ "$(uname -s)" = Darwin ]; then
+    emit xcode "$(xcode_version)"
+    emit coresimulator "$(coresimulator_version)"
+  fi
   for spec in "$@"; do
     tool=${spec%%=*}
     cmd=${spec#*=}
@@ -60,16 +102,7 @@ tmp=$(mktemp "$out_dir/.kelpie_toolchain.XXXXXX")
     case "$tool" in
       '' | *[!a-z0-9._-]*) echo "$0: skipped tool '$tool': use a-z, 0-9, '.', '_', '-'" >&2; continue ;;
     esac
-    version=$($limit sh -c "$cmd" 2>/dev/null | head -n 1 || true)
-    # trim, and drop control characters: a label value is one line
-    version=$(printf '%s' "$version" | tr -d '\000-\037\177' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
-    if [ -z "$version" ]; then
-      echo "$0: skipped $tool: its command printed no version" >&2
-      continue
-    fi
-    # Label values escape backslash and double quote (Prometheus text format).
-    label=$(printf '%s' "$version" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g')
-    printf 'kelpie_toolchain_info{tool="%s",version="%s"} 1\n' "$tool" "$label"
+    emit "$tool" "$(bounded sh -c "$cmd" 2>/dev/null || true)"
   done
 } >"$tmp"
 chmod 0644 "$tmp"

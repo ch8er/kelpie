@@ -427,8 +427,7 @@ commands = true           # keep the prefix of shell commands on tool spans ("ma
 # path_bytes = "kelpie_path_bytes"   # from scripts/kelpie-path-sizes.sh
 # path_growth = "((deriv(kelpie_path_bytes[{window}]) * 86400 < quantile_over_time(0.25, clamp_min(deriv(kelpie_path_bytes[{slice}]) * 86400, 0)[{sustain}:{slice}])) or quantile_over_time(0.25, clamp_min(deriv(kelpie_path_bytes[{slice}]) * 86400, 0)[{sustain}:{slice}])) and kelpie_path_bytes offset {half_window}"
 # path_written = 'node_textfile_mtime_seconds{file=~"(.*/)?kelpie_paths[.]prom"}'
-# toolchain_first = "min by (instance, {tool_label}, {version_label}) (min_over_time(timestamp({toolchain_metric})[{lookback}:{step}]))"
-# toolchain_last = "max by (instance, {tool_label}, {version_label}) (max_over_time(timestamp({toolchain_metric})[{lookback}:{step}]))"
+# toolchain = "max by (instance, {tool_label}, {version_label}) (timestamp({toolchain_metric}))[{lookback}:{step}]"   # a timeline (subquery)
 # ({host_label}, written here as instance, {window} = growth_window, {half_window},
 # {sustain} = growth_sustain and {slice} = a quarter of it are filled in, in custom queries
 # too; so are {toolchain_metric}, {tool_label}, {version_label}, {lookback} =
