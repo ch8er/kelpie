@@ -761,3 +761,13 @@ def test_doctor_says_when_it_cannot_check(tmp_path: Path, monkeypatch: pytest.Mo
     monkeypatch.setattr(doctor, "trust_problem", denied)
     check = check_traces_token(load_settings(config(tmp_path)), {"HOME": str(tmp_path)})
     assert check.status == "WARN" and "cannot check" in check.detail
+
+
+def test_doctor_warns_about_a_weak_env_token(tmp_path: Path) -> None:
+    """Audit L11: kelpie serve refuses it off loopback; on loopback doctor warns."""
+    settings = load_settings(None)
+    check = check_traces_token(settings, {"HOME": str(tmp_path), "KELPIE_TRACES_TOKEN": "secret"})
+    assert check.status == "WARN" and "at least 16 characters" in check.detail
+    assert "secret" not in check.detail  # names the variable, never the value
+    good = {"HOME": str(tmp_path), "KELPIE_TRACES_TOKEN": "0123456789abcdef"}
+    assert check_traces_token(settings, good).status == "PASS"

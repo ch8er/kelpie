@@ -62,7 +62,7 @@ def test_is_loopback(host: str, loopback: bool) -> None:
     [
         (TraceSettings(), {}, "127.0.0.1", True),
         (TraceSettings(), {}, "0.0.0.0", False),
-        (TraceSettings(), {"KELPIE_TRACES_TOKEN": "t"}, "0.0.0.0", True),
+        (TraceSettings(), {"KELPIE_TRACES_TOKEN": "0123456789abcdef"}, "0.0.0.0", True),
         (TraceSettings(allow_unauthenticated=True), {}, "0.0.0.0", True),
         (TraceSettings(), {"KELPIE_TRACES_ALLOW_UNAUTHENTICATED": "1"}, "0.0.0.0", True),
         (TraceSettings(), {"KELPIE_TRACES_ALLOW_UNAUTHENTICATED": "no"}, "0.0.0.0", False),
@@ -74,6 +74,26 @@ def test_check_exposure(traces: TraceSettings, env: dict[str, str], host: str, o
         traces.check_exposure(host, env)
     else:
         with pytest.raises(ValueError, match="accept spans from anyone"):
+            traces.check_exposure(host, env)
+
+
+@pytest.mark.parametrize(
+    ("token", "host", "ok"),
+    [
+        ("t", "127.0.0.1", True),  # loopback: doctor warns, serve starts
+        ("t", "0.0.0.0", False),  # audit L11: too short off loopback
+        ("short-token", "10.0.0.5", False),
+        ("aaaaaaaaaaaaaaaaaaaaaaaa", "0.0.0.0", False),  # too few different characters
+        ("has a space in it 1234", "0.0.0.0", False),
+        ("0123456789abcdef", "0.0.0.0", True),
+    ],
+)
+def test_an_env_token_off_loopback_must_be_strong(token: str, host: str, ok: bool) -> None:
+    traces, env = TraceSettings(), {"KELPIE_TRACES_TOKEN": token}
+    if ok:
+        traces.check_exposure(host, env)
+    else:
+        with pytest.raises(ValueError, match="KELPIE_TRACES_TOKEN must"):
             traces.check_exposure(host, env)
 
 

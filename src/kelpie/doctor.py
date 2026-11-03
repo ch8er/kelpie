@@ -75,6 +75,7 @@ from kelpie.core.spend import SpendMode
 from kelpie.resources.prometheus import PrometheusClient, QueryError
 from kelpie.snooze import local_board
 from kelpie.traces.auth import loose_mode, token_copies, trust_problem
+from kelpie.traces.config import weak_token
 
 FRESH = timedelta(hours=1)  # newest spool line or span must be younger than this
 MAX_WORKTREES = 20  # git is asked about at most this many workspaces
@@ -399,6 +400,9 @@ def check_traces_token(settings: Settings, environ: Mapping[str, str]) -> Check:
         return _skip(TOKEN_CHECK, f"no token (${traces.token_env} unset)")
     problems: list[str] = []
     fixes: list[str] = []
+    if (weak := weak_token(token)) is not None:  # audit L11; serve refuses it off loopback
+        problems.append(f"${traces.token_env} {weak}")
+        fixes.append("set a random token: `kelpie traces rotate-token`, or `openssl rand -hex 32`")
     roots: list[Path] = []
     if traces.token_file is not None:
         roots.append(traces.token_file.parent)

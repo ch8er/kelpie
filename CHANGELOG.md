@@ -67,6 +67,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
   other names are refused, counted in `kelpie_hub_refused_total` and alerted once per
   agent; host sleeps an agent reports are kept only when they ended and at most 64 per
   agent. One agent cannot grow the hub's executors, series, alerts or memory this way (audit M6, [#327](https://github.com/ch8er/kelpie/pull/327)).
+- `kelpie serve` refuses a weak `$KELPIE_TRACES_TOKEN` (under 16 characters, spaces, or
+  fewer than 8 different characters) when OTLP ingest listens off loopback, as the token
+  file already did; `kelpie doctor` warns about one on loopback (audit L11). Workflow
+  checkouts keep no token in `.git/config`, the release build's included (audit L14)
+  (#PR_L11).
 
 ## [0.1.0a1] - 2026-11-03
 
