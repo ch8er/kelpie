@@ -40,9 +40,12 @@ counts nowhere: it delays no work.
 **Cost of chaos, dollars.** Tokens burned by sessions that were going nowhere: a session in
 a ``loop_breaker`` (identical calls, error streak) or ``no_progress`` state while it lasted,
 and every session that ``exit_contract`` requeued (it ended without a status, so its work
-is redone: a restart; a requeue that found nothing to do is not one). Each model call is
-burned at most once: by the first state that covers it (in :data:`CHAOS_CAUSES` order),
-else by a restart, so the chaos never exceeds the day's spend; nested instrumentations are
+is redone: a restart; a requeue that found nothing to do is not one), and the calls an
+outage's tasks made while it held them (#197 item 6, :func:`outage_calls`: the outage's
+spend, per role under Outages, not the roles' own; a call's task through its session,
+:mod:`kelpie.report.attribution`). Each model call is burned at most once: by an outage
+first, else by the first state that covers it (in :data:`CHAOS_CAUSES` order), else by a
+restart, so the chaos never exceeds the day's spend; nested instrumentations are
 not double counted either (:mod:`kelpie.core.spans`). Spend follows each provider's spend
 mode (``[spend]``, :mod:`kelpie.core.spend`): with an API key, tokens are dollars, priced by
 ``[prices]`` over Kelpie's dated default table for the report's day (a model without a
@@ -132,6 +135,7 @@ from kelpie.core.model import (
     OwnerKind,
     Reconciliation,
     Session,
+    SessionUsage,
     Snapshot,
     Snooze,
     Span,
@@ -153,6 +157,7 @@ from kelpie.core.spend import SpendConfig, SpendMode, gap_causes
 from kelpie.core.states import OpenState
 from kelpie.core.storage import TokenRow
 from kelpie.report import farm, intervals, md
+from kelpie.report.attribution import CallOwners, call_owners
 from kelpie.report.boards import BoardLine, board_lines, rest_line
 from kelpie.report.farm import UNKNOWN_FARM, FarmFacts
 from kelpie.report.fixes import FixEvent
@@ -383,6 +388,9 @@ class ReportInputs:
     # Tokens a day on instructions per role, one sample per scan: the before/after of a
     # split (a fix naming rule instruction_bloat).
     instruction_tokens: Sequence[TokenRow] = ()
+    # The platforms' own usage records (``Snapshot.usage``, #271): which task and role a
+    # session worked for, when the spans name only the session (#197 items 6 and 7).
+    usage: Sequence[SessionUsage] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -420,6 +428,10 @@ class OutageLine:
     person: str | None = None  # who can end it
     observe_only: bool = False  # a check still in observe: listed, not counted
     back_in_observe: datetime | None = None  # counted, then its check switched back
+    # Its tasks' model calls while it held them, per role (#197 item 6): the outage's, not
+    # the roles' own spend.
+    spend: tuple[tuple[str, Spend], ...] = ()
+    occurrence: tuple[str, datetime] | None = field(default=None, compare=False)  # (id, last)
 
 
 @dataclass(frozen=True, slots=True)
@@ -588,7 +600,9 @@ def build_report(
     rows = usage(spans, counted)
     spend = pricer.price(rows)
     actions = [e for e in inputs.actions if start <= e.at < end]
-    chaos = _chaos(inputs, actions, spans, counted, pricer, start, end)
+    roles = _roles(inputs, end)
+    owners = report_owners(inputs, roles)
+    chaos, held = _chaos(inputs, actions, spans, counted, pricer, start, end, owners)
     fixed, would_fix, not_done = _actions(actions)
     open_states = _open_states(inputs.states, end, _outage_starts(inputs, end))
     inbox = _inbox(inputs.actions, open_states, end)
@@ -610,10 +624,13 @@ def build_report(
         counted=MappingProxyType(dict(counted)),
         price=pricer.price,
         spend=spend,
-        roles=MappingProxyType(_roles(inputs, end)),
+        roles=MappingProxyType(roles),
+        owners=owners,
+        outage_calls=frozenset(held),
     )
     extra = run_sections(sections, context, failed, inputs.section_config, section_keys)
     wait, outage_lines, outage_hours, snoozed = _biggest_wait(inputs, start, end, context.roles)
+    outage_lines = _outage_spend(outage_lines, held, spans, counted, owners, pricer)
     advice = _recommendations(
         inputs,
         chaos,
@@ -817,6 +834,48 @@ def _biggest_wait(
     return found, _outage_lines(inputs, causes.outages, start, end), explained, snoozed
 
 
+def _outage_spend(
+    lines: Sequence[OutageLine],
+    held: Mapping[SpanKey, tuple[str, datetime]],
+    spans: Sequence[Span],
+    counted: Mapping[SpanKey, str | None],
+    owners: CallOwners,
+    pricer: _Pricer,
+) -> tuple[OutageLine, ...]:
+    """Each outage line with its tasks' spend while it held them, per role (#197 item 6)."""
+    if not held:
+        return tuple(lines)
+    mine: dict[tuple[str, datetime], dict[str, list[Span]]] = defaultdict(lambda: defaultdict(list))
+    for span in spans:
+        if (occurrence := held.get(span_key(span))) is not None:
+            role = owners.role_of(span.task_id, span.session_id)
+            mine[occurrence][role].append(span)
+    out = []
+    for line in lines:
+        per_role = mine.get(line.occurrence) if line.occurrence is not None else None
+        if per_role:
+            spend = tuple(
+                (role, pricer.price(usage(calls_, _models(calls_, counted))))
+                for role, calls_ in sorted(per_role.items())
+            )
+            line = replace(line, spend=spend)
+        out.append(line)
+    return tuple(out)
+
+
+def _models(
+    spans: Sequence[Span], counted: Mapping[SpanKey, str | None]
+) -> dict[SpanKey, str | None]:
+    return {span_key(s): counted[span_key(s)] for s in spans}
+
+
+def report_owners(inputs: ReportInputs, roles: Mapping[str, str]) -> CallOwners:
+    """Which task and role each model call belongs to (:mod:`kelpie.report.attribution`)."""
+    return call_owners(
+        inputs.tasks, inputs.owners, inputs.sessions, roles, inputs.attribution, inputs.usage
+    )
+
+
 def _outage_lines(
     inputs: ReportInputs, found: Sequence[OutageSpan], start: datetime, end: datetime
 ) -> tuple[OutageLine, ...]:
@@ -844,6 +903,7 @@ def _outage_lines(
                 o.person,
                 o.observe_only and not o.spans(),
                 o.spans()[-1][1] if o.observe_only and o.spans() else None,
+                occurrence=(o.state, o.until),
             )
         )
     return tuple(out)
@@ -1071,7 +1131,11 @@ def _chaos(
     pricer: _Pricer,
     start: datetime,
     end: datetime,
-) -> tuple[ChaosLine, ...]:
+    owners: CallOwners | None = None,
+) -> tuple[tuple[ChaosLine, ...], dict[SpanKey, tuple[str, datetime]]]:
+    """The chaos lines, and which outage occurrence each model call of its tasks belongs
+    to (#197 item 6; ``owners`` attributes a call to its task, else only the spans' own
+    task ids count)."""
     by_session: dict[str, list[Span]] = defaultdict(list)
     for span in spans:
         if span.session_id and span_key(span) in counted:
@@ -1100,8 +1164,12 @@ def _chaos(
             burn(entry.rule, session, start, end)
             if entry.task_id:
                 tasks[entry.rule].add(entry.task_id)
+    # An outage's tasks' calls while it held them are the outage's: first, as its hours
+    held = outage_calls(found.outages, spans, counted, owners)
+    for key in held:
+        burned[key] = OUTAGE
     by_rule: dict[str, list[Span]] = defaultdict(list)
-    index = {span_key(s): s for spans_ in by_session.values() for s in spans_}
+    index = {span_key(s): s for s in spans if span_key(s) in counted}
     for key, rule in burned.items():
         by_rule[rule].append(index[key])
     money = {
@@ -1125,7 +1193,37 @@ def _chaos(
         or also.get(rule)
     ]
     lines.sort(key=lambda c: (-c.spend.usd, -c.hours, c.rule))
-    return tuple(lines)
+    return tuple(lines), held
+
+
+def outage_calls(
+    occurrences: Mapping[tuple[str, datetime], Sequence[tuple[str, datetime, datetime]]],
+    spans: Iterable[Span],
+    counted: Mapping[SpanKey, str | None],
+    owners: CallOwners | None = None,
+) -> dict[SpanKey, tuple[str, datetime]]:
+    """Each counted model call made for a task while an outage held it (the task-spans
+    the cost of chaos counts under the outage), by call: the occurrence, ``(id,
+    last_seen)``, of the first outage that held it (#197 item 6). A call's task is the
+    span's own, else its session's (``owners``); a call on no task is no outage's."""
+    by_task: dict[str, list[tuple[datetime, datetime, tuple[str, datetime]]]] = defaultdict(list)
+    for occurrence, held in occurrences.items():
+        for task, lo, hi in held:
+            by_task[task].append((lo, hi, occurrence))
+    if not by_task:
+        return {}
+    out: dict[SpanKey, tuple[str, datetime]] = {}
+    for span in spans:
+        key = span_key(span)
+        if key not in counted:
+            continue
+        task = owners.span_task(span) if owners is not None else span.task_id
+        at = last_at(span)
+        for lo, hi, occurrence in by_task.get(task or "", ()):
+            if lo <= at < hi:
+                out[key] = occurrence
+                break
+    return out
 
 
 @dataclass(frozen=True, slots=True)
@@ -1136,6 +1234,10 @@ class _ChaosHours:
     keyed: defaultdict[str, list[tuple[str, datetime, datetime]]]
     loose: defaultdict[str, float]
     tasks: defaultdict[str, set[str]]
+    # each outage occurrence's own spans, by (id, last_seen), in counting order
+    outages: dict[tuple[str, datetime], list[tuple[str, datetime, datetime]]] = field(
+        default_factory=dict
+    )
 
 
 def _chaos_hours(
@@ -1156,6 +1258,7 @@ def _chaos_hours(
     keyed: dict[str, list[tuple[str, datetime, datetime]]] = defaultdict(list)
     loose: dict[str, float] = defaultdict(float)
     tasks: dict[str, set[str]] = defaultdict(set)
+    per_outage: dict[tuple[str, datetime], list[tuple[str, datetime, datetime]]] = {}
     rank_ = {rule: i for i, rule in enumerate(CHAOS_CAUSES)}
     after = _occurrences(inputs)
     for state in sorted(states, key=lambda s: (rank_[cause_of(s)], s.opened_at, s.id)):
@@ -1171,6 +1274,7 @@ def _chaos_hours(
                 # a host that slept lost no hours (issue #296), under an outage too
                 for x, y in _awake(inputs.host_sleeps, inputs.agents, t, lo, hi):
                     keyed[OUTAGE].append((t, x, y))
+                    per_outage.setdefault((state.id, state.last_seen), []).append((t, x, y))
                 tasks[OUTAGE].add(t)
             continue
         # A host that slept lost no hours (issue #296); a hold's idle agents and a person's
@@ -1195,7 +1299,7 @@ def _chaos_hours(
             loose[cause] += intervals.hours(awake)
         if on_state is not None:
             on_state(state, a, b)
-    return _ChaosHours(keyed, loose, tasks)
+    return _ChaosHours(keyed, loose, tasks, per_outage)
 
 
 def _awake(
@@ -1864,24 +1968,25 @@ def render_markdown(report: DailyReport, task_url: str | None = None) -> str:
                 )
             if o.kind == BLOCK_STORM:
                 who = f"; only {md.text(o.person)} can end it" if o.person else ""
-                lines.append(
+                text = (
                     f"- block storm {md.code(o.signature)} {when}: {o.scope} task(s) blocked on "
                     f"it, {o.folded} alert(s) folded under it{who}"
                 )
-                continue
-            what = f". Cause: {md.text(o.reason)}" if o.reason else ""
-            if o.kind == TOOL_FAILURES:
-                lines.append(
+            elif o.kind == TOOL_FAILURES:
+                what = f". Cause: {md.text(o.reason)}" if o.reason else ""
+                text = (
                     f"- tool failure {md.code(o.signature)} {when}: {o.scope} task(s) failing, "
                     f"{o.folded} alert(s) folded under it{what}"
                 )
-                continue
-            label = "CI jobs not starting" if o.kind == CI_NOT_STARTED else "CI failure"
-            name = "" if o.signature == label else f" {md.code(o.signature)}"
-            lines.append(
-                f"- {label}{name} {when}: {o.scope} PR(s), {o.folded} alert(s) folded under "
-                f"it{what}"
-            )
+            else:
+                what = f". Cause: {md.text(o.reason)}" if o.reason else ""
+                label = "CI jobs not starting" if o.kind == CI_NOT_STARTED else "CI failure"
+                name = "" if o.signature == label else f" {md.code(o.signature)}"
+                text = (
+                    f"- {label}{name} {when}: {o.scope} PR(s), {o.folded} alert(s) folded under "
+                    f"it{what}"
+                )
+            lines.append(text + _outage_spent(o, report))
     if report.toolchain_causes:
         lines += [
             "",
@@ -2470,6 +2575,25 @@ def _board_lines(report: DailyReport) -> list[str]:
         "a person's inbox, spans of no board's session) counts only in the farm total.",
     ]
     return lines
+
+
+def _outage_spent(line: OutageLine, report: DailyReport) -> str:
+    """What its tasks spent while it held them, per role (#197 item 6); "" for none."""
+    if not line.spend:
+        return ""
+    total = Spend()
+    for _, spend in line.spend:
+        total = total + spend
+
+    def usd(spend: Spend, mark: str = "") -> str:
+        dollars = _usd(spend, report)  # "-" on a subscription: tokens only
+        return "" if dollars == "-" else f" ({dollars}{mark})"
+
+    roles = "; ".join(f"{md.text(role)} {spend.tokens:,}{usd(spend)}" for role, spend in line.spend)
+    return (
+        f". Its tasks spent {total.tokens:,} tokens{usd(total, _mark(report))} while it held "
+        f"them: {roles}"
+    )
 
 
 def _usd(spend: Spend, report: DailyReport) -> str:

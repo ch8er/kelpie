@@ -6,8 +6,9 @@ from __future__ import annotations
 from collections import defaultdict
 
 from kelpie.core.spans import TokenUsage, usage
-from kelpie.core.stages import STAGES, UNKNOWN_ROLE, task_roles
+from kelpie.core.stages import STAGES
 from kelpie.report import md
+from kelpie.report.attribution import call_owners
 from kelpie.report.daily import wait_causes
 from kelpie.report.sections import Section, SectionContext, Spend, register_section
 from kelpie.report.throughput import throughput
@@ -54,13 +55,16 @@ def throughput_section(ctx: SectionContext) -> Section | None:
     )
     if not roles:
         return None
-    of_task = task_roles(inputs.tasks, inputs.owners)
+    owners = ctx.owners or call_owners(inputs.tasks, inputs.owners, (), ctx.roles)
     spent: dict[str, list[TokenUsage]] = defaultdict(list)
-    for row in usage(ctx.spans, ctx.counted):
-        role = (of_task.get(row.task_id) if row.task_id else None) or (
-            ctx.roles.get(row.session_id) if row.session_id else None
-        )
-        spent[role or UNKNOWN_ROLE].append(row)
+    held: dict[str, list[TokenUsage]] = defaultdict(list)  # an outage's (#197 item 6)
+    own = {k: m for k, m in ctx.counted.items() if k not in ctx.outage_calls}
+    for row in usage(ctx.spans, own):
+        spent[owners.row_role(row)].append(row)
+    if ctx.outage_calls:
+        outage = {k: m for k, m in ctx.counted.items() if k in ctx.outage_calls}
+        for row in usage(ctx.spans, outage):
+            held[owners.row_role(row)].append(row)
     est = " (estimate)" if inputs.estimated and inputs.spend is None else ""
     if ctx.spend.unknown_usd > 0:
         est += " (estimate, mode not set)"
@@ -113,6 +117,16 @@ def throughput_section(ctx: SectionContext) -> Section | None:
         lines.append(
             f"Spend of roles not listed ({', '.join(md.text(r) for r in others)}): "
             f"{extra.tokens:,} tokens, ${extra.usd:,.2f}{est}."
+        )
+    if held:
+        parts = []
+        for r in sorted(held):
+            spend = ctx.price(held[r])
+            unpriced += spend.unpriced_tokens
+            parts.append(f"{md.text(r)} {spend.tokens:,} tokens, ${spend.usd:,.2f}{est}")
+        lines.append(
+            "Spend of tasks while an outage held them (under Outages, not in the cost per "
+            f"completed task): {'; '.join(parts)}."
         )
     if unpriced:
         lines.append(f"{unpriced:,} tokens of models without a price are not in the dollars.")

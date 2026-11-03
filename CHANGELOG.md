@@ -19,6 +19,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
   an outage whose check is still in observe is listed, and its waits stay where they were
   (until it is switched on; switched back to observe, it stops counting)
   ([#270](https://github.com/ch8er/kelpie/pull/270)).
+- Outage tokens (#197 item 6): the model calls an outage's tasks made while it held them
+  are the outage's, per role: in its line under Outages, in its cost-of-chaos line, and out
+  of each role's cost per completed task. A call without a task id finds its task through
+  its session, now including the platform's usage records (`Snapshot.usage`, #271)
+  ([#325](https://github.com/ch8er/kelpie/pull/325)).
 
 ### Safety
 

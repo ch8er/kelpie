@@ -259,7 +259,11 @@ board the report is unchanged.
   listed under "Host asleep" per host. Humans (owners of kind `human`) never count as idle
   agents. `[report] hour_usd` prices them all.
 - **Cost of chaos, dollars**: tokens burned by runaway and no-progress sessions while
-  flagged, and by every session `exit_contract` requeued (a restart). Spend follows each
+  flagged, by every session `exit_contract` requeued (a restart), and by an outage's tasks
+  while it held them (#197 item 6: the model calls of a task over the hours the outage
+  counts for it, under "farm outages", first; a call names its task itself, else through
+  its session: the board's sessions, the ones Kelpie remembers, then the platform's usage
+  records, on Hermes each profile's `state.db`). Spend follows each
   provider's spend mode (`[spend]`): with an API key, dollars (`[prices]` over Kelpie's
   dated default price table); on a subscription, tokens and the share of the plan's limit
   (`limit_tokens` per `limit_window`, else "limit not configured"; for a window shorter
@@ -299,9 +303,12 @@ board the report is unchanged.
   lists each outage of the day: its signature, its reason, since when (perhaps an earlier
   day) and until when or still open, its scope that day (PRs, or for a block storm or a tool failure tasks)
   and the alerts folded under it (a lower bound), who can end it when its reason names a
-  person, and the waiting time all of them explained together. An outage whose check is
-  still in observe (`storm_mode`, `not_started_mode`, `tool_outage_mode`) is listed as such, and its waits
-  stay where they were until the check is switched on; its hours count from the first
+  person, what its tasks spent while it held them, per role (those tokens are the
+  outage's: the "Farm throughput" section leaves them out of each role's cost per
+  completed task and lists them apart), and the waiting time all of them explained
+  together. An outage whose check is still in observe (`storm_mode`, `not_started_mode`,
+  `tool_outage_mode`) is listed as such, holds no spend, and its waits stay where they
+  were until the check is switched on; its hours count from the first
   alert after that (until a check switched back to observe), and before/after lists them
   apart, as a signal the config change turned on. "Toolchain changes before outages" lists
   each outage of the day, of any kind, whose alert named a toolchain version change on a
