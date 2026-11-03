@@ -97,6 +97,10 @@ docker compose --profile local-agents up -d   # also node_exporter, when agents 
 | `grafana` | `127.0.0.1:3000` | Prometheus data source and the **Kelpie** dashboard are provisioned from `deploy/grafana/`. Anonymous access is off. |
 | `node-exporter` | not published | Only with `--profile local-agents`. |
 
+What the dashboard shows, and how to run Prometheus and Grafana without compose (Homebrew
+on macOS, Linux packages): [dashboard.md](dashboard.md). Alerts about Kelpie itself:
+[runbook.md](runbook.md).
+
 Add the agent hosts' node_exporters to `deploy/prometheus/prometheus.yml`. Without the
 `local-agents` profile the `node` job shows as down, which is harmless.
 
