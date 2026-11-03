@@ -203,3 +203,36 @@ def test_role_labels_are_capped_in_length_and_number() -> None:
     text = metrics.render()
     assert idle(text) == [f'kelpie_idle_agents{{role="{OTHER_ROLE}"}} 200']
     assert len(text) < 200_000
+
+
+def test_folded_roles_keep_every_count_per_board_and_stage() -> None:
+    from kelpie.metrics import MAX_ROLE_CHARS, MAX_ROLES, OTHER_ROLE
+
+    roles = ["other", "reviewer", "p" * 70 + "a", "p" * 70 + "b"]
+    roles += [f"r{i}" for i in range(MAX_ROLES + 6)]
+    tasks, owners = [], []
+    for i, role in enumerate(roles):
+        owners.append(Owner(f"a{i}", role))
+        for board in ("qr", "ops"):
+            tasks.append(
+                Task(f"{board}:D{i}", "t", Status.DONE, NOW, owner_id=f"a{i}", board=board)
+            )
+            tasks.append(
+                Task(f"{board}:P{i}", "t", Status.IN_PROGRESS, NOW, owner_id=f"a{i}", board=board)
+            )
+    metrics = Metrics()
+    metrics.set_boards("hermes", ("qr", "ops"))
+    snap = Snapshot(now=NOW, owners=tuple(owners), tasks=tuple(tasks))
+    ControlLoop(Engine([]), lambda: snap, metrics).tick_once()
+    # every count is kept, whatever label it ended under
+    assert sum(v[0] for v in metrics.board_roles.values()) == 2 * len(roles)
+    assert sum(g.done_24h for g in metrics.roles.values()) == 2 * len(roles)
+    assert sum(metrics.stages.values()) == 2 * len(roles)
+    labels = set(metrics.roles)
+    assert len(labels) <= MAX_ROLES + 1 and OTHER_ROLE in labels
+    assert all(len(r) <= MAX_ROLE_CHARS for r in labels)
+    assert {b for b, _ in metrics.board_roles} == {"qr", "ops"}
+    # two roles sharing their first 64 characters are one label
+    assert metrics.roles["p" * MAX_ROLE_CHARS].done_24h == 4
+    # a configured review role never needs a slot
+    assert "reviewer" in labels

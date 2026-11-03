@@ -64,7 +64,8 @@ MAX_SLOT_POOLS = 20  # tool slot pools exported (pools are config data)
 # first, each cut to MAX_ROLE_CHARS; the rest are summed under OTHER_ROLE (audit L10).
 MAX_ROLES = 32
 MAX_ROLE_CHARS = 64
-OTHER_ROLE = "other"
+OTHER_ROLE = "other"  # a real role of that name is summed with them
+MAX_STATUS_CHARS = 64  # a pre-work platform status label, cut the same way
 
 
 def _bounded(statuses: Iterable[BudgetStatus]) -> tuple[BudgetStatus, ...]:
@@ -469,7 +470,7 @@ class Metrics:
         for t in snapshot.tasks:
             if t.prework:
                 age = (snapshot.now - t.status_since).total_seconds()
-                key = (of_board[t.id], (t.platform_status or "unknown")[:MAX_ROLE_CHARS])
+                key = (of_board[t.id], (t.platform_status or "unknown")[:MAX_STATUS_CHARS])
                 prework.setdefault(key, []).append(age)
         shown: dict[BoardKey, int] = {}  # series kept per board: one never crowds out another
         self.prework = {}
@@ -496,6 +497,8 @@ class Metrics:
         """The label of ``role``: itself (cut to MAX_ROLE_CHARS) for the first MAX_ROLES
         roles seen, OTHER_ROLE for later ones, so agents cannot grow /metrics."""
         label = self._role_labels.get(role)
+        if label is None and (role == UNKNOWN_ROLE or role in self.review_roles):
+            return role[:MAX_ROLE_CHARS]  # Kelpie's own and configured roles take no slot
         if label is None:
             known = len(self._role_labels) < MAX_ROLES
             label = role[:MAX_ROLE_CHARS] if known and role != OTHER_ROLE else OTHER_ROLE

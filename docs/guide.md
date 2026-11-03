@@ -207,7 +207,9 @@ farm throughput metrics from traces.
   `kelpie_role_agents`, `kelpie_role_agents_with_work`, `kelpie_role_ownerless_queue_tasks`,
   `kelpie_role_tasks_done_24h`, `kelpie_role_returns_24h`, `kelpie_role_reopened_after_done_24h`
   and `_ratio`, and `kelpie_tasks_by_stage` (with a `board` label on a farm with several
-  boards: [configuration](configuration.md#adaptershermesboards)), with
+  boards: [configuration](configuration.md#adaptershermesboards); role labels are cut to 64
+  characters and the 33rd role on is summed under `other`:
+  [security.md](security.md#text-from-agents)), with
   a Throughput row in the Grafana dashboard; these are snapshots of now (agents with any
   work, ownerless tasks only, returns per done task), not the report's day-long
   utilization, queue and rework rate. The board keeps no status history, so stages

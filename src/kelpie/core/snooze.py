@@ -55,7 +55,11 @@ _DATETIME = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2})?(?:Z|[+-]\d{2}:
 # A marker token: ``until:`` not glued to a word before it, then everything up to a space.
 _MARKER = re.compile(r"(?<![\w:/.-])until:(\S+)", re.IGNORECASE)
 _TRAILING = ".,;:!?)]}>'\"\u2019\u201d"  # punctuation a sentence puts after the marker
-_QUOTED = re.compile('"[^"]*"|\u201c[^\u201d]*\u201d|\u2018[^\u2019]*\u2019|`[^`]*`')
+# A quote left open runs to the end: a reason cut at MAX_AGENT_TEXT may have lost its
+# closing quote, and what follows the opening one is still someone else's words.
+_QUOTED = re.compile(
+    '"[^"]*(?:"|$)|\u201c[^\u201d]*(?:\u201d|$)|\u2018[^\u2019]*(?:\u2019|$)|`[^`]*(?:`|$)'
+)
 _DURATION = re.compile(r"(?:\d+[dhms])+")
 
 

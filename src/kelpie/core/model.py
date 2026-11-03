@@ -13,9 +13,9 @@ from enum import StrEnum
 from types import MappingProxyType
 from typing import Any, Literal
 
-# Text agents write (a block reason, a return reason, an exit reason or progress note)
-# keeps at most this many characters (audit L9): a 200 KB reason would otherwise go whole
-# into the ledger, the report and ``kelpie why``. Rules look at the first 2000 at most.
+# Text agents write (a task title, a comment, a block, return or exit reason, a progress
+# note) keeps at most this many characters (audit L9): a 200 KB reason would otherwise go
+# whole into the ledger, the report and ``kelpie why``.
 MAX_AGENT_TEXT = 4000
 
 
@@ -145,6 +145,9 @@ class Comment:
     at: datetime
     human: bool = False
 
+    def __post_init__(self) -> None:
+        _cap(self, "text")
+
 
 @dataclass(frozen=True, slots=True)
 class Task:
@@ -205,6 +208,9 @@ class Task:
             elif prefix and prefix == self.board:
                 return None  # a board's task always carries its board's prefix
         return None if rest == self.id else rest
+
+    def __post_init__(self) -> None:
+        _cap(self, "title")
 
 
 class ResourceKind(StrEnum):

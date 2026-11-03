@@ -76,16 +76,23 @@ names on `/metrics` come from the agents' boards too; they are bounded too ([Tex
 
 ## Text from agents
 
-Block reasons, return reasons, exit reasons, progress notes and role names come from the
-agents and may be as long as they like. Kelpie keeps the first 4000 characters of each
-reason and note (cut with "…") wherever it reads them, from a board, a spool or a
-`kelpie agent` report, and stores at most 8000 characters of an action's reason or an
-alert's summary, so a huge reason cannot swell the ledger, the daily report or `kelpie why`
-(audit L9). On `/metrics` a role label is cut to 64 characters, and only the first 32 roles
-Kelpie sees (since it started) get series of their own; later ones are summed under the
-role `other`, so the series stay bounded however many roles agents make up (audit L10).
-A farm with more than 32 roles sees the later ones as `other` until `kelpie serve`
-restarts.
+Task titles, comments, block reasons, return reasons, exit reasons, progress notes and
+role names come from the agents and may be as long as they like. Kelpie keeps the first
+4000 characters of each title, comment, reason and note (cut with "…") wherever it reads
+them, from a board, a spool or a `kelpie agent` report. A quote the cut leaves open counts
+as quoted to the end, so a cut never turns a quoted `until:` into a snooze marker. In the
+ledger it stores at most 8000 characters of an action's reason and executor detail and of
+an alert's summary; an action's params over 32,000 characters of JSON have each text cut
+to 500, and when that is not enough only `{"truncated": true}` is kept. A huge reason
+cannot swell the ledger, the daily report or `kelpie why` (audit L9). Task descriptions
+(`body`) are not cut: their acceptance criteria are read whole.
+
+On `/metrics` a role label is cut to 64 characters, and only the first 32 roles Kelpie sees
+(since it started) get series of their own; later ones are summed under the role `other`
+(with a role really named `other`), so the series stay bounded however many roles agents
+make up (audit L10). `unknown` and the configured `[report] review_roles` never need a
+place. A farm with more than 32 roles sees the later ones as `other` until `kelpie serve`
+restarts. A pre-work platform status label is cut to 64 characters too.
 
 ## Files Kelpie writes
 
