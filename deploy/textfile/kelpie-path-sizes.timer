@@ -1,9 +1,9 @@
 [Unit]
-Description=Directory sizes for Kelpie every 15 minutes
+Description=Directory sizes for Kelpie every hour
 
 [Timer]
 OnBootSec=2min
-OnUnitActiveSec=15min
+OnUnitActiveSec=1h
 
 [Install]
 WantedBy=timers.target

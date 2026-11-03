@@ -168,10 +168,28 @@ to `[resources.prometheus] hosts`.
 
 **What grows.** The time-to-full alert names the fastest-growing directories when they are
 measured: copy `scripts/kelpie-path-sizes.sh` to `/usr/local/share/kelpie/` and run it every
-15 minutes with node_exporter's textfile directory and the directories that grow (simulator
-devices, Xcode DerivedData, caches, `~/.hermes`, Docker). `deploy/textfile/` has a launchd
-agent (`com.kelpie.path-sizes.plist`, macOS) and a systemd service and timer (Linux): edit the
-paths in them first. Pick a few directories, not the whole disk: `du` walks every file.
+hour with node_exporter's textfile directory and the directories that grow. `deploy/textfile/`
+has a launchd agent (`com.kelpie.path-sizes.plist`, macOS) and a systemd service and timer
+(Linux), both hourly: edit the paths in them first. The disk's own growth alert works without
+this script; the sizes only say what grows, and hourly is enough for that.
+
+Keep it cheap: `du` walks every file of each directory on every run, while builds are
+running. Point it at a few narrow directories that grow:
+
+- simulator devices (`~/Library/Developer/CoreSimulator/Devices`) and Xcode DerivedData
+  (`~/Library/Developer/Xcode/DerivedData`) on macOS;
+- build caches (`~/.cache`, `~/.gradle/caches`, a Bazel output base) and container volumes
+  (`/var/lib/docker/volumes`);
+- system caches (`~/Library/Caches`, `/var/cache`).
+
+Never point it at a worktree root, a whole agent home (`~/.hermes`, `~/.claude`) or the whole
+disk: they hold the agents' worktrees with `node_modules` and build output, hundreds of
+thousands of files, and one run then walks a large part of the disk (on a live farm, every 15
+minutes, at a load average of several hundred). The script has no exclude list (`du` options
+for that differ between macOS and Linux): measure the directories under such a root that grow
+instead. It writes how long each directory took (`kelpie_path_scan_seconds`), and
+`kelpie doctor` warns about one over a minute ("path scans cheap"), naming the directory. If you
+run it more or less often than hourly, set `[resources.prometheus] path_interval` to match.
 
 **What changed.** An outage that starts soon after a toolchain update names the update as
 its likely cause (incident 20: an automatic Xcode update broke every iOS build). Copy

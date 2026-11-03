@@ -192,6 +192,21 @@ def test_growth_sustain() -> None:
         load_resources(section(growth_sustain="soon"))
 
 
+def test_path_interval() -> None:
+    """#281: the script runs hourly; directory growth is sustained over slices of 2 runs."""
+    config = prometheus().build().config
+    assert config.path_interval == timedelta(hours=1)
+    assert "[28800s:7200s]" in config.query_text("path_growth")
+    assert "[3600s:900s]" in config.query_text("disk_growth")  # disks keep their slices
+    fast = prometheus(path_interval="5m").build().config
+    assert "[3600s:900s]" in fast.query_text("path_growth")  # never shorter than the disk's
+    slow = prometheus(path_interval="6h").build().config
+    assert "[172800s:43200s]" in slow.query_text("path_growth")
+    for bad in ("30s", "7h", "soon"):
+        with pytest.raises(ValueError, match="path_interval"):
+            load_resources(section(path_interval=bad))
+
+
 def test_load_on_macos() -> None:
     assert prometheus().load_on_macos is False
     assert prometheus(load_on_macos=True).build().config.load_on_macos is True

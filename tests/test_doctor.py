@@ -107,6 +107,7 @@ def test_healthy_farm_passes_everything_but_prometheus(farm: Farm) -> None:
         "PR blocks have conditions": "PASS",
         "snooze markers parse": "SKIP",
         "disk watched": "PASS",
+        "path scans cheap": "SKIP",
         "process counts fresh": "SKIP",
         "Prometheus reachable": "SKIP",
     }
@@ -771,6 +772,45 @@ def test_a_mac_whose_process_count_stopped_is_a_warning(farm: Farm) -> None:
     farm.prom.responses[count("processes")] = mac  # the script writes again
     check = farm.checks()["process counts fresh"]
     assert check.status == "PASS" and "fresh process counts from mac-1" in check.detail
+
+
+SCANS = "max by (instance, path) (kelpie_path_scan_seconds)"
+
+
+def test_a_slow_directory_scan_is_named(farm: Farm) -> None:
+    """#281: a du over a worktree root walked half the disk every run on a loaded Mac."""
+    farm.make_healthy()
+    check = farm.checks()["path scans cheap"]
+    assert check.status == "SKIP" and "kelpie_path_scan_seconds" in check.detail
+    farm.prom.responses[SCANS] = vector(
+        ({"instance": "mac-1:9100", "path": "/Users/agent/Library/Caches"}, "3"),
+        ({"instance": "other:9100", "path": "/elsewhere"}, "900"),  # not a configured host
+    )
+    check = farm.checks()["path scans cheap"]
+    assert check.status == "PASS" and "1 directories, the slowest in 3s" in check.detail
+    farm.prom.responses[SCANS] = vector(
+        ({"instance": "mac-1:9100", "path": "/Users/agent/Library/Caches"}, "3"),
+        ({"instance": "mac-1:9100", "path": "/Users/agent/worktrees"}, "312"),
+        ({"instance": "mac-1:9100", "path": "/Users/agent/.hermes"}, "61"),
+    )
+    check = farm.checks()["path scans cheap"]
+    assert check.status == "WARN"
+    assert "2 directory scan(s) over 60s" in check.detail
+    # The slowest first, each with its host.
+    assert check.detail.index("/Users/agent/worktrees on mac-1 (312s)") < check.detail.index(
+        "/Users/agent/.hermes on mac-1 (61s)"
+    )
+    assert "Caches" not in check.detail
+    assert "narrower directories" in check.fix and "worktree root" in check.fix
+
+
+def test_path_scans_skip_without_resources_or_an_answer(farm: Farm) -> None:
+    farm.make_healthy()
+    farm.prom.status = 500
+    assert farm.checks()["path scans cheap"].status == "SKIP"
+    farm.prom.status = 200
+    farm.resources = ""
+    assert farm.checks()["path scans cheap"].status == "SKIP"
 
 
 def test_process_counts_skip_without_a_mac_or_an_answer(farm: Farm) -> None:

@@ -466,9 +466,12 @@ def test_directories_are_listed_under_the_disk_they_are_on() -> None:
 
 
 def test_directory_sizes_from_a_stopped_script_are_said_to_be_old() -> None:
-    old = replace(path("/srv/cache", 5), at=NOW - 3 * 60 * M)
+    old = replace(path("/srv/cache", 5), at=NOW - 4 * 60 * M)
     [a] = full_alerts(run(disk(495, 9.0), old))
-    assert a.params["growing_paths"] == [] and "over an hour old" in a.reason
+    assert a.params["growing_paths"] == [] and "older than 3.0h" in a.reason
+    hourly = replace(path("/srv/cache", 5), at=NOW - 90 * M)  # one run missed: still named
+    [b] = full_alerts(run(disk(495, 9.0), hourly))
+    assert [p["path"] for p in b.params["growing_paths"]] == ["/srv/cache"]
 
 
 def test_build_path_max_age() -> None:

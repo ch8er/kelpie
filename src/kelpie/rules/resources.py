@@ -50,7 +50,7 @@ and again. The alert names the fastest-growing directories
 on that filesystem (``path`` readings: sizes measured by the shipped
 ``scripts/kelpie-path-sizes.sh``, which records each directory's mountpoint), up to
 ``growing_paths_shown`` (3), with their growth per day; without them it says how to get
-them, and with none newer than ``path_max_age`` (1h) that the script stopped. Growth under
+them, and with none newer than ``path_max_age`` (3h) that the script stopped. Growth under
 ``min_growth_per_day`` (0.1 GB) is noise and forecasts nothing. A disk already past its
 utilization threshold gets the forecast in that alert, at the worse of the two severities,
 not a second alert.
@@ -67,6 +67,7 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from kelpie.core.actions import Action, ActionKind, Severity
+from kelpie.core.alerts import format_age
 from kelpie.core.model import OwnerKind, Resource, ResourceKind, Snapshot, Status, Task
 from kelpie.core.serde import parse_duration
 from kelpie.rules import register
@@ -134,6 +135,7 @@ class Forecast:
     stale: bool  # directory sizes exist for it, but none recent: the script stopped
     elsewhere: bool = False  # the host's directory sizes are all on other filesystems
     unplaced: bool = False  # the host has directory sizes that do not say their filesystem
+    path_max_age: timedelta = timedelta(hours=3)  # how old ``stale`` sizes are at least
 
 
 @dataclass(frozen=True, slots=True)
@@ -165,7 +167,7 @@ class Resources:
     time_to_full_release: timedelta | None = None
     min_growth_per_day: float = 0.1  # in the reading's unit (GB)
     growing_paths_shown: int = 3
-    path_max_age: timedelta = timedelta(hours=1)  # directory sizes are measured every 15m
+    path_max_age: timedelta = timedelta(hours=3)  # directory sizes are measured every hour
     name: str = NAME
 
     def evaluate(self, snapshot: Snapshot) -> Sequence[Action]:
@@ -228,7 +230,15 @@ class Resources:
             theirs = [p for p in paths if p.host == host]
             elsewhere = not mine and bool(theirs) and all(p.mount for p in theirs)
             out[r.name] = Forecast(
-                r, growth, hours, severity, tuple(growing), stale, elsewhere, unplaced
+                r,
+                growth,
+                hours,
+                severity,
+                tuple(growing),
+                stale,
+                elsewhere,
+                unplaced,
+                self.path_max_age,
             )
         return out
 
@@ -830,8 +840,8 @@ def _forecast_text(c: Forecast) -> str:
         )
     elif c.stale:
         what = (
-            "Its directory sizes are over an hour old: is scripts/kelpie-path-sizes.sh still "
-            "running on the host?"
+            f"Its directory sizes are older than {format_age(c.path_max_age)}: is "
+            "scripts/kelpie-path-sizes.sh still running on the host?"
         )
     else:
         what = (

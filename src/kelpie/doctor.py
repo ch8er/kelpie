@@ -886,6 +886,54 @@ def check_resources_watched(
     return _pass(name, f"{where} reads the disks and directory sizes of {hosts}{note}")
 
 
+SLOW_SCAN = 60.0  # seconds: a du of one directory longer than this walks too much (#281)
+SCANS = "path scans cheap"
+
+
+def check_path_scans(
+    settings: Settings, loaded: LoadedRules, environ: Mapping[str, str] = os.environ
+) -> Check:
+    """``scripts/kelpie-path-sizes.sh`` must stay cheap: one ``du`` over a worktree root or a
+    whole agent home walks hundreds of thousands of files every run (a live farm with load
+    448). It writes how long each directory took; doctor names the slow ones."""
+    prometheus = settings.resources.prometheus
+    if not any(r.name == "resources" for r in loaded.rules) or prometheus is None:
+        return _skip(SCANS, "rule 7 reads no host resources")
+    try:
+        config = prometheus.build(environ=environ).config
+    except ValueError as exc:
+        return _skip(SCANS, str(exc))
+    client = PrometheusClient(config.url, min(config.timeout, 5), config.token)
+    label = config.host_label
+    try:
+        series = client.query(f"max by ({label}, path) (kelpie_path_scan_seconds)")
+    except QueryError as exc:
+        return _skip(SCANS, f"Prometheus did not answer ({exc.cause})")
+    hosts = {value: host for host, value in prometheus.hosts.items()}
+    scans = [
+        (hosts[s.labels.get(label, "")], s.labels.get("path", ""), s.value)
+        for s in series
+        if s.labels.get(label, "") in hosts
+    ]
+    if not scans:
+        return _skip(
+            SCANS,
+            "no kelpie_path_scan_seconds (kelpie-path-sizes.sh not installed, or older)",
+        )
+    slow = sorted((-seconds, host, path) for host, path, seconds in scans if seconds > SLOW_SCAN)
+    if slow:
+        shown = [f"{path} on {host} ({-neg:.0f}s)" for neg, host, path in slow]
+        return _warn(
+            SCANS,
+            f"{len(slow)} directory scan(s) over {SLOW_SCAN:.0f}s: {_first(shown)}",
+            "point kelpie-path-sizes.sh at narrower directories that grow (simulator "
+            "devices, DerivedData, build or system caches), not a worktree root or a whole "
+            "agent home (docs/install.md, Host resources)",
+        )
+    longest = max(seconds for _, _, seconds in scans)
+    return _pass(SCANS, f"{len(scans)} directories, the slowest in {longest:.0f}s")
+
+
 # kelpie_processes.prom: the macOS process count rule 7 reads (scripts/kelpie-process-limit.sh).
 _PROCESS_FILE = 'node_textfile_mtime_seconds{file=~"(.*/)?kelpie_processes[.]prom"}'
 
@@ -1360,6 +1408,7 @@ def run_checks(
     checks += check_github(settings, environ)
     checks += check_chat_buttons(settings, environ)
     checks.append(check_resources_watched(settings, loaded, environ))
+    checks.append(check_path_scans(settings, loaded, environ))
     checks.append(check_process_counts(settings, loaded, environ))
     checks.append(check_prometheus(prometheus, environ))
     return checks

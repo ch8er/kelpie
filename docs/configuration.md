@@ -443,7 +443,7 @@ set `[resources.prometheus.queries] processes_max` to a real ceiling.
 | `time_to_full_release` | warning × 7/6 (`"84h"`; critical × 7/6 with the warning off) | duration, not shorter than the warning; `false`: no hold | A disk's open alert (opened by the forecast or by its utilization: one condition per disk) stays open, a warning, until the disk would fill later than this, so a growth rate near the warning does not open and resolve it again and again. |
 | `min_growth_per_day` | `0.1` | GB per day | Slower growth forecasts nothing. |
 | `growing_paths_shown` | `3` | count, 0 to 20 | Directories named in the alert. |
-| `path_max_age` | `"1h"` | duration | Directory sizes older than this are not named; the alert asks whether the script still runs. |
+| `path_max_age` | `"3h"` | duration | Directory sizes older than this are not named; the alert asks whether the script still runs. The script runs hourly: keep this above `[resources.prometheus] path_interval` plus a missed run. |
 | `quota_warning` | `0.1` | ratio or `false` | Warn when `remaining / limit` of a provider quota is at or below this. |
 | `rate_limit_events_warning` | `20` | count or `false` | Warn at this many limit hits per provider... |
 | `rate_limit_window` | `"24h"` | duration, > 0 | ...within this window. |
@@ -1346,6 +1346,7 @@ present.
 | `queries` | built-in | table | PromQL overrides, one per reading, see below. |
 | `growth_window` | `"6h"` | duration, 30m to 7d | Window of the disk and directory growth rates (`deriv`): rule 7's time-to-full forecast. |
 | `growth_sustain` | `"1h"`, or `growth_window` when that is shorter | duration, 5m to 24h and at most `growth_window` | How long growth must go on to count. The growth rate is the rate over `growth_window`, capped at the first quartile of the rates in the slices (`growth_sustain` / 4, at least 1m, aligned to the clock) of the last `growth_sustain`, a slice that shrank counting as 0. So a burst within about half of `growth_sustain` adds a few GB a day at most, for about one slice (5 GB written in 17 minutes reads at most about 5 GB a day on a flat disk, 35 on one growing 30 GB a day), then nothing; a cleanup of less than a few hours' growth leaves about the rate (an open forecast does not resolve), while a larger one turns the window's trend negative, so an open forecast resolves until the cleanup leaves the window (about 4 to 5 hours with the 6h default); a longer burst counts in part (5 GB in 40 to 50 minutes reads up to about 15 to 18 GB a day). Growth that comes in bursts with gaps longer than a slice (a build every 30 minutes, nothing written in between) reads as no growth. A shrinking trend stays negative: no forecast. |
+| `path_interval` | `"1h"` | duration, 1m to 6h | How often `scripts/kelpie-path-sizes.sh` runs (the shipped launchd agent and systemd timer: hourly). Its sizes change in steps, so directory growth is sustained over slices of at least two runs (`{path_slice}`, at least the disk's slice), four of them (`{path_sustain}`, at least `growth_sustain`); with quarter-hour slices most would see no change and no directory would be named. |
 | `load_on_macos` | `false` | bool | macOS counts threads waiting on I/O in its load average (300 to 800 on a healthy farm Mac), so hosts whose `node_uname_info` says Darwin get no load reading unless this is true. Needs node_exporter's uname collector (on by default), as does leaving out macOS's read-only volumes; a host once seen as macOS stays so when that query fails, and until it first answers no host gets a load reading. |
 | `toolchain_metric` | `"kelpie_toolchain_info"` | a metric name | Toolchain versions per host (incident 20), one series per tool with its version in a label, e.g. from `scripts/kelpie-toolchain.sh` (the active Xcode and CoreSimulator on macOS, or any `TOOL=COMMAND`). A version seen within `toolchain_lookback` right after another version of the same tool on the same host is a change; the first version a host reports is none. Report one version per tool. An outage that begins soon after a change names it as its likely cause in its alert (rules 4, 9 and 10, `toolchain_window`) and in the daily report. Absent metric: no changes, nothing else changes. |
 | `toolchain_tool_label`, `toolchain_version_label` | `"tool"`, `"version"` | label names, different, not `host_label` | The labels holding the tool's name and its version. |
@@ -1378,9 +1379,9 @@ that existed half a window ago, so a new Prometheus or host forecasts nothing at
 growth and directory queries may fail or be empty without costing the other readings (each
 failure is counted in `kelpie_resource_read_failures_total`, cause `<query>_<cause>`). In
 every query, custom ones too, `{host_label}`, `{window}` (`growth_window`), `{half_window}`,
-`{sustain}` (`growth_sustain`) and `{slice}` (a quarter of it, at least 1m) are filled in; a
-custom `disk_growth` or `path_growth` is sustained only if it uses `{sustain}` and `{slice}`
-itself. The defaults are in `kelpie.example.toml`. `processes` needs node_exporter's
+`{sustain}` (`growth_sustain`), `{slice}` (a quarter of it, at least 1m), `{path_slice}` and
+`{path_sustain}` (the same for directory sizes, see `path_interval`) are filled in; a custom
+`disk_growth` or `path_growth` is sustained only if it uses those itself. The defaults are in `kelpie.example.toml`. `processes` needs node_exporter's
 `--collector.processes`.
 
 ## [connectors.github]

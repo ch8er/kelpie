@@ -48,7 +48,11 @@ def test_odd_arguments_are_skipped_or_measured_once(tmp_path: Path) -> None:
     dash.mkdir()
     result = run(str(out), str(dash), str(dash), "relative/dir", f"{tmp_path}/a\nb")
     assert result.returncode == 0, result.stderr
-    lines = [x for x in (out / "kelpie_paths.prom").read_text().splitlines() if "{" in x]
+    lines = [
+        x
+        for x in (out / "kelpie_paths.prom").read_text().splitlines()
+        if x.startswith("kelpie_path_bytes{")
+    ]
     assert len(lines) == 1 and f'path="{dash}"' in lines[0]  # once, though given twice
     assert "not an absolute path" in result.stderr and "newline" in result.stderr
 
@@ -74,7 +78,11 @@ def test_symlinks_and_trailing_slashes(tmp_path: Path) -> None:
     link.symlink_to(real)
     result = run(str(out), str(link), f"{link}/", f"{link}//")
     assert result.returncode == 0, result.stderr
-    lines = [x for x in (out / "kelpie_paths.prom").read_text().splitlines() if "{" in x]
+    lines = [
+        x
+        for x in (out / "kelpie_paths.prom").read_text().splitlines()
+        if x.startswith("kelpie_path_bytes{")
+    ]
     assert len(lines) == 1  # the same directory once
     assert int(lines[0].rsplit(" ", 1)[1]) >= 200_000  # measured through the link
 
@@ -121,3 +129,54 @@ def test_the_mountpoint_of_a_macos_df(tmp_path: Path) -> None:
     )
     assert result.returncode == 0, result.stderr
     assert 'mountpoint="/System/Volumes/Data"}' in (out / "kelpie_paths.prom").read_text()
+
+
+def test_scan_seconds_per_directory_even_without_a_size(tmp_path: Path) -> None:
+    """#281: how long each du took, so doctor can name a directory that is too big."""
+    out = tmp_path / "textfile"
+    out.mkdir()
+    one, two = tmp_path / "one", tmp_path / 'two "q"'
+    one.mkdir()
+    two.mkdir()
+    result = run(str(out), str(one), str(two))
+    assert result.returncode == 0, result.stderr
+    text = (out / "kelpie_paths.prom").read_text()
+    assert "# TYPE kelpie_path_scan_seconds gauge" in text
+    scans = re.findall(r'^kelpie_path_scan_seconds\{path="(.*)"\} (\d+)$', text, re.M)
+    assert [p for p, _ in scans] == [str(one), str(two).replace('"', '\\"')]
+    # Each metric is one group (Prometheus text format): sizes first, then scan times.
+    lines = [x.split("{")[0] for x in text.splitlines() if not x.startswith("#")]
+    assert lines == ["kelpie_path_bytes"] * 2 + ["kelpie_path_scan_seconds"] * 2
+
+    # A du that gives no size (a hung mount cut by the timeout) still has its scan time.
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    fake = bin_dir / "du"
+    fake.write_text("#!/bin/sh\nexit 1\n")
+    fake.chmod(0o755)
+    env = {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}"}
+    result = subprocess.run(
+        ["sh", str(SCRIPT), str(out), str(one)], capture_output=True, text=True, env=env
+    )
+    assert result.returncode == 0 and "du gave no size" in result.stderr
+    text = (out / "kelpie_paths.prom").read_text()
+    assert "kelpie_path_bytes{" not in text
+    assert re.search(
+        rf'^kelpie_path_scan_seconds\{{path="{re.escape(str(one))}"\}} \d+$', text, re.M
+    )
+
+
+def test_shipped_units_run_hourly_and_skip_whole_agent_homes() -> None:
+    """#281: the shipped launchd agent and systemd timer run hourly, over narrow paths."""
+    deploy = SCRIPT.parents[1] / "deploy" / "textfile"
+    with (deploy / "com.kelpie.path-sizes.plist").open("rb") as f:
+        unit = plistlib.load(f)
+    assert unit["StartInterval"] == 3600
+    timer = (deploy / "kelpie-path-sizes.timer").read_text()
+    assert re.search(r"^OnUnitActiveSec=1h$", timer, re.M)
+    service = (deploy / "kelpie-path-sizes.service").read_text()
+    [exec_line] = [x for x in service.splitlines() if x.startswith("ExecStart=")]
+    for paths in (unit["ProgramArguments"][2:], exec_line.split()[2:]):
+        assert paths
+        assert not [p for p in paths if p.rstrip("/").endswith((".hermes", ".claude", "worktrees"))]
+        assert not [p for p in paths if p.rstrip("/") in ("/Users/YOU", "/home/YOU")]

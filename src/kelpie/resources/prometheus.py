@@ -60,7 +60,7 @@ _WRITABLE = (
 )
 
 
-def _sustained(rate: str) -> str:
+def _sustained(rate: str, slice_: str = "{slice}", sustain: str = "{sustain}") -> str:
     """The lower of ``rate`` over ``{window}`` (the trend, a real shrink stays negative) and
     the first quartile of ``rate`` over the ``{slice}`` steps of the last ``{sustain}`` (what
     held in most of them). A slice that shrank counts as 0, so a cleanup cannot drag this
@@ -70,15 +70,16 @@ def _sustained(rate: str) -> str:
     same labels, so ``or`` adds a series only where ``<`` dropped it: one result per
     series."""
     trend = rate.replace("{range}", "{window}")
-    sliced = rate.replace("{range}", "{slice}")
-    held = f"quantile_over_time(0.25, clamp_min({sliced}, 0)[{{sustain}}:{{slice}}])"
+    sliced = rate.replace("{range}", slice_)
+    held = f"quantile_over_time(0.25, clamp_min({sliced}, 0)[{sustain}:{slice_}])"
     return f"(({trend} < {held}) or {held})"
 
 
 # ``{host_label}`` is replaced by the configured host label, ``{window}`` and
 # ``{half_window}`` by ``growth_window`` and its half, ``{sustain}`` by ``growth_sustain``
-# and ``{slice}`` by a quarter of it (at least a minute), in custom queries too. Every result
-# must keep the host label.
+# and ``{slice}`` by a quarter of it (at least a minute), ``{path_slice}`` and
+# ``{path_sustain}`` by the same for directory sizes, long enough for ``path_interval``
+# (see PrometheusConfig), in custom queries too. Every result must keep the host label.
 DEFAULT_QUERIES: Mapping[str, str] = {
     "disk_size": f"node_filesystem_size_bytes{{{_FS}}} {_WRITABLE}",
     "disk_avail": f"node_filesystem_avail_bytes{{{_FS}}} {_WRITABLE}",
@@ -120,9 +121,11 @@ DEFAULT_QUERIES: Mapping[str, str] = {
     # Directory sizes from scripts/kelpie-path-sizes.sh (node_exporter's textfile collector),
     # and when that file was last written: sizes from a script that stopped are old.
     "path_bytes": "kelpie_path_bytes",
-    # Sustained like disk_growth, so the directories an alert names grew all along too.
+    # Sustained like disk_growth, so the directories an alert names grew all along too. The
+    # script measures every ``path_interval`` (1h): its sizes are steps, so each slice spans
+    # two of them, or most slices would show no growth at all.
     "path_growth": (
-        _sustained("deriv(kelpie_path_bytes[{range}]) * 86400")
+        _sustained("deriv(kelpie_path_bytes[{range}]) * 86400", "{path_slice}", "{path_sustain}")
         + " and kelpie_path_bytes offset {half_window}"
     ),
     "path_written": 'node_textfile_mtime_seconds{file=~"(.*/)?kelpie_paths[.]prom"}',
@@ -142,6 +145,7 @@ DEFAULT_TOOLCHAIN_LOOKBACK = timedelta(hours=48)
 TOOLCHAIN_STEP = timedelta(minutes=5)  # how precisely a change is timed
 DEFAULT_GROWTH_WINDOW = timedelta(hours=6)
 DEFAULT_GROWTH_SUSTAIN = timedelta(hours=1)  # at most growth_window (config.py)
+DEFAULT_PATH_INTERVAL = timedelta(hours=1)  # how often kelpie-path-sizes.sh runs
 MIN_GROWTH_SLICE = timedelta(minutes=1)
 QUERY_NAMES = frozenset(DEFAULT_QUERIES)
 
@@ -275,6 +279,7 @@ class PrometheusConfig:
     queries: Mapping[str, str] = field(default_factory=dict)  # overrides of DEFAULT_QUERIES
     growth_window: timedelta = DEFAULT_GROWTH_WINDOW
     growth_sustain: timedelta = DEFAULT_GROWTH_SUSTAIN  # rates capped at what held over this
+    path_interval: timedelta = DEFAULT_PATH_INTERVAL  # how often directory sizes are measured
     # macOS counts threads waiting on I/O in its load average: 300-800 on a healthy Mac.
     load_on_macos: bool = False
     toolchain_metric: str = DEFAULT_TOOLCHAIN_METRIC
@@ -285,7 +290,7 @@ class PrometheusConfig:
     def query_text(self, name: str) -> str:
         """The query, its placeholders filled in (in custom queries too): ``{host_label}``,
         ``{window}`` (``growth_window``), ``{half_window}``, ``{sustain}``
-        (``growth_sustain``) and ``{slice}``."""
+        (``growth_sustain``), ``{slice}``, ``{path_slice}`` and ``{path_sustain}``."""
         text = self.queries.get(name, DEFAULT_QUERIES[name])
         seconds = int(self.growth_window.total_seconds())
         return (
@@ -294,6 +299,8 @@ class PrometheusConfig:
             .replace("{window}", f"{seconds}s")
             .replace("{sustain}", f"{int(self.growth_sustain.total_seconds())}s")
             .replace("{slice}", f"{int(self.growth_slice.total_seconds())}s")
+            .replace("{path_sustain}", f"{int(self.path_sustain.total_seconds())}s")
+            .replace("{path_slice}", f"{int(self.path_slice.total_seconds())}s")
             .replace("{toolchain_metric}", self.toolchain_metric)
             .replace("{tool_label}", self.toolchain_tool_label)
             .replace("{version_label}", self.toolchain_version_label)
@@ -306,6 +313,17 @@ class PrometheusConfig:
         """A quarter of ``growth_sustain``, at least a minute: growth must show in each."""
         quarter = timedelta(seconds=int(self.growth_sustain.total_seconds()) // 4)
         return max(quarter, MIN_GROWTH_SLICE)
+
+    @property
+    def path_slice(self) -> timedelta:
+        """A slice of directory growth: ``growth_slice``, but at least two of the script's
+        runs, so each slice sees its sizes change."""
+        return max(self.growth_slice, 2 * self.path_interval)
+
+    @property
+    def path_sustain(self) -> timedelta:
+        """``growth_sustain`` for directories: at least four path slices."""
+        return max(self.growth_sustain, 4 * self.path_slice)
 
 
 class PrometheusSource:
