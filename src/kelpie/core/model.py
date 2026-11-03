@@ -13,6 +13,23 @@ from enum import StrEnum
 from types import MappingProxyType
 from typing import Any, Literal
 
+# Text agents write (a block reason, a return reason, an exit reason or progress note)
+# keeps at most this many characters (audit L9): a 200 KB reason would otherwise go whole
+# into the ledger, the report and ``kelpie why``. Rules look at the first 2000 at most.
+MAX_AGENT_TEXT = 4000
+
+
+def capped(text: str, limit: int = MAX_AGENT_TEXT) -> str:
+    """``text`` cut to ``limit`` characters, the cut marked with an ellipsis."""
+    return text if len(text) <= limit else text[: limit - 1] + "\u2026"
+
+
+def _cap(obj: object, *names: str) -> None:
+    for name in names:
+        value = getattr(obj, name)
+        if isinstance(value, str) and len(value) > MAX_AGENT_TEXT:
+            object.__setattr__(obj, name, capped(value))
+
 
 class Status(StrEnum):
     """Normalized task status. Adapters map platform statuses onto these."""
@@ -101,6 +118,9 @@ class Block:
     condition_id: str | None = None
     kelpie: KelpieMark | None = None  # set only by an adapter that verified Kelpie's marker
 
+    def __post_init__(self) -> None:
+        _cap(self, "reason")
+
 
 @dataclass(frozen=True, slots=True)
 class Return:
@@ -109,6 +129,9 @@ class Return:
     at: datetime
     reason: str
     category: str | None = None
+
+    def __post_init__(self) -> None:
+        _cap(self, "reason")
 
 
 @dataclass(frozen=True, slots=True)
@@ -267,6 +290,9 @@ class Session:
     # (an adapter must not set it for every call; open TOOL spans are every call).
     running_tool: str | None = None
     running_tool_since: datetime | None = None
+
+    def __post_init__(self) -> None:
+        _cap(self, "exit_reason", "summary")
 
 
 # Lower bounds of the buckets a wait inside a session is kept in (SessionWait.waited).

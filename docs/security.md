@@ -72,7 +72,20 @@ still keeps its tasks out of the rules but is only counted, once per report
 (`kind="board"`), with no alert of its own. A fixed list was chosen over "the first names an agent reports": it holds
 across hub restarts and gives an agent no first report to abuse. Host sleeps an agent
 reports are kept only when they ended before its report, and at most 64 per agent. Role
-names on `/metrics` come from the agents' boards too; they are not bounded yet (audit L10).
+names on `/metrics` come from the agents' boards too; they are bounded too ([Text from agents](#text-from-agents), audit L10).
+
+## Text from agents
+
+Block reasons, return reasons, exit reasons, progress notes and role names come from the
+agents and may be as long as they like. Kelpie keeps the first 4000 characters of each
+reason and note (cut with "…") wherever it reads them, from a board, a spool or a
+`kelpie agent` report, and stores at most 8000 characters of an action's reason or an
+alert's summary, so a huge reason cannot swell the ledger, the daily report or `kelpie why`
+(audit L9). On `/metrics` a role label is cut to 64 characters, and only the first 32 roles
+Kelpie sees (since it started) get series of their own; later ones are summed under the
+role `other`, so the series stay bounded however many roles agents make up (audit L10).
+A farm with more than 32 roles sees the later ones as `other` until `kelpie serve`
+restarts.
 
 ## Files Kelpie writes
 

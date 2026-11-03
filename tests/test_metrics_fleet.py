@@ -170,3 +170,36 @@ def test_tool_slots_by_pool_and_holder() -> None:
     empty = Metrics()
     ControlLoop(Engine([]), lambda: Snapshot(now=NOW), empty).tick_once()
     assert "kelpie_tool_slots" not in empty.render()  # no pools: no series
+
+
+def test_role_labels_are_capped_in_length_and_number() -> None:
+    """Audit L10: one agent report with long, ever new roles gave a 97 MB /metrics."""
+    from kelpie.metrics import MAX_ROLE_CHARS, MAX_ROLES, OTHER_ROLE
+
+    def board(n: int) -> Snapshot:
+        roles = [f"r{n}-{i}-" + "x" * 5000 for i in range(200)]
+        return Snapshot(
+            now=NOW,
+            owners=tuple(Owner(f"a{n}-{i}", r) for i, r in enumerate(roles)),
+            tasks=tuple(
+                Task(f"T{n}-{i}", "t", Status.DONE, NOW, owner_id=f"a{n}-{i}")
+                for i in range(len(roles))
+            ),
+        )
+
+    def idle(text: str) -> list[str]:
+        return [line for line in text.splitlines() if line.startswith("kelpie_idle_agents{")]
+
+    metrics = Metrics()
+    ControlLoop(Engine([]), lambda: board(0), metrics).tick_once()
+    text = metrics.render()
+    assert len(text) < 200_000
+    assert len(idle(text)) == MAX_ROLES + 1  # the first 32 roles, and the rest as "other"
+    assert all(len(line) < MAX_ROLE_CHARS + 60 for line in idle(text))
+    assert f'kelpie_idle_agents{{role="{OTHER_ROLE}"}} {200 - MAX_ROLES}' in text
+    assert sum(g.done_24h for g in metrics.roles.values()) == 200  # nothing lost
+    for n in (1, 2):  # later roles never get a series of their own
+        ControlLoop(Engine([]), lambda n=n: board(n), metrics).tick_once()
+    text = metrics.render()
+    assert idle(text) == [f'kelpie_idle_agents{{role="{OTHER_ROLE}"}} 200']
+    assert len(text) < 200_000

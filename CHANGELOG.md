@@ -67,6 +67,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
   other names are refused, counted in `kelpie_hub_refused_total` and alerted once per
   agent; host sleeps an agent reports are kept only when they ended and at most 64 per
   agent. One agent cannot grow the hub's executors, series, alerts or memory this way (audit M6, [#327](https://github.com/ch8er/kelpie/pull/327)).
+- Agent text is bounded: block, return and exit reasons and progress notes keep their
+  first 4000 characters, and the ledger stores at most 8000 of an action's reason (audit
+  L9); role labels on `/metrics` are cut to 64 characters and the 33rd role on is summed
+  under `other` (audit L10) (#PR_L9).
 
 ## [0.1.0a1] - 2026-11-03
 

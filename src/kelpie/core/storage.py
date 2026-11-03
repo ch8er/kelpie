@@ -33,6 +33,7 @@ from kelpie.core.model import (
     Span,
     SpanKind,
     SpanTotals,
+    capped,
 )
 from kelpie.core.snooze import EXPIRED_KEPT, MAX_BY, MAX_REASON, PRUNE_AFTER
 from kelpie.core.spans import (
@@ -243,6 +244,9 @@ MIGRATIONS: dict[int, str] = {
     1: _V1, 2: _V2, 3: _V3, 4: _V4, 5: _V5, 6: _V6, 7: _V7, 8: _V8, 9: _V9, 10: _V10,
 }  # fmt: skip
 SCHEMA_VERSION = max(MIGRATIONS)
+# Characters of an action's reason, its executor's detail and an alert state's summary
+# that are stored (audit L9): rules quote agent text, capped itself at MAX_AGENT_TEXT.
+MAX_STORED_TEXT = 8000
 
 _COLUMNS = (
     "at, fingerprint, subject, rule, kind, mode, outcome, reason, task_id, executor,"
@@ -398,7 +402,7 @@ class SqliteLedgerStore:
             _ts(state.last_seen),
             state.level,
             str(state.severity),
-            state.summary,
+            capped(state.summary, MAX_STORED_TEXT),
             state.key,
             str(state.mode),
         )
@@ -540,13 +544,13 @@ def _insert_entry(db: sqlite3.Connection, entry: LedgerEntry) -> sqlite3.Cursor:
         entry.kind,
         entry.mode,
         entry.outcome,
-        entry.reason,
+        capped(entry.reason, MAX_STORED_TEXT),
         entry.task_id,
         entry.executor,
         to_json(entry.params),
         entry.suppressed,
         entry.suppression,
-        entry.detail,
+        None if entry.detail is None else capped(entry.detail, MAX_STORED_TEXT),
     )
     sql = f"INSERT INTO actions ({_COLUMNS}) VALUES ({', '.join('?' * len(values))})"
     return db.execute(sql, values)
