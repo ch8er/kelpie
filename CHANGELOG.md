@@ -16,11 +16,12 @@ so a fresh install changes nothing on your farm until you turn it on, rule by ru
 
 These are the release notes for the tag, ahead of what changed.
 
-- **Keep `kelpie serve` on loopback** (the default, `127.0.0.1`; docker compose publishes
-  it on `127.0.0.1` only), or behind a reverse proxy that limits connections and request
-  time. Its HTTP server has no pre-auth deadline or connection cap yet, so a slow client
-  can tie it up without a token (audit item M5, fix in
-  [#304](https://github.com/ch8er/kelpie/issues/304)).
+- **Think before exposing `kelpie serve` off loopback** (the default bind is `127.0.0.1`;
+  docker compose publishes on `127.0.0.1` only). Every listener now has connection guards
+  (header and body deadlines, connection caps, slow-client cutoff, body limits; `[server]`),
+  but `/metrics` and `/healthz` are unauthenticated and the guards cannot stop a fast flood
+  from many addresses: firewall the port to the networks that need it, or put an
+  authenticating proxy in front ([docs/security.md](docs/security.md#listeners)).
 - **Rule 10 in `act` trusts every holder of the traces token** (audit item M1). Spans and
   hook spool lines say which run they belong to, and every agent holds the one ingest
   token, so an agent can make `loop_breaker` stop another agent's run. If your agents are
@@ -32,8 +33,6 @@ These are the release notes for the tag, ahead of what changed.
   ([#275](https://github.com/ch8er/kelpie/issues/275)), each fixed after this release:
   - M4: the Linear client has no overall deadline; a server that answers a byte at a time
     can stall the control loop (`[adapters.linear]` only). Follow-up on #275.
-  - M5: as above, `kelpie serve`'s port has no connection guards. Follow-up:
-    [#304](https://github.com/ch8er/kelpie/issues/304).
   - M6: one authenticated `kelpie agent` can grow the hub's executors, metric series and
     alerts by reporting new adapter names; give hub tokens only to agents you run.
     Follow-up on #275.
@@ -406,6 +405,13 @@ control loop. Each rule runs in `observe`, `suggest` or `act` mode.
 
 ### Safety
 
+- `kelpie serve`'s main port (OTLP ingest, `/metrics`, `/healthz`) gets the hub's
+  connection guards: header deadline, connection caps per listener and per address,
+  slow-client cutoff, body deadline and size limits, configurable in `[server]` (audit M5,
+  [#309](https://github.com/ch8er/kelpie/pull/309)).
+- Kelpie's data directory is created `0700` and its database, reports and keys `0600`;
+  `kelpie doctor` names existing files that are readable by others and never changes them
+  itself (audit L5, [#314](https://github.com/ch8er/kelpie/pull/314)).
 - Dry-run is on by default and every rule starts in `observe`. `act` mode is refused at
   startup for rules whose actions the configured adapter cannot yet carry out ([#4](https://github.com/ch8er/kelpie/pull/4), [#13](https://github.com/ch8er/kelpie/pull/13)).
 - A failed or unexecutable action always alerts at warning or above, once per failure

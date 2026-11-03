@@ -57,6 +57,31 @@ is a firewall's job. `/metrics` and `/healthz` stay unauthenticated: keep the ma
 loopback or a private network, or behind an authenticating proxy, when it carries anything
 you would not publish.
 
+## Files Kelpie writes
+
+What Kelpie stores names tasks, block reasons, roles and commands ([privacy.md](privacy.md)),
+so it is kept for Kelpie's own user:
+
+- `kelpie.db` is created mode 0600, and SQLite gives its `-wal` and `-shm` the same mode.
+  Its folder must exist (a mistyped `[storage] path` fails at startup rather than starting
+  an empty database). Report files in `[report] dir` are created 0600 and a missing report
+  folder 0700, never through a symlink or into a FIFO. Keys and stores that hold secrets
+  were already private: the traces token file, the Hermes park key (`kelpie serve` refuses
+  one others may read) and the button store (0600).
+- The umask can only narrow these modes: `umask 077` keeps them as above; a looser umask
+  never widens them. The umask must leave the owner read, write and execute (up to
+  `umask 077`): under `umask 277` a new database is read-only, under `umask 177` a new
+  report folder cannot be entered.
+- Kelpie never chmods `kelpie.db` or a report file that already exists. One created by an
+  older version (0644 under the usual umask) keeps its mode, and `kelpie doctor` warns
+  ("data files private"), naming the files others may read (through a symlink, the
+  target's mode counts); `chmod 600` them, and `chmod 700` their folder, if other users of
+  the machine should not read them. The one exception is the button store, which holds a
+  key: it is tightened to 0600 with a warning in the log.
+- Put `kelpie.db` in a folder only Kelpie's user can enter. The container image creates
+  `/data` 0700, owned by the `kelpie` user; a named volume takes that mode when it is
+  first created, an existing volume or bind mount keeps its own.
+
 ## Traces token
 
 The OTLP ingest token (`[traces] token_env`, `KELPIE_TRACES_TOKEN`) is the one secret the

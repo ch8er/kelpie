@@ -1891,7 +1891,7 @@ once a day when `at` is set.
 | Key | Default | Unit | Meaning |
 | --- | --- | --- | --- |
 | `timezone` | `"UTC"` | IANA name | Where a day starts and ends. |
-| `dir` | unset | path | Writes `kelpie-report-<date>.md` there. Unset: stdout only. |
+| `dir` | unset | path | Writes `kelpie-report-<date>.md` there (new files 0600, a new folder 0700). Unset: stdout only. |
 | `task_url` | unset | http(s) URL with `{id}` | Links task ids in the Markdown; the id is URL-quoted into `{id}`, which must not be in the host. No credentials, and at most 600 characters once a 64-character id fills `{id}`. Anything else stops startup. |
 | `url` | unset | http(s) URL with `{date}` | Where the full report of a day can be read (e.g. where `dir` is served); the chat summary links it as "Open report", with the day (YYYY-MM-DD) in `{date}`, which must not be in the host. Unset: no link. |
 | `hour_usd` | unset | dollars, > 0 | What an hour lost costs: a stuck task-hour, or an agent-hour idle behind a hold or waiting on a person. Unset: hours stay hours. |
