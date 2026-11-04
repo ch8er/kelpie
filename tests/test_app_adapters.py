@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import time
 from dataclasses import dataclass
@@ -178,7 +179,9 @@ def test_hermes_tools(tmp_path: Path) -> None:
     settings = load_settings(path)
     assert settings.hermes is not None
     assert settings.hermes.tools == ToolProcesses(
-        names=("xcodebuild",), slots=(SlotPool("sim", ("~/slots/sim-*.lock",), 4),), timeout=3.0
+        names=("xcodebuild",),
+        slots=(SlotPool("sim", (os.path.expanduser("~/slots/sim-*.lock"),), 4),),  # #334
+        timeout=3.0,
     )
     (adapter,) = build_adapters(settings)
     assert isinstance(adapter, HermesAdapter) and adapter.tools == settings.hermes.tools

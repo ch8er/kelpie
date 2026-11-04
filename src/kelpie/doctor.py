@@ -51,6 +51,7 @@ from kelpie.app import (
     unknown_provider_models,
     utc_now,
 )
+from kelpie.configpaths import Kind, configured_paths, read_config
 from kelpie.connectors.cost_reports.source import HttpGet, ReportError, fetch
 from kelpie.connectors.github.blocks import MAX_REASON
 from kelpie.connectors.github.client import GitHubError
@@ -357,7 +358,7 @@ def check_private_files(settings: Settings) -> Check:
     only names them: it never changes a mode."""
     paths: list[Path] = []
     if settings.db_path is not None:
-        paths += db_files(settings.db_path)  # as serve opens it (no ~ expansion)
+        paths += db_files(settings.db_path)  # as serve opens it (~ expanded at load)
     folder = settings.report.dir
     if folder is not None and folder.is_dir():
         paths += sorted(folder.glob("kelpie-report-*.md"))
@@ -376,6 +377,52 @@ def check_private_files(settings: Settings) -> Check:
     if not present:
         return _skip(PRIVATE_CHECK, "no database file and no report files yet")
     return _pass(PRIVATE_CHECK, f"{len(present)} file(s), none open to others")
+
+
+PATHS_CHECK = "config paths exist"
+
+
+def check_config_paths(settings: Settings, environ: Mapping[str, str] = os.environ) -> Check:
+    """Every path the config file sets, after ``~`` expansion (kelpie.configpaths): a path
+    Kelpie reads must exist, and the ledger's directory must (SQLite creates the file, not
+    the directory). Paths Kelpie or a hook creates when first used, and glob patterns, are
+    not checked; an executable only when it is a path (has a ``/``)."""
+    if settings.source is None:
+        return _skip(PATHS_CHECK, "no config file")
+    try:
+        found = configured_paths(read_config(settings.source))
+    except (OSError, ValueError) as exc:  # tomllib.TOMLDecodeError is a ValueError
+        return _skip(PATHS_CHECK, f"config not readable: {exc}")
+    missing: list[str] = []
+    no_dir: list[str] = []
+    checked = 0
+    for p in found:
+        path = Path(p.value)
+        if p.kind is Kind.PARENT:
+            if p.key == "storage.path" and (environ.get("KELPIE_DB") or p.value == ":memory:"):
+                continue
+            checked += 1
+            if not path.parent.is_dir():
+                no_dir.append(f"{p.key} {p.value} (no directory {path.parent})")
+        elif p.kind is Kind.EXISTS or (p.kind is Kind.COMMAND and "/" in p.value):
+            checked += 1
+            if not path.exists():
+                missing.append(f"{p.key} {p.value}")
+    if no_dir:
+        return _fail(
+            PATHS_CHECK,
+            "; ".join(no_dir + missing),
+            "create the directory or fix the path (~ is expanded, $VARS are not)",
+        )
+    if missing:
+        return _warn(
+            PATHS_CHECK,
+            f"{len(missing)} path(s) do not exist: " + "; ".join(missing),
+            "fix the path or create it (~ is expanded, $VARS are not)",
+        )
+    if not checked:
+        return _skip(PATHS_CHECK, "the config sets no path Kelpie reads")
+    return _pass(PATHS_CHECK, f"{checked} path(s) set in the config exist")
 
 
 TOKEN_CHECK = "traces token kept private"
@@ -1341,6 +1388,7 @@ def run_checks(
     checks = [
         _pass("config loads", f"{settings.source or 'defaults'}, {len(loaded.rules)} rules"),
         check_rule_modes(settings, loaded, adapters),
+        check_config_paths(settings, environ),
     ]
     hermes = settings.hermes
     adapter = next((a for a in adapters if isinstance(a, HermesAdapter | HermesBoards)), None)

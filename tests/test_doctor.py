@@ -95,6 +95,7 @@ def test_healthy_farm_passes_everything_but_prometheus(farm: Farm) -> None:
     assert {n: c.status for n, c in checks.items()} == {
         "config loads": "PASS",
         "rule modes": "PASS",
+        "config paths exist": "PASS",
         "kanban.db": "PASS",
         "hooks fire": "PASS",
         "OTLP spans arrive": "PASS",
@@ -948,3 +949,51 @@ def test_a_parking_rule_that_acts_on_some_adapters_still_warns_of_stranded_parks
         "in act, but on some adapters' tasks their actions become alerts: dispatch_gate "
         "(Claude Code can't park tasks or wake tasks yet)"
     ) in check.detail
+
+
+def test_config_paths_are_checked_after_tilde_expansion(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#334: a path the config sets is checked as Kelpie uses it, ~ expanded."""
+    from kelpie.app import load_settings
+    from kelpie.doctor import check_config_paths
+
+    home = tmp_path / "home"
+    (home / "kelpie").mkdir(parents=True)
+    (home / "reports").mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    path = tmp_path / "kelpie.toml"
+    path.write_text(
+        '[storage]\npath = "~/kelpie/kelpie.db"\n[report]\ndir = "~/reports"\n'
+        '[adapters.claude_code]\ntasks_dir = "~/.claude/tasks"\nspool = "~/nowhere/s.jsonl"\n'
+    )
+    check = check_config_paths(load_settings(path), environ={})
+    assert check.status == "WARN"
+    assert check.detail == (
+        f"1 path(s) do not exist: adapters.claude_code.tasks_dir {home}/.claude/tasks"
+    )  # the spool is created by the hook: not checked
+    (home / ".claude" / "tasks").mkdir(parents=True)
+    check = check_config_paths(load_settings(path), environ={})
+    assert (check.status, check.detail) == ("PASS", "3 path(s) set in the config exist")
+    path.write_text('[storage]\npath = "~/gone/kelpie.db"\n')
+    check = check_config_paths(load_settings(path), environ={})
+    assert check.status == "FAIL" and f"no directory {home}/gone" in check.detail
+    # KELPIE_DB replaces [storage] path: the config's path is not used, so not checked.
+    check = check_config_paths(load_settings(path), environ={"KELPIE_DB": "x.db"})
+    assert check.status == "SKIP"
+    assert check_config_paths(load_settings(None), environ={}).status == "SKIP"
+
+
+def test_a_cli_is_checked_only_when_it_is_a_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from kelpie.app import load_settings
+    from kelpie.doctor import check_config_paths
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    path = tmp_path / "kelpie.toml"
+    path.write_text('[adapters.hermes]\ncli = "hermes"\nstate_home = false\n')
+    assert check_config_paths(load_settings(path), environ={}).status == "SKIP"
+    path.write_text('[adapters.hermes]\ncli = "~/bin/hermes"\nstate_home = false\n')
+    check = check_config_paths(load_settings(path), environ={})
+    assert check.status == "WARN" and f"adapters.hermes.cli {tmp_path}/bin/hermes" in check.detail

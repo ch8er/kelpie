@@ -54,6 +54,15 @@ configure what exists.
   off, except `[engine]`, `[storage]` and `[traces]`, which have working defaults.
 - **Secrets** are never written in the file. Keys ending in `_env` name an environment
   variable that holds the secret. Kelpie never logs or shows the value.
+- **Paths.** `~` at the start of a path value is expanded to the home directory of the
+  user Kelpie runs as, in every path-valued key: `[storage] path`, `[report] dir`,
+  `[traces] token_file`, `[agent] ca_file`, `[hub] tls_cert` and `tls_key`,
+  `[[instructions.files]] paths`, and in the adapters `db_path`, `spool`, `cli`, `wait_key`,
+  `state_home`, `tasks_dir`, `stop_dir`, `state_dir`, `workboard` and slot `paths`
+  (`kelpie.configpaths.PATH_KEYS`), and in `$KELPIE_DB`. Only `~` and `~user` at the
+  start: `$VARS` are not expanded. `kelpie doctor`
+  ("config paths exist") names a path Kelpie reads that does not exist after expansion,
+  and fails when the ledger's directory is missing.
 - **Check the result** with `kelpie status`; it prints what `kelpie serve` would load.
 
 ### Units
