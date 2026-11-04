@@ -445,13 +445,40 @@ def _ids(value: object) -> list[object]:
     return [v.get("task_id") if isinstance(v, dict) else v for v in value]
 
 
-def _read(db: Path, sql: str, params: Sequence[object] = ()) -> list[sqlite3.Row]:
-    conn = sqlite3.connect(db.resolve().as_uri() + "?mode=ro", uri=True, timeout=5)
+@contextlib.contextmanager
+def _board(db: Path) -> Iterator[sqlite3.Connection]:
+    """A read-only connection to the throwaway board; a board that cannot be read fails the
+    step with what it means (never an "unexpected OperationalError")."""
+    try:
+        conn = sqlite3.connect(db.resolve().as_uri() + "?mode=ro", uri=True, timeout=5)
+    except sqlite3.Error as exc:
+        raise Failed(f"cannot open the throwaway board {db}: {exc}") from exc
     conn.row_factory = sqlite3.Row
     try:
-        return conn.execute(sql, tuple(params)).fetchall()
+        yield conn
+    except sqlite3.Error as exc:
+        raise Failed(_unreadable(db, exc)) from exc
     finally:
         conn.close()
+
+
+def _unreadable(db: Path, exc: sqlite3.Error) -> str:
+    if getattr(exc, "sqlite_errorname", "") == "SQLITE_READONLY_ROLLBACK":
+        # A writer was killed mid-transaction (the run's worker, by the stop) on a board in
+        # rollback-journal mode: only a write can roll the journal back, and Kelpie never
+        # writes the board. Hermes keeps its boards in WAL mode, where this cannot happen.
+        return (
+            f"the throwaway board {db} has a hot journal (a writer was killed mid-write) and "
+            "Kelpie reads boards read-only\nthis Hermes does not keep its boards in WAL mode; "
+            "tell the Kelpie maintainers (the farm's boards would be unreadable to Kelpie "
+            "after a stop until Hermes writes them again)"
+        )
+    return f"cannot read the throwaway board {db}: {exc}"
+
+
+def _read(db: Path, sql: str, params: Sequence[object] = ()) -> list[sqlite3.Row]:
+    with _board(db) as conn:
+        return conn.execute(sql, tuple(params)).fetchall()
 
 
 def _wait_bound(db: Path, task: str) -> tuple[int, Any]:
@@ -470,11 +497,8 @@ def _wait_bound(db: Path, task: str) -> tuple[int, Any]:
                 "run with --keep and read the profile's logs/agent.log and errors.log"
             )
         if rows:
-            conn = sqlite3.connect(db.resolve().as_uri() + "?mode=ro", uri=True, timeout=5)
-            try:
+            with _board(db) as conn:
                 recorded = run_worker(conn, int(rows[0]["id"]))
-            finally:
-                conn.close()
             if recorded is not None and recorded.agent is not None:
                 return int(rows[0]["id"]), recorded
         time.sleep(0.5)

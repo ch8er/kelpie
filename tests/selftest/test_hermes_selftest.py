@@ -9,6 +9,8 @@ from __future__ import annotations
 import json
 import os
 import signal
+import sqlite3
+import subprocess
 import sys
 import threading
 from collections.abc import Iterator
@@ -24,6 +26,7 @@ from kelpie.cli import main
 from kelpie.core.config import EngineConfig
 from kelpie.selftest import hermes as selftest
 from kelpie.selftest.hermes import hermes_env
+from kelpie.sim.board import KANBAN_SCHEMA
 
 pytestmark = pytest.mark.skipif(
     host_table().unavailable() is not None, reason="needs /proc or libproc"
@@ -373,3 +376,68 @@ def test_one_call_in_flight_at_the_stop_may_still_be_answered(
     assert report.failed is not ok
     if not ok:
         assert f"{in_drain + in_quiet} more in" in report.lines[0]
+
+
+# --- issue 320: a worker killed mid-write -------------------------------------------------
+
+KILLED_MID_WRITE = """\
+import sqlite3, sys, time
+conn = sqlite3.connect(sys.argv[1], isolation_level=None)
+conn.execute("PRAGMA cache_size=2")  # the change spills into the database file
+conn.execute("BEGIN IMMEDIATE")
+conn.execute("UPDATE tasks SET body = hex(randomblob(2000))")
+print("writing", flush=True)
+time.sleep(60)
+"""
+
+
+def killed_mid_write(db: Path, wal: bool) -> None:
+    """A board whose writer was SIGKILLed inside a transaction, as a stop ends a worker that
+    was heartbeating (the race behind issue 320's flake, made deterministic)."""
+    conn = sqlite3.connect(db)
+    if wal:
+        conn.execute("PRAGMA journal_mode=WAL")
+    conn.executescript(KANBAN_SCHEMA)
+    conn.executemany(
+        "INSERT INTO tasks (id, title, status, created_at) VALUES (?, 'x', 'running', 1)",
+        [(f"t_{n}",) for n in range(300)],
+    )
+    conn.commit()
+    conn.close()
+    writer = subprocess.Popen(
+        [sys.executable, "-c", KILLED_MID_WRITE, str(db)], stdout=subprocess.PIPE, text=True
+    )
+    assert writer.stdout is not None and writer.stdout.readline() == "writing\n"
+    writer.kill()
+    writer.wait()
+
+
+def test_a_hot_journal_fails_the_step_with_its_cause(tmp_path: Path) -> None:
+    """Rollback-journal mode (the fake board before the fix): Kelpie's read-only read cannot
+    roll the killed writer's journal back. It fails the step and says why."""
+    db = tmp_path / "kanban.db"
+    killed_mid_write(db, wal=False)
+    assert db.with_name("kanban.db-journal").exists()
+    with pytest.raises(selftest.Failed, match=r"(?s)hot journal .* WAL mode"):
+        selftest._read(db, "SELECT status FROM tasks WHERE id = 't_1'")
+    assert db.with_name("kanban.db-journal").exists()  # Kelpie wrote nothing
+
+
+def test_a_wal_board_reads_after_a_writer_was_killed(tmp_path: Path) -> None:
+    """WAL, as Hermes keeps its boards: the killed transaction is simply not there."""
+    db = tmp_path / "kanban.db"
+    killed_mid_write(db, wal=True)
+    rows = selftest._read(db, "SELECT status, body FROM tasks WHERE id = 't_1'")
+    assert [(r["status"], r["body"]) for r in rows] == [("running", None)]
+
+
+def test_the_fake_hermes_keeps_its_boards_in_wal_mode(fake: Path, tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    env = {**os.environ, "HERMES_HOME": str(home)}
+    subprocess.run([str(fake), "kanban", "boards", "create", "b"], env=env, check=True)
+    db = home / "kanban" / "boards" / "b" / "kanban.db"
+    conn = sqlite3.connect(db)
+    try:
+        assert conn.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+    finally:
+        conn.close()

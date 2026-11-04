@@ -152,6 +152,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
   agent's one request already sent when its worker was ended is answered just after the
   stop; any other call (two or more, or one in the 5s quiet window after a 1s drain) still
   fails it. A thread-scheduling race, seen on the macOS CI job.
+- The self-test's flake on macOS (`attempt to write a readonly database`) is fixed at its
+  cause. The test's fake Hermes kept its throwaway board in rollback-journal mode, unlike
+  Hermes, which keeps boards in WAL mode. When the stop ended the worker in the middle of a
+  heartbeat write, the worker left a hot journal behind. Kelpie opens boards read-only and
+  never writes them, so it cannot roll that journal back. The fake now keeps its boards in
+  WAL mode, where a killed writer leaves nothing to roll back. If a board ever does have a
+  hot journal, the self-test now fails with that cause and what to do, not "unexpected
+  OperationalError". The macOS CI job runs the self-test 15 times in a row
+  ([#320](https://github.com/ch8er/kelpie/issues/320)).
 
 ## [0.1.0a1] - 2026-11-03
 
