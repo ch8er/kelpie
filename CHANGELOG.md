@@ -32,6 +32,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ### Changed
 
+- Before/after of fixes leaves out the tokens an outage held (#332, after #197 item 6):
+  tokens per day and tokens per completed task no longer count the calls an outage's tasks
+  made while it held them, attributed as the throughput section attributes them (#325),
+  and each fix says how many tokens it left out. Without an outage the output is unchanged.
 - Every outage kind in the report (#229, incident 20): a block storm's waits count under "a
   shared blocker" for the tasks it names, even when its reason names a person (a tool
   failing for many tasks, under "a shared tool failure"), and in the cost of chaos an
