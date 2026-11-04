@@ -176,6 +176,7 @@ from kelpie.report.throughput import RoleThroughput, throughput
 from kelpie.report.verify import (
     DEFAULT_MIN_SAMPLE,
     DEFAULT_REVIEW_ROLES,
+    TOKENS_PER_DAY,
     Evidence,
     Metric,
     Verification,
@@ -988,6 +989,21 @@ def _verifications(
     if not any(e.at >= since for e in events):
         return ()
     after = _occurrences(inputs)
+    counted = counted_llm(index, known)
+    # The calls an outage held from ``reach`` (where every window starts at the earliest:
+    # ``known_from``) to the end (#332), attributed as the
+    # throughput section attributes them (#325): left out of the token metrics.
+    outages = [r.state for r in inputs.states if is_outage_state(r.state.id)]
+    held = (
+        outage_calls(
+            _chaos_hours(inputs, outages, reach, end).outages,
+            known,
+            counted,
+            report_owners(inputs, roles),
+        )
+        if outages
+        else {}
+    )
     evidence = Evidence(
         end=end,
         # counted like the chaos: an outage's tasks too (#229)
@@ -1004,7 +1020,8 @@ def _verifications(
         lost=lambda found, lo, hi: lost_hours(inputs, found, lo, hi),
         chaos_rules=frozenset(CHAOS_CAUSES),
         spans=known,
-        counted=counted_llm(index, known),
+        counted=counted,
+        outage_held=frozenset(held),
         sessions=inputs.sessions,
         tasks=inputs.tasks,
         roles=roles,
@@ -2310,6 +2327,7 @@ def _single_lines(v: Verification, report: DailyReport) -> list[str]:
     if not v.metrics:
         return [
             f"{title}. No data on either side yet (after-window: {hours:.1f}h).",
+            *_held_lines(v),
             *_excluded_lines(v, report),
         ]
     return [
@@ -2317,6 +2335,7 @@ def _single_lines(v: Verification, report: DailyReport) -> list[str]:
         "",
         *_metric_table(v.metrics),
         *_release_lines(v, report),
+        *_held_lines(v),
         *_excluded_lines(v, report),
     ]
 
@@ -2360,6 +2379,14 @@ def _group_lines(v: Verification, report: DailyReport) -> list[str]:
             about = (e.command and md.code(e.command, cell=True)) or md.text(e.role or "")
             fix = f"{_local(e.at, report)} {md.text(e.kind)}" + (f": {about}" if about else "")
             out.append(f"| {fix} | {_metric_cells(m)}")
+        held = [
+            f"- {_local(c.event.at, report)} {md.text(c.event.kind)}, {c.metric.name}: "
+            f"{c.outage_tokens[0]:,} before, {c.outage_tokens[1]:,} after."
+            for c in v.own
+            if any(c.outage_tokens)
+        ]
+        if held:
+            out += ["", "Left out of these rows as outage tokens:", "", *held]
     if v.truncated is not None:
         out += [
             "",
@@ -2367,7 +2394,7 @@ def _group_lines(v: Verification, report: DailyReport) -> list[str]:
             "may belong to this group, and its before-window starts there at the earliest "
             "(shorter than a window, so per-day rates cover only that part).",
         ]
-    return out + _excluded_lines(v, report)
+    return out + _held_lines(v) + _excluded_lines(v, report)
 
 
 def _metric_table(metrics: Sequence[Metric]) -> list[str]:
@@ -2409,6 +2436,20 @@ def _release_lines(v: Verification, report: DailyReport) -> list[str]:
         f"Backlog release: {r.tasks} of the {r.done} tasks done in the {burst:.1f}h after the "
         f"{which} were ready or blocked before it, a burst of released backlog rather than a "
         f"faster farm; {then}.",
+    ]
+
+
+def _held_lines(v: Verification) -> list[str]:
+    """How many tokens the comparison left out as an outage's (#332), under a shown tokens
+    per day row; nothing without an outage."""
+    before, after = v.outage_tokens
+    shown = any(m.name.startswith(TOKENS_PER_DAY) for m in v.metrics)
+    if not shown or (not before and not after):
+        return []
+    return [
+        "",
+        f"Left out as outage tokens: {before:,} before, {after:,} after (the calls an outage's "
+        "tasks made while it held them, counted under Outages, not as the fix's effect).",
     ]
 
 

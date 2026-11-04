@@ -42,6 +42,13 @@ What the report cannot separate, it does not credit (#193):
   change with nothing before (a connector or rule the change may have turned on). They
   are listed with their value after instead (:class:`Excluded`), so a new problem is
   not hidden. Means (per call, per session) still compare.
+- **Outages.** The model calls an outage's tasks made while it held them are the
+  outage's spend (#197 item 6, ``Evidence.outage_held``), as in the report's throughput
+  section: tokens per day and tokens per completed task leave them out on both sides, so
+  an outage in either window reads as neither a fix's effect nor a regression. How many
+  tokens were left out is kept (``Verification.outage_tokens``, and per fix on a credited
+  tokens-per-day row) and shown (#332). Output tokens per call of a command is a mean per
+  call and keeps them.
 
 A side whose window starts before what the board still reports under-counts review time,
 failures and returns; ``kelpie report`` widens the board's lookback to two windows before
@@ -71,6 +78,7 @@ DEFAULT_REVIEW_ROLES = ("reviewer",)
 DAY = timedelta(days=1)
 # A fix naming this rule changed instruction files (a split): measured on them too.
 INSTRUCTIONS_RULE = "instruction_bloat"
+TOKENS_PER_DAY = "tokens per day"
 
 
 @dataclass(frozen=True, slots=True)
@@ -116,6 +124,8 @@ class Credited:
 
     event: FixEvent
     metric: Metric
+    # its tokens left out as an outage's (before, after; #332), on a token row only
+    outage_tokens: tuple[int, int] = (0, 0)
 
 
 @dataclass(frozen=True, slots=True)
@@ -136,6 +146,9 @@ class Verification:
     # a throughput spike right after the fix(es) from released backlog (throughput then
     # compares the next full day)
     release: Release | None = None
+    # tokens of the group's scope left out of the token metrics as an outage's (before,
+    # after; #332); (0, 0) without an outage
+    outage_tokens: tuple[int, int] = (0, 0)
 
     @property
     def event(self) -> FixEvent:
@@ -188,6 +201,10 @@ class Evidence:
     # The hours lost of several states in a window, each task-hour once, as the report
     # counts them (#228); None: the sum of ``hours`` per state.
     lost: Callable[[Sequence[OpenState], datetime, datetime], float] | None = None
+    # Model calls an outage held (#197 item 6, #332: an outage's tasks' calls while it held
+    # them, :func:`kelpie.report.daily.outage_calls`): the outage's spend, left out of the
+    # token metrics on both sides, so an outage does not read as a fix's effect.
+    outage_held: Collection[SpanKey] = frozenset()
 
 
 def mode_events(entries: Iterable[LedgerEntry]) -> list[FixEvent]:
@@ -288,7 +305,12 @@ def verify_group(
                 mine.append(_review_time(ev, e, b, a))
             if _is_split(e):  # per task is never one fix's: a task goes through roles
                 mine.append(_instruction_tokens(ev, e, b, a, _short(b, a, ev)))
-            own += [Credited(e, m) for m in mine if m is not None and _has_data(m)]
+            held = (_held_tokens(ev, e, b), _held_tokens(ev, e, a))
+            own += [
+                Credited(e, m, held if m.name.startswith(TOKENS_PER_DAY) else (0, 0))
+                for m in mine
+                if m is not None and _has_data(m)
+            ]
         if not e.command:
             continue
         clash = [o for o in others if o.command == e.command and _roles_meet(o.role, e.role)]
@@ -304,6 +326,7 @@ def verify_group(
             metrics.append(_output(ev, e.command, scope.role, before, after, short))
     shown = tuple(m for m in metrics if m is not None and _has_data(m))  # no data: no row
     cut = ev.known_from is not None and first.at - ev.known_from < ev.window
+    held = (_held_tokens(ev, scope, before), _held_tokens(ev, scope, after))
     return Verification(
         events,
         shown,
@@ -313,6 +336,7 @@ def verify_group(
         ev.min_sample,
         ev.known_from if cut else None,
         released[0] if released else None,
+        held,
     )
 
 
@@ -478,7 +502,8 @@ def _tokens(
     def per_day(w: Window) -> tuple[float, int]:
         total, n = 0, 0
         for s in ev.spans:
-            if span_key(s) not in counted or not w[0] <= last_at(s) < w[1]:
+            key = span_key(s)
+            if key not in counted or key in ev.outage_held or not w[0] <= last_at(s) < w[1]:
                 continue
             if event.role and roles.get(s.session_id or "") != event.role:
                 continue
@@ -488,12 +513,30 @@ def _tokens(
 
     (tb, nb), (ta, na) = per_day(b), per_day(a)
     who = f" ({md.text(event.role)})" if event.role else ""
-    name = f"tokens per day{who}"
+    name = f"{TOKENS_PER_DAY}{who}"
     if (began := _traces_began_late(ev, b)) is not None and (nb or na):
         excluded.append(Excluded(name, began, ta, "tokens/day"))
         return None
     small = short or min(nb, na) < ev.min_sample
     return Metric(name, "tokens/day", tb, ta, nb, na, small)
+
+
+def _held_tokens(ev: Evidence, event: FixEvent, w: Window) -> int:
+    """Tokens of ``event``'s role (all roles without one) in ``w`` that an outage held: what
+    tokens per day left out (#332), counted the way :func:`_tokens` counts (tokens per
+    completed task also leaves out people's own sessions, so it may have left out less)."""
+    if not ev.outage_held:
+        return 0
+    counted = ev.counted or {}
+    roles = ev.roles or {}
+    return sum(
+        s.input_tokens + s.output_tokens
+        for s in ev.spans
+        if (key := span_key(s)) in counted
+        and key in ev.outage_held
+        and w[0] <= last_at(s) < w[1]
+        and (not event.role or roles.get(s.session_id or "") == event.role)
+    )
 
 
 def _traces_began_late(ev: Evidence, b: Window) -> datetime | None:
@@ -567,6 +610,7 @@ def _tokens_per_task(
             s.input_tokens + s.output_tokens
             for s in ev.spans
             if span_key(s) in counted
+            and span_key(s) not in ev.outage_held
             and w[0] <= last_at(s) < w[1]
             and (s.session_id or "") not in theirs
             and (event.role is None or roles.get(s.session_id or "") == event.role)
