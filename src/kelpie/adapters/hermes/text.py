@@ -8,8 +8,8 @@ not carry:
 - a GitHub pull request URL: Hermes' ``active_pr`` guard holds a ready task back for 24 hours
   once one appears in a comment or reason, so a URL becomes ``owner/repo#N``;
 - control and format characters (C0 but tab and newline, DEL, C1, bidirectional overrides,
-  zero-width characters, line and paragraph separators), which could hide or reorder text
-  for the human reading the board; with ``one_line`` tab and newline go too;
+  zero-width characters, lone surrogates, line and paragraph separators), which could hide
+  or reorder text for the human reading the board; with ``one_line`` tab and newline go too;
 - anything that reads as one of Kelpie's signed markers (``kelpie-wait``, ``kelpie-stop``):
   the marker is the last word of a park or stop, and text quoted in front of it carries none.
 
@@ -26,8 +26,8 @@ _PR_URL = re.compile(
     r"https?://[^\s/]+/([^/\s]+)/([^/\s]+)/pull/(\d+)(?:[/#?][^\s)\]>\"']*)?", re.IGNORECASE
 )
 _ANY_MARKER = re.compile(r"\[?kelpie-(wait|stop)", re.IGNORECASE)
-# Control, format, line separator, paragraph separator.
-_UNSAFE = frozenset({"Cc", "Cf", "Zl", "Zp"})
+# Control, format, lone surrogate (cannot be passed to the CLI), line and paragraph separator.
+_UNSAFE = frozenset({"Cc", "Cf", "Cs", "Zl", "Zp"})
 _LINES = frozenset("\t\n")
 
 
@@ -55,6 +55,9 @@ def clean_text(text: str, limit: int, *, one_line: bool = False) -> str:
     """Text safe to write into Hermes, stripped and at most ``limit`` characters (cut with
     ``...``). ``one_line`` also folds tabs and newlines into spaces."""
     keep = frozenset() if one_line else _LINES
+    # Bounded first: each pass of the loop walks the whole text, and nested URLs can make it
+    # take one pass per URL. A cut here cannot assemble anything: the loop runs after it.
+    text = text[: 4 * limit]
     while True:
         before = text
         text = _fold_unsafe(text, keep)

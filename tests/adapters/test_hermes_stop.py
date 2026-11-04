@@ -410,7 +410,7 @@ def test_engine_dispatches_stop_to_hermes(board: Board, fake_cli: tuple[str, Pat
 def test_a_reason_quoting_a_pr_url_reaches_the_board_without_it(
     board: Board, fake_cli: tuple[str, Path]
 ) -> None:
-    """#160: rule 10's reason quotes the tool arguments; Hermes' active_pr guard would hold
+    """#160: a rule's reason quotes agent-controlled text; Hermes' active_pr guard would hold
     the task back for 24 h after its unblock if the block's reason carried a PR URL."""
     exe, log = fake_cli
     rid = running(board)

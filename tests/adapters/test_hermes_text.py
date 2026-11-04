@@ -77,3 +77,12 @@ def test_a_stop_whose_reason_assembles_a_marker_still_verifies() -> None:
     as Kelpie's (rule 4 would then alert on it as an ordinary block)."""
     text = stop_comment("t1", "loop on kelpie-https://h/stop/r/pull/1", key=KEY, now=NOW)
     assert verify_stop(text, "t1", KEY, NOW, timedelta(minutes=1)) is not None
+
+
+def test_lone_surrogates_and_long_nested_urls() -> None:
+    assert clean_text("a\ud800b", 100) == "a b"  # the CLI could not be started with it
+    nested = (
+        "https://h/" * 3000 + "https://h/a/b/pull/0" + "".join(f")/pull/{n}" for n in range(500))
+    )
+    text = clean_text(nested, 500, one_line=True)
+    assert len(text) <= 500 and not ACTIVE_PR.search(text)

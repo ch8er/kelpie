@@ -67,10 +67,10 @@ Safety, as for ``stop``:
 Text. Hermes holds back a ready task for 24 h after a GitHub PR URL appears in a comment on
 it (its ``active_pr`` guard), so every text Kelpie writes (parks, wakes, comments, and the
 stop's block reason in stop.py) goes through one cleaner, :mod:`kelpie.adapters.hermes.text`:
-PR URLs are rewritten to ``owner/repo#N``, control and format characters are removed,
-``kelpie-wait`` and ``kelpie-stop`` in the text (file names come from workers) become
-``kelpie wait`` and ``kelpie stop`` so the text cannot carry a marker, each step repeats
-until nothing changes, and the text is capped.
+PR URLs are rewritten to ``owner/repo#N``, control and format characters are replaced by
+a space, ``kelpie-wait`` and ``kelpie-stop`` in the text (file names come from workers)
+become ``kelpie wait`` and ``kelpie stop`` so the text cannot carry a marker, each step
+repeats until nothing changes, and the text is capped.
 
 CLI (Hermes ``hermes_cli/kanban_parser.py``): ``schedule <task> [reason...]``,
 ``unblock [--reason TEXT] <task>...`` (the reason is also stored as a comment) and
