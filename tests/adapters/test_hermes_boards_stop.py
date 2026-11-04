@@ -182,13 +182,14 @@ def test_a_stop_of_an_unknown_board_or_a_bare_run_id_reaches_no_board(
 ) -> None:
     settings = load_settings(config(tmp_path, tmp_path / "spool.jsonl"))
     (adapter,) = build_adapters(settings)
+    assert isinstance(adapter, HermesBoards)
     for session in ("hermes-run-1", "other:hermes-run-1", "qr:", "qrx:hermes-run-1"):
         with pytest.raises(UnsupportedAction):
-            adapter.stop(session, "loop")  # type: ignore[union-attr]
+            adapter.stop(session, "loop")
     assert not (tmp_path / "cli.jsonl").exists()
-    assert isinstance(adapter, HermesBoards)
     adapter.cli_environ = {"PATH": "/bin"}  # the self-test's throwaway home: every board's
     assert [b.cli_environ for b in adapter.boards] == [{"PATH": "/bin"}] * len(BOARDS)
+    assert adapter.cli_environ == {"PATH": "/bin"}
     for board, worker in farm.values():
         assert worker.poll() is None
         assert board.conn.execute("SELECT status FROM tasks").fetchone()[0] == "running"

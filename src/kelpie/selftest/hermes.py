@@ -15,9 +15,10 @@ Hermes home, boards, profiles and gateway are never read or written. In it:
 3. rule 10 (``loop_breaker``, with the thresholds of the user's config) runs in ``act``
    against that board and spool, through the Hermes adapter built from the user's
    ``[adapters.hermes]`` (``cli``, ``cli_timeout``, ``end_worker``, ``worker_grace``,
-   ``author``), until it stops the run; with ``[[adapters.hermes.boards]]`` the throwaway
-   board is the only board of a boards adapter, so the stop is routed by the board prefix
-   of the run's id (``kelpie-selftest:hermes-run-1``) as on a multi-board farm;
+   ``author``; ``tools`` reads this host's processes, read-only), until it stops the run;
+   with ``[[adapters.hermes.boards]]`` the throwaway board is the only board of a boards
+   adapter, so the stop is routed by the board prefix of the run's id
+   (``kelpie-selftest:hermes-run-1``) as on a multi-board farm;
 4. checks: the task is blocked for a human, the block is signed by Kelpie, the run's worker
    processes are gone and the model gets no more calls;
 5. cleanup: every process still running with that ``HERMES_HOME`` (or working in the

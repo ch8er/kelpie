@@ -103,7 +103,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
   with `'HermesBoards' object has no attribute 'cli_environ'` before rule 10 could stop the
   run, so rule 10's act gate could not be met on a multi-board farm. With boards configured
   the self-test now stops the run through the boards adapter, routed by the board prefix of
-  the run's id, as on the farm; it no longer reads the user's Hermes home's `state.db`. Rule
+  the run's id, as on the farm. The self-test (one board or several) also no longer reads the
+  profiles' `state.db` of the user's Hermes home. Rule
   10's real stop on a multi-board config was not affected: a test now checks it end to end
   on two boards (the block runs with that board's `HERMES_KANBAN_DB` and key, the worker
   ends, the other board is untouched), on Linux and macOS
