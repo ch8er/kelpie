@@ -66,6 +66,8 @@ from collections.abc import Mapping, Sequence
 from datetime import datetime, timedelta
 from pathlib import Path
 
+from kelpie.adapters.hermes.text import clean_text
+
 DEFAULT_CLI = "hermes"
 CLI_TIMEOUT = 10.0  # seconds for one command; a stop runs inside the control loop tick
 RUN_PREFIX = "hermes-run-"
@@ -97,13 +99,11 @@ ENV_DENIED = frozenset(
     }
 )
 
-_CONTROL = re.compile(r"[\x00-\x1f\x7f]+")
 _STOP_DOMAIN = "kelpie-stop:v1"
 # The marker is the reason's last word: "[kelpie-stop:v1:<issued>:<nonce>.<mac>]".
 _STOP_MARKER = re.compile(
     r"\s*\[kelpie-stop:v1:([0-9]{1,12}):([0-9a-f]{16})\.([0-9a-f]{64})\]\s*\Z"
 )
-_ANY_STOP_MARKER = re.compile(r"\[?kelpie-stop", re.IGNORECASE)
 STOP_SKEW = timedelta(seconds=5)  # between Kelpie's clock and the time Hermes records
 # What a done stop means on Hermes, for the human reading "Stopped run <id>; ...", followed by
 # what became of the worker (kelpie.adapters.hermes.worker).
@@ -142,12 +142,8 @@ def stop_comment(
 ) -> str:
     """The text left on the task: why it was stopped and how to resume it, ending with the
     signed stop marker when there is a ``key`` (issued at ``now``)."""
-    clean = _CONTROL.sub(" ", reason)
-    while _ANY_STOP_MARKER.search(clean):  # rule text may quote agents: it carries no marker
-        clean = _ANY_STOP_MARKER.sub("kelpie stop", clean)
-    clean = clean.strip() or "no reason given"
-    if len(clean) > MAX_REASON:
-        clean = clean[: MAX_REASON - 3] + "..."
+    # Rule text may quote agents: one line, no PR URL, no marker (kelpie.adapters.hermes.text).
+    clean = clean_text(reason, MAX_REASON, one_line=True) or "no reason given"
     end = "" if clean.endswith(".") else "."  # reasons are sentences: no ".."
     text = (
         f"Stopped by Kelpie: {clean}{end} The task stays blocked until a human resumes it: "
