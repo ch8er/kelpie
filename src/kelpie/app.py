@@ -46,6 +46,7 @@ from kelpie.alerts.buttons import (
 )
 from kelpie.alerts.config import AlertSettings, load_alerts
 from kelpie.alerts.delivery import Delivery
+from kelpie.configpaths import read_config
 from kelpie.connectors.cost_reports import CostReportsSettings, load_cost_reports
 from kelpie.connectors.github import (
     BlockConditionPattern,
@@ -320,9 +321,8 @@ def find_config(explicit: str | None) -> Path | None:
 def load_settings(path: Path | None) -> Settings:
     data: Mapping[str, Any] = {}
     if path is not None:
-        try:
-            with path.open("rb") as f:
-                data = tomllib.load(f)
+        try:  # with ~ expanded in every path-valued key (kelpie.configpaths)
+            data = read_config(path)
         except (OSError, tomllib.TOMLDecodeError) as exc:
             raise ConfigError(f"cannot read config {path}: {exc}") from exc
     unknown = set(data) - {

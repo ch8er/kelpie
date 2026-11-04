@@ -104,11 +104,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
   run, so rule 10's act gate could not be met on a multi-board farm. With boards configured
   the self-test now stops the run through the boards adapter, routed by the board prefix of
   the run's id, as on the farm. The self-test (one board or several) also no longer reads the
-  profiles' `state.db` of the user's Hermes home. Rule
-  10's real stop on a multi-board config was not affected: a test now checks it end to end
-  on two boards (the block runs with that board's `HERMES_KANBAN_DB` and key, the worker
+  profiles' `state.db` of the user's Hermes home. Rule 10's real stop on a multi-board
+  config was not affected: a test now checks it end to end on two boards (the block runs with that board's `HERMES_KANBAN_DB` and key, the worker
   ends, the other board is untouched), on Linux and macOS
   ([#333](https://github.com/ch8er/kelpie/issues/333)).
+- `~` is expanded in every path-valued config key, in one place as the config is read.
+  `[storage] path` kept a literal `~` (`kelpie serve` stopped with `cannot open ledger
+  database ~/...`), and so did `[agent] ca_file`, `[hub] tls_cert` and `tls_key`, and the
+  `cli` of the Hermes and OpenClaw adapters; the other keys were expanded each by its own
+  loader or adapter. Only a leading `~`; `$VARS` are not expanded. The keys are listed in
+  `kelpie.configpaths.PATH_KEYS`, and a test fails when a settings field holds a path whose
+  key is not there. `kelpie doctor` has a "config paths exist" line naming each path Kelpie
+  reads that does not exist after expansion (FAIL when the ledger's directory is missing)
+  ([#334](https://github.com/ch8er/kelpie/issues/334)).
 
 ## [0.1.0a1] - 2026-11-03
 
