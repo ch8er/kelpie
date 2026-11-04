@@ -398,8 +398,9 @@ shows its sample sizes. What the report cannot separate it does not credit:
   spend (they are listed under Outages, as in Farm throughput), so tokens per day and
   tokens per completed task leave them out on both sides: an outage in the before or after
   window is neither a fix's effect nor a regression. The fix says how many tokens it left
-  out ("Left out as outage tokens: 0 before, 22,000 after"); without an outage nothing
-  changes.
+  out ("Left out as outage tokens: 0 before, 22,000 after"), and so does each fix's own
+  tokens row in a group; output tokens per call (a mean) keeps them. Without an outage
+  nothing changes.
 - *Backlog release.* Right after a fix, a burst of tasks that the fix let go is released
   backlog, not a faster farm. It is named when, within the first quarter of the window
   after the fix (the burst window), at least 4 tasks are done that had been ready or

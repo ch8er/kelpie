@@ -115,3 +115,51 @@ def test_tokens_per_completed_task_leaves_held_calls_out() -> None:
 
     assert per_task(base) == (CALL, CALL, (0, 0))  # 2 calls / 2 tasks on each side
     assert per_task(held) == (CALL, CALL / 2, (0, CALL))  # the held call is the outage's
+
+
+def roled(i: int, hour: float, session: str) -> Span:
+    return replace(call(i, hour), span_id=f"r{i}", session_id=session)
+
+
+ROLES = {"D-1": "developer", "R-1": "reviewer"}
+
+
+def role_evidence(spans: list[Span], held: list[Span]) -> Evidence:
+    return Evidence(
+        end=at(24),
+        spans=spans,
+        counted={span_key(s): s.model for s in spans},
+        roles=ROLES,
+        outage_held=frozenset(span_key(s) for s in held),
+    )
+
+
+def test_a_role_fix_counts_only_its_roles_held_tokens() -> None:
+    dev = [roled(0, -15, "D-1"), roled(1, 12, "D-1"), roled(2, 14, "D-1")]
+    rev = [roled(3, -15, "R-1"), roled(4, 12, "R-1")]
+    ev = role_evidence([*dev, *rev], [dev[1], rev[1]])  # one held call per role
+    v = verify(FixEvent(at(8), MANUAL, "prompt trimmed", role="developer"), ev)
+    [m] = [m for m in v.metrics if m.name == "tokens per day (developer)"]
+    assert (m.before, m.after) == pytest.approx((CALL, CALL / (16 / 24)))
+    assert v.outage_tokens == (0, CALL)  # the reviewer's held call is not this fix's
+
+
+def test_a_group_says_what_each_fixs_own_row_left_out() -> None:
+    from kelpie.report.verify import verify_group
+
+    dev = [roled(0, -15, "D-1"), roled(1, 12, "D-1"), roled(2, 14, "D-1")]
+    rev = [roled(3, -15, "R-1"), roled(4, 12, "R-1"), roled(5, 15, "R-1")]
+    ev = role_evidence([*dev, *rev], [dev[1], rev[1]])
+    fixes = (
+        FixEvent(at(8), MANUAL, "developer prompt trimmed", role="developer"),
+        FixEvent(at(9), MANUAL, "reviewer reads the diff only", role="reviewer"),
+    )
+    v = verify_group(fixes, ev)
+    assert v.together and v.outage_tokens == (0, 2 * CALL)  # the group: every role
+    own = {c.event.role: c.outage_tokens for c in v.own if c.metric.name.startswith("tokens")}
+    assert own == {"developer": (0, CALL), "reviewer": (0, CALL)}
+    report = replace(build_report(storm_day(), sections={}), verifications=(v,))
+    markdown = render_markdown(report)
+    assert "Left out as outage tokens: 0 before, 22,000 after" in markdown
+    assert "Left out of these rows as outage tokens:" in markdown
+    assert "manual, tokens per day (developer): 0 before, 11,000 after." in markdown

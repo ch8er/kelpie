@@ -46,7 +46,9 @@ What the report cannot separate, it does not credit (#193):
   outage's spend (#197 item 6, ``Evidence.outage_held``), as in the report's throughput
   section: tokens per day and tokens per completed task leave them out on both sides, so
   an outage in either window reads as neither a fix's effect nor a regression. How many
-  tokens were left out is kept (``Verification.outage_tokens``) and shown (#332).
+  tokens were left out is kept (``Verification.outage_tokens``, and per fix on a credited
+  tokens-per-day row) and shown (#332). Output tokens per call of a command is a mean per
+  call and keeps them.
 
 A side whose window starts before what the board still reports under-counts review time,
 failures and returns; ``kelpie report`` widens the board's lookback to two windows before
@@ -76,6 +78,7 @@ DEFAULT_REVIEW_ROLES = ("reviewer",)
 DAY = timedelta(days=1)
 # A fix naming this rule changed instruction files (a split): measured on them too.
 INSTRUCTIONS_RULE = "instruction_bloat"
+TOKENS_PER_DAY = "tokens per day"
 
 
 @dataclass(frozen=True, slots=True)
@@ -121,6 +124,8 @@ class Credited:
 
     event: FixEvent
     metric: Metric
+    # its tokens left out as an outage's (before, after; #332), on a token row only
+    outage_tokens: tuple[int, int] = (0, 0)
 
 
 @dataclass(frozen=True, slots=True)
@@ -300,7 +305,12 @@ def verify_group(
                 mine.append(_review_time(ev, e, b, a))
             if _is_split(e):  # per task is never one fix's: a task goes through roles
                 mine.append(_instruction_tokens(ev, e, b, a, _short(b, a, ev)))
-            own += [Credited(e, m) for m in mine if m is not None and _has_data(m)]
+            held = (_held_tokens(ev, e, b), _held_tokens(ev, e, a))
+            own += [
+                Credited(e, m, held if m.name.startswith(TOKENS_PER_DAY) else (0, 0))
+                for m in mine
+                if m is not None and _has_data(m)
+            ]
         if not e.command:
             continue
         clash = [o for o in others if o.command == e.command and _roles_meet(o.role, e.role)]
@@ -503,7 +513,7 @@ def _tokens(
 
     (tb, nb), (ta, na) = per_day(b), per_day(a)
     who = f" ({md.text(event.role)})" if event.role else ""
-    name = f"tokens per day{who}"
+    name = f"{TOKENS_PER_DAY}{who}"
     if (began := _traces_began_late(ev, b)) is not None and (nb or na):
         excluded.append(Excluded(name, began, ta, "tokens/day"))
         return None
@@ -512,8 +522,9 @@ def _tokens(
 
 
 def _held_tokens(ev: Evidence, event: FixEvent, w: Window) -> int:
-    """Tokens of ``event``'s role (all roles without one) in ``w`` that an outage held: left
-    out of the token metrics (#332), counted the way :func:`_tokens` counts."""
+    """Tokens of ``event``'s role (all roles without one) in ``w`` that an outage held: what
+    tokens per day left out (#332), counted the way :func:`_tokens` counts (tokens per
+    completed task also leaves out people's own sessions, so it may have left out less)."""
     if not ev.outage_held:
         return 0
     counted = ev.counted or {}
