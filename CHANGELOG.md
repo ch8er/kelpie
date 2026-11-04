@@ -127,9 +127,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
   reason then made Hermes' `active_pr` guard hold the task back for 24 hours after a human
   unblocked it. Every text Kelpie writes into Hermes (stop, park, wake, comment) now goes
   through one cleaner, `kelpie.adapters.hermes.text`: PR URLs become `owner/repo#N`, control
-  and format characters (bidi overrides, zero width, line separators) are removed, and the
-  text carries neither marker. The Claude Code stop reason also folds format characters
-  (bidi overrides, zero width) into spaces, as OpenClaw's already did
+  and format characters (bidi overrides, zero width, line separators) are replaced by a
+  space, and the text carries neither marker. Parks, wakes and comments change slightly too:
+  all format characters now become spaces (an emoji joined with zero-width joiners shows as
+  its parts), and `kelpie-stop` in them reads `kelpie stop`, as `kelpie-wait` already did.
+  The Claude Code stop reason also folds format characters (bidi overrides, zero width) into
+  spaces and collapses runs of spaces, as OpenClaw's already did
   ([#160](https://github.com/ch8er/kelpie/issues/160)).
 
 ## [0.1.0a1] - 2026-11-03

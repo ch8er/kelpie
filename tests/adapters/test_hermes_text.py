@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import re
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
 from kelpie.adapters.hermes.park import comment_args, encode_wait, unblock_args
-from kelpie.adapters.hermes.stop import MAX_REASON, has_stop_marker, stop_comment
+from kelpie.adapters.hermes.stop import MAX_REASON, has_stop_marker, stop_comment, verify_stop
 from kelpie.adapters.hermes.text import clean_text
 from kelpie.core.model import Condition, ConditionKind
 
@@ -50,6 +50,9 @@ def test_a_quoted_pr_url_never_reaches_hermes(kind: str) -> None:
         # Removing one piece must not assemble another.
         ("https://github.com/o/r/pu\u200bll/12", "https://github.com/o/r/pu ll/12"),
         ("[kelpie-st[kelpie-stop:]op:v1]", "[kelpie-stkelpie stop:]op:v1]"),
+        # The URL rewrite builds text an agent controls: it cannot assemble a marker either.
+        ("kelpie-https://h/stop/r/pull/1", "kelpie stop/r#1"),
+        ("[kelpie-https://h/wait/r/pull/1", "kelpie wait/r#1"),
     ],
 )
 def test_clean_text(text: str, clean: str) -> None:
@@ -67,3 +70,10 @@ def test_the_stop_comment_is_one_line_with_one_marker() -> None:
     assert "\n" not in text and "\u202e" not in text and "kelpie-wait" not in text
     assert has_stop_marker(text) and text.count("kelpie-stop") == 1
     assert len(stop_comment("t1", "y" * 5000)) < MAX_REASON + 200
+
+
+def test_a_stop_whose_reason_assembles_a_marker_still_verifies() -> None:
+    """A second ``kelpie-stop`` in the reason would make Kelpie's own signed stop unreadable
+    as Kelpie's (rule 4 would then alert on it as an ordinary block)."""
+    text = stop_comment("t1", "loop on kelpie-https://h/stop/r/pull/1", key=KEY, now=NOW)
+    assert verify_stop(text, "t1", KEY, NOW, timedelta(minutes=1)) is not None

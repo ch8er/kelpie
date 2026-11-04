@@ -282,7 +282,8 @@ names the profile for Hermes' credential aliases (`<VAR>_KELPIE`) in those comma
 commands read no credentials. Every text Kelpie writes (a stop's `BLOCKED:` reason, a park,
 a wake, a comment) goes through one cleaner (`text.py`): GitHub PR URLs are rewritten to
 `owner/repo#N`, since a PR URL in a comment or reason holds a ready task back for 24 hours in
-Hermes, and control and format characters are removed.
+Hermes, control and format characters are replaced by a space, and neither of Kelpie's
+markers (`kelpie-wait`, `kelpie-stop`) can appear in the text in front of Kelpie's own.
 
 ## Hooks plugin
 

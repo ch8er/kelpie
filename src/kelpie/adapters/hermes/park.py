@@ -136,9 +136,8 @@ _MARKER = re.compile(
 
 
 def clean_text(text: str, limit: int = MAX_TEXT) -> str:
-    """Text safe to write to Hermes (:func:`kelpie.adapters.hermes.text.clean_text`): no
-    control characters, nothing that reads as a marker (``kelpie-wait`` becomes
-    ``kelpie wait``), PR URLs as ``owner/repo#N``, at most ``limit`` characters."""
+    """Text safe to write to Hermes, at most ``limit`` characters, newlines kept: see
+    :func:`kelpie.adapters.hermes.text.clean_text`."""
     return _clean_text(text, limit)
 
 
