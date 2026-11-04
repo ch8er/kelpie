@@ -407,6 +407,34 @@ def test_engine_dispatches_stop_to_hermes(board: Board, fake_cli: tuple[str, Pat
     assert len(calls(log)) == 1
 
 
+def test_a_reason_quoting_a_pr_url_reaches_the_board_without_it(
+    board: Board, fake_cli: tuple[str, Path]
+) -> None:
+    """#160: rule 10's reason quotes the tool arguments; Hermes' active_pr guard would hold
+    the task back for 24 h after its unblock if the block's reason carried a PR URL."""
+    exe, log = fake_cli
+    rid = running(board)
+    adapter = make(board, exe)
+    reason = "same call 12 times: gh pr view https://github.com/owner/repo/pull/12 --json state"
+    action = Action(
+        ActionKind.STOP,
+        "loop_breaker",
+        reason,
+        executor="hermes",
+        params={"session_id": f"hermes-run-{rid}"},
+    )
+    engine = Engine(
+        [Emit([action], name="loop_breaker")],
+        adapters=[adapter],
+        config=EngineConfig(dry_run=False, modes={"loop_breaker": Mode.ACT}),
+    )
+    assert [r.outcome for r in engine.tick(lambda: adapter.snapshot(NOW))] == [Outcome.EXECUTED]
+    (call,) = calls(log)
+    argv = " ".join(call["argv"])  # type: ignore[arg-type]
+    assert not re.search(r"https?://\S+/pull/\d+", argv, re.IGNORECASE)
+    assert "gh pr view owner/repo#12 --json state" in argv
+
+
 def sleeper() -> subprocess.Popen[bytes]:
     return subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
 

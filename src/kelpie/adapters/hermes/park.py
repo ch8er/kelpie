@@ -65,10 +65,12 @@ Safety, as for ``stop``:
   if a GitHub PR URL appeared in one of its comments (written by its worker, for instance).
 
 Text. Hermes holds back a ready task for 24 h after a GitHub PR URL appears in a comment on
-it (its ``active_pr`` guard), so every text Kelpie writes has PR URLs rewritten to
-``owner/repo#N``. Control characters are removed, ``kelpie-wait`` in the text (file names
-come from workers) becomes ``kelpie wait`` so the text cannot carry a marker, each step
-repeats until nothing changes, and the text is capped.
+it (its ``active_pr`` guard), so every text Kelpie writes (parks, wakes, comments, and the
+stop's block reason in stop.py) goes through one cleaner, :mod:`kelpie.adapters.hermes.text`:
+PR URLs are rewritten to ``owner/repo#N``, control and format characters are removed,
+``kelpie-wait`` and ``kelpie-stop`` in the text (file names come from workers) become
+``kelpie wait`` and ``kelpie stop`` so the text cannot carry a marker, each step repeats
+until nothing changes, and the text is capped.
 
 CLI (Hermes ``hermes_cli/kanban_parser.py``): ``schedule <task> [reason...]``,
 ``unblock [--reason TEXT] <task>...`` (the reason is also stored as a comment) and
@@ -107,6 +109,7 @@ from kelpie.adapters.hermes.stop import (
     HermesCliError,
     kill_group,
 )
+from kelpie.adapters.hermes.text import clean_text as _clean_text
 from kelpie.core.model import Condition, ConditionKind
 
 log = logging.getLogger(__name__)
@@ -130,29 +133,13 @@ def board_key(board: str) -> str:
 _MARKER = re.compile(
     r"\[kelpie-wait:v2:([0-9]{1,12}):([0-9a-f]{16}):([A-Za-z0-9_-]+=*)\.([0-9a-f]{64})\]\s*\Z"
 )
-_ANY_MARKER = re.compile(r"\[?kelpie-wait", re.IGNORECASE)
-# As Hermes' active_pr guard (case-insensitive, any owner/repo segment), with its tail.
-_PR_URL = re.compile(
-    r"https?://[^\s/]+/([^/\s]+)/([^/\s]+)/pull/(\d+)(?:[/#?][^\s)\]>\"']*)?", re.IGNORECASE
-)
-# C0 (but tab and newline), DEL, C1, and bidirectional overrides.
-_CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f\u200e\u200f\u202a-\u202e\u2066-\u2069]+")
 
 
 def clean_text(text: str, limit: int = MAX_TEXT) -> str:
-    """Text safe to write to Hermes: no control characters, nothing that reads as a marker
-    (``kelpie-wait`` becomes ``kelpie wait``), PR URLs as ``owner/repo#N``, at most
-    ``limit`` characters. Each step repeats until nothing changes, so removing one piece
-    cannot assemble another."""
-    while True:
-        before = text
-        text = _CONTROL.sub(" ", text)
-        text = _ANY_MARKER.sub("kelpie wait", text)
-        text = _PR_URL.sub(lambda m: f"{m[1]}/{m[2]}#{m[3]}", text)
-        if text == before:
-            break
-    text = text.strip()
-    return text if len(text) <= limit else text[: limit - 3] + "..."
+    """Text safe to write to Hermes (:func:`kelpie.adapters.hermes.text.clean_text`): no
+    control characters, nothing that reads as a marker (``kelpie-wait`` becomes
+    ``kelpie wait``), PR URLs as ``owner/repo#N``, at most ``limit`` characters."""
+    return _clean_text(text, limit)
 
 
 def load_key(path: Path, *, create: bool) -> bytes | None:

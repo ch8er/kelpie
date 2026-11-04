@@ -62,6 +62,16 @@ def test_no_marker_no_output(env: Path, tmp_path: Path) -> None:
     assert spool(tmp_path) == []  # PreToolUse is only recorded when it stops
 
 
+def test_the_reason_is_one_line_without_control_or_format_characters(env: Path) -> None:
+    """As the OpenClaw plugin shows it (#160): bidi overrides and zero-width characters in a
+    reason that quotes an agent cannot reorder or hide the text a human reads."""
+    text = hook.clean_reason("a\u202eb\u200bc\nd\x1b[31m\x85e\u2028f  g")
+    assert text == "a b c d [31m e f g"
+    write_marker(env, S1, "x\u202ey", time.time())
+    assert json.loads((env / f"{S1}.json").read_text())["reason"] == "x y"
+    assert hook.clean_reason("\u200b \n") == "no reason given"
+
+
 def test_marker_stops_tool_calls(env: Path, tmp_path: Path) -> None:
     write_marker(env, S1, "9 identical `Bash` calls", time.time())
     answer, code = pre_tool()

@@ -53,6 +53,7 @@ import re
 import socket
 import sys
 import time
+import unicodedata
 from pathlib import Path
 from typing import Any
 
@@ -80,7 +81,6 @@ _SESSION_ID = re.compile(r"[A-Za-z0-9_-]{1,128}")  # used with fullmatch
 # Spool format version, in every line. 1: the hook enforces stop markers (PreToolUse).
 # 2: ``Skill`` calls carry the skill's name.
 HOOK_VERSION = 2
-_CONTROL = re.compile(r"[\x00-\x1f\x7f]+")
 TASK_TOOL = "TaskUpdate"
 SKILL_TOOL = "Skill"
 # A skill's name, optionally after its plugin's (``plugin:name``); used with fullmatch.
@@ -701,7 +701,12 @@ def marker_path(session_id: str) -> Path | None:
 
 
 def clean_reason(reason: str) -> str:
-    text = _CONTROL.sub(" ", reason).strip() or "no reason given"
+    """One line, as the OpenClaw plugin shows a stop: control and format characters (bidi
+    overrides, zero width) and line separators folded into spaces, at most ``MAX_REASON``."""
+    text = "".join(
+        " " if unicodedata.category(c) in ("Cc", "Cf", "Zl", "Zp") else c for c in reason
+    )
+    text = re.sub(r" {2,}", " ", text).strip() or "no reason given"
     return text if len(text) <= MAX_REASON else text[: MAX_REASON - 3] + "..."
 
 

@@ -122,6 +122,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
   key is not there. `kelpie doctor` has a "config paths exist" line naming each path Kelpie
   reads that does not exist after expansion (FAIL when the ledger's directory is missing)
   ([#334](https://github.com/ch8er/kelpie/issues/334)).
+- A Hermes stop no longer writes a GitHub PR URL into the task: rule 10's reason can quote
+  tool arguments (`gh pr view https://github.com/owner/repo/pull/12`), and the `BLOCKED:`
+  reason then made Hermes' `active_pr` guard hold the task back for 24 hours after a human
+  unblocked it. Every text Kelpie writes into Hermes (stop, park, wake, comment) now goes
+  through one cleaner, `kelpie.adapters.hermes.text`: PR URLs become `owner/repo#N`, control
+  and format characters (bidi overrides, zero width, line separators) are removed, and the
+  text carries neither marker. The Claude Code stop reason also folds format characters
+  (bidi overrides, zero width) into spaces, as OpenClaw's already did
+  ([#160](https://github.com/ch8er/kelpie/issues/160)).
 
 ## [0.1.0a1] - 2026-11-03
 
