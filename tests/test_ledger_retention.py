@@ -411,3 +411,39 @@ def test_doctor_shows_the_database_size_and_the_oldest_raw_row(
     assert "retention 30d" in check.detail
     late = check_database(settings, NOW + timedelta(days=25))  # 37 days: nothing prunes
     assert late.status == "WARN" and "kelpie serve" in late.fix
+
+
+def test_a_day_summed_but_cut_short_reads_from_its_sums() -> None:
+    from kelpie.report.verify import mode_events, summed_entries
+
+    switch = datetime(2026, 3, 1, 10, tzinfo=UTC)
+    day = ActionDay(switch.date(), "stale_blocks", "unblock", "observe", 3, 0, 0, 0,
+                    switch - timedelta(hours=9), switch - timedelta(hours=1))  # fmt: skip
+    act = ActionDay(switch.date(), "stale_blocks", "unblock", "act", 2, 2, 0, 0,
+                    switch, switch + timedelta(hours=5))  # fmt: skip
+    # a prune cut short left the day's last row; it alone would hide the switch
+    left = [entry(switch + timedelta(hours=5), n=1)]
+    later = [entry(switch + timedelta(days=1), n=2)]  # a day not summed: raw
+    found = summed_entries([day, act], left + later)
+    assert later[0] in found and left[0] not in found
+    [event] = mode_events(found)
+    assert (event.at, event.note) == (switch, "stale_blocks: observe -> act")
+
+
+def test_the_in_memory_prune_runs_in_the_control_loop_thread(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("KELPIE_DB", raising=False)
+    path = tmp_path / "kelpie.toml"
+    path.write_text('[storage]\npath = ":memory:"\n[traces]\nenabled = false\n')
+    app = build_app(load_settings(path), clock=lambda: NOW)
+    try:
+        assert isinstance(app.store, MemoryLedgerStore)
+        app.store.append(entry(days_ago(40), n=1))
+        app.store.append(entry(days_ago(1), n=2))
+        assert app.ledger_retention is not None and not app.ledger_retention.background
+        assert app.loop.housekeeping is not None
+        app.loop.housekeeping()  # pruned before it returns, in this thread
+        assert [e.task_id for e in app.store.entries] == ["T-2"]
+    finally:
+        app.close()

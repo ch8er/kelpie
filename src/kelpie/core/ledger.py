@@ -220,10 +220,11 @@ class MemoryLedgerStore:
             del self.entries[: len(self.entries) - self.max_entries * 9 // 10]
 
     def prune(self, before: datetime) -> int:
-        """Drop entries older than ``before``; how many went."""
-        kept = [e for e in self.entries if e.at >= before]
-        gone = len(self.entries) - len(kept)
-        self.entries[:] = kept
+        """Drop entries older than ``before`` (they are appended in time order); how many
+        went. Not thread-safe, like the rest of the store: call it from the thread that
+        appends (``kelpie serve`` runs it in the control loop's housekeeping)."""
+        gone = next((i for i, e in enumerate(self.entries) if e.at >= before), len(self.entries))
+        del self.entries[:gone]
         return gone
 
     def by_fingerprint(self, fingerprint: str, after: datetime) -> Sequence[LedgerEntry]:

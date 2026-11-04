@@ -2144,15 +2144,27 @@ def build_ledger_retention(
     kept = settings.storage
     keep = ledger_keep(settings.engine)
     if isinstance(store, SqliteLedgerStore) and settings.db_path is not None:
-        try:
-            pruner = SqliteLedgerPruner(settings.db_path)
-        except (OSError, sqlite3.Error, RuntimeError) as exc:
-            raise ConfigError(f"cannot open ledger database {settings.db_path}: {exc}") from exc
-        return LedgerRetention(
-            lambda now: pruner.prune(now, kept.retention, kept.max_rows, keep),
-            clock,
-            close=pruner.close,
-        )
+        path = settings.db_path
+        opened: list[SqliteLedgerPruner] = []  # its connection, opened at the first prune
+        lock = threading.Lock()
+
+        def prune(now: datetime) -> object:
+            with lock:
+                if closed.is_set():
+                    return None
+                if not opened:
+                    opened.append(SqliteLedgerPruner(path))
+            return opened[0].prune(now, kept.retention, kept.max_rows, keep)
+
+        closed = threading.Event()
+
+        def close() -> None:
+            with lock:
+                closed.set()
+                if opened:
+                    opened[0].close()
+
+        return LedgerRetention(prune, clock, close=close)
 
     def in_memory(now: datetime) -> tuple[int, int]:
         gone = store.prune(now - kept.retention) if isinstance(store, MemoryLedgerStore) else 0
@@ -2161,7 +2173,8 @@ def build_ledger_retention(
         )
         return gone, closed
 
-    return LedgerRetention(in_memory, clock)
+    # in the control loop's thread: the in-memory stores are not thread-safe
+    return LedgerRetention(in_memory, clock, background=False)
 
 
 def _both(*steps: Callable[[], object]) -> Callable[[], None]:

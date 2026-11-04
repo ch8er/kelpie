@@ -5,7 +5,8 @@ closed alert states go with it, open states and snoozes never. Each UTC day is s
 daily aggregates (per rule, action kind and mode) before its raw rows go, and the sums are
 kept for good: the report's before/after reads a rule's mode change from them once raw rows
 are gone. The size cap never prunes within :func:`ledger_keep` (the ledger's own windows:
-cooldown, retries, once actions), so a full ledger never lets an action repeat.
+cooldown, retries, once actions), so a full database ledger never lets an action repeat
+(the in-memory ledger keeps the newest ``MAX_MEMORY_ENTRIES``, whatever their age).
 
 :class:`LedgerRetention` runs the prune at most once per ``every`` in a background thread,
 started by the control loop after a tick: it never delays dispatch or the next tick (the
@@ -78,7 +79,8 @@ def _days(span: timedelta) -> str:
 class LedgerRetention:
     """Runs ``prune(now)`` at most once per ``every``, in a background thread.
 
-    :meth:`maybe_start` is called by the control loop after each tick and returns at once.
+    :meth:`maybe_start` is called by the control loop after each tick and returns at once
+    (``background``; otherwise it prunes in the caller's thread).
     ``prune`` returns what it removed (logged); ``close`` stops a running prune at its next
     batch (:meth:`stop`).
     """
@@ -87,6 +89,9 @@ class LedgerRetention:
     clock: Callable[[], datetime]
     every: timedelta = PRUNE_EVERY
     close: Callable[[], None] | None = None
+    # False: run in the calling thread (the in-memory stores, which are not thread-safe and
+    # cheap to prune)
+    background: bool = True
     failures: int = 0
     _last: float | None = None  # monotonic time of the last start
     _thread: threading.Thread | None = None
@@ -100,6 +105,9 @@ class LedgerRetention:
             if self._last is not None and now - self._last < self.every.total_seconds():
                 return False
             self._last = now
+            if not self.background:
+                self.run_once()
+                return True
             self._thread = threading.Thread(
                 target=self.run_once, name="kelpie-ledger-prune", daemon=True
             )

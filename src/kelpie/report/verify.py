@@ -229,14 +229,16 @@ def mode_events(entries: Iterable[LedgerEntry]) -> list[FixEvent]:
 def summed_entries(
     days: Iterable[ActionDay], entries: Iterable[LedgerEntry] = ()
 ) -> list[LedgerEntry]:
-    """The ledger's daily sums (#318) as the entries :func:`mode_events` reads, for the
-    UTC days without a raw entry left (``entries``: retention pruned them): per rule and
-    mode, the day's first and last entry that showed it. One switch a day is found at its
-    exact time; a rule switched back and forth within one pruned day shows fewer."""
-    raw = {e.at.astimezone(UTC).date() for e in entries}
-    out: list[LedgerEntry] = []
+    """What :func:`mode_events` reads: the raw ``entries``, except on the UTC days the
+    ledger summed (#318; retention prunes a day's raw rows only after summing it, so any
+    left are a part) where the sums stand in: per rule and mode, the day's first and last
+    entry that showed it. One switch a day is found at its exact time; a rule switched
+    back and forth within one pruned day shows fewer."""
+    days = list(days)
+    summed = {d.day for d in days}
+    out = [e for e in entries if e.at.astimezone(UTC).date() not in summed]
     for d in days:
-        if d.day in raw or d.first_at is None or d.last_at is None:
+        if d.first_at is None or d.last_at is None:
             continue
         try:
             kind, mode = ActionKind(d.kind), Mode(d.mode)

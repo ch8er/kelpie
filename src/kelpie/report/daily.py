@@ -986,11 +986,7 @@ def _verifications(
     reach = since - 2 * inputs.verify_window
     events = [
         *inputs.fixes,
-        *mode_events(
-            e
-            for e in (*summed_entries(inputs.action_days, inputs.actions), *inputs.actions)
-            if e.at < end
-        ),
+        *mode_events(e for e in summed_entries(inputs.action_days, inputs.actions) if e.at < end),
         *filter_events(found, replace(inputs.outputs, window=inputs.verify_window)),
     ]
     events = [e for e in events if reach <= e.at < end]
