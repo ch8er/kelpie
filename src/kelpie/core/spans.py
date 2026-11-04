@@ -31,6 +31,9 @@ from typing import Protocol
 from kelpie.core.model import Span, SpanKind, SpanTotals
 
 SpanKey = tuple[str, str]
+# The scoped ingest token that sent a span (kelpie.traces.scope sets it; #302). A span
+# inherits its session and task only from a parent sent with the same one (or none).
+INGEST_MARK = "kelpie.ingest.token"
 MAX_LINK_DEPTH = 32  # parent chains deeper than this are not followed
 # An attribution entry seen again is rewritten only when it changed or is this old, so a
 # tick does not write every session it sees.
@@ -169,12 +172,15 @@ class SpanStore(Protocol):
         decide again which tokens of their traces count. Returns the number deleted."""
         ...
 
-    def spans_by_key(self, keys: Collection[SpanKey]) -> Sequence[Span]:
-        """The stored spans among ``keys``, as they are now (links filled in since)."""
+    def discard_marked(self, column: str, value: str, key: str, mark: str) -> int:
+        """Delete the spans whose ``column`` (``session_id`` or ``task_id``) is ``value`` and
+        whose attribute ``key`` is ``mark``; then decide their traces again."""
         ...
 
-    def spans_with_attribute(self, after: datetime, key: str) -> Sequence[Span]:
-        """Stored spans (last time at or after ``after``) whose attributes hold ``key``."""
+    def marked_ids(self, after: datetime, key: str) -> Sequence[tuple[str | None, str | None, str]]:
+        """(session id, task id, mark) of stored spans (last time at or after ``after``)
+        whose attribute ``key`` holds a text mark, each combination once, in the order the
+        first such span was stored."""
         ...
 
     def inherit_links(self, trace_ids: Collection[str]) -> int:
@@ -469,15 +475,25 @@ class MemorySpanStore:
                 self.epoch += 1
             return len(found)
 
-    def spans_by_key(self, keys: Collection[SpanKey]) -> Sequence[Span]:
+    def discard_marked(self, column: str, value: str, key: str, mark: str) -> int:
+        if column not in ("session_id", "task_id"):
+            raise ValueError(column)
         with self._lock:
-            return [self._spans[k][0] for k in set(keys) if k in self._spans]
-
-    def spans_with_attribute(self, after: datetime, key: str) -> Sequence[Span]:
-        with self._lock:
-            return [
-                s for s, _ in self._spans.values() if key in s.attributes and last_at(s) >= after
+            found = [
+                k
+                for k, (s, _) in self._spans.items()
+                if getattr(s, column) == value and s.attributes.get(key) == mark
             ]
+        return self.discard(found)
+
+    def marked_ids(self, after: datetime, key: str) -> Sequence[tuple[str | None, str | None, str]]:
+        seen: dict[tuple[str | None, str | None, str], None] = {}
+        with self._lock:
+            for span, _ in self._spans.values():  # in the order stored
+                mark = span.attributes.get(key)
+                if isinstance(mark, str) and last_at(span) >= after:
+                    seen.setdefault((span.session_id, span.task_id, mark), None)
+        return list(seen)
 
     def _delete(self, key: SpanKey) -> None:
         del self._spans[key]
@@ -511,6 +527,8 @@ class MemorySpanStore:
                     if found is None:
                         continue
                     parent = found[0]
+                    if parent.attributes.get(INGEST_MARK) != span.attributes.get(INGEST_MARK):
+                        continue  # only from a parent of the same ingest token (#302)
                     task = span.task_id or parent.task_id
                     session = span.session_id or parent.session_id
                     if (task, session) != (span.task_id, span.session_id):

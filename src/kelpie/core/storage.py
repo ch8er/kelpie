@@ -37,6 +37,7 @@ from kelpie.core.model import (
 )
 from kelpie.core.snooze import EXPIRED_KEPT, MAX_BY, MAX_REASON, PRUNE_AFTER
 from kelpie.core.spans import (
+    INGEST_MARK,
     MAX_LINK_DEPTH,
     Attribution,
     SpanChanges,
@@ -661,6 +662,13 @@ _SPAN_COLUMNS = (
 )
 
 
+MAX_KEYS_PER_STATEMENT = 400  # two parameters each: under SQLite's old 999 limit
+
+
+def _json_path(key: str) -> str:
+    return '$."' + key.replace('"', "") + '"'
+
+
 # Budget windows up to this long read counted rows by time; longer ones by subject.
 SHORT_WINDOW = timedelta(hours=6)
 
@@ -1069,8 +1077,9 @@ class SqliteSpanStore:
         then decide again which tokens of their traces count."""
         keys = sorted(set(keys))
         deleted = 0
-        for i in range(0, len(keys), self._batch):
-            chunk = keys[i : i + self._batch]
+        step = min(self._batch, MAX_KEYS_PER_STATEMENT)
+        for i in range(0, len(keys), step):
+            chunk = keys[i : i + step]
             where = " OR ".join("(trace_id = ? AND span_id = ?)" for _ in chunk)
             args = tuple(v for key in chunk for v in key)
             deleted += self._delete(f"DELETE FROM spans WHERE {where}", args)
@@ -1078,28 +1087,34 @@ class SqliteSpanStore:
             self._decide(k[0] for k in keys)
         return deleted
 
-    def spans_by_key(self, keys: Collection[SpanKey]) -> Sequence[Span]:
-        """The stored spans among ``keys``, as they are now (links filled in since)."""
-        keys = sorted(set(keys))
-        found: list[Span] = []
-        for i in range(0, len(keys), self._batch):
-            chunk = keys[i : i + self._batch]
-            where = " OR ".join("(trace_id = ? AND span_id = ?)" for _ in chunk)
-            args = tuple(v for key in chunk for v in key)
-            found += [
-                _span(r)
-                for r in self._read(f"SELECT {_SPAN_COLUMNS} FROM spans WHERE {where}", args)
-            ]
-        return found
+    def discard_marked(self, column: str, value: str, key: str, mark: str) -> int:
+        """Delete the spans whose ``column`` (``session_id`` or ``task_id``) is ``value`` and
+        whose attribute ``key`` is ``mark``; then decide their traces again."""
+        if column not in ("session_id", "task_id"):
+            raise ValueError(column)
+        match = f"{column} = ? AND json_valid(attributes) AND json_extract(attributes, ?) = ?"
+        args = (value, _json_path(key), mark)
+        traces = [
+            r[0] for r in self._read(f"SELECT DISTINCT trace_id FROM spans WHERE {match}", args)
+        ]
+        deleted = self._delete(f"DELETE FROM spans WHERE {match}", args)
+        if deleted:
+            self._decide(traces)
+        return deleted
 
-    def spans_with_attribute(self, after: datetime, key: str) -> Sequence[Span]:
-        """Stored spans (last time at or after ``after``) whose attributes hold ``key``."""
+    def marked_ids(self, after: datetime, key: str) -> Sequence[tuple[str | None, str | None, str]]:
+        """(session id, task id, mark) of stored spans (last time at or after ``after``)
+        whose attribute ``key`` holds a mark, each combination once, in the order the first
+        such span was stored."""
         sql = (
-            f"SELECT {_SPAN_COLUMNS} FROM spans WHERE last_at >= ? AND attributes LIKE ?"
-            " AND json_valid(attributes) AND json_extract(attributes, ?) IS NOT NULL"
+            "SELECT session_id, task_id, json_extract(attributes, ?) AS mark, MIN(rowid_) AS first"
+            " FROM spans WHERE last_at >= ? AND attributes LIKE ? AND json_valid(attributes)"
+            " AND json_type(attributes, ?) = 'text'"
+            " GROUP BY session_id, task_id, mark ORDER BY first"
         )
-        pattern = "%" + json.dumps(key) + "%"
-        return [_span(r) for r in self._read(sql, (_ts(after), pattern, f'$."{key}"'))]
+        path = _json_path(key)
+        rows = self._read(sql, (path, _ts(after), "%" + json.dumps(key) + "%", path))
+        return [(r[0], r[1], r[2]) for r in rows]
 
     def _delete(self, sql: str, args: tuple[object, ...]) -> int:
         with self._lock:
@@ -1125,7 +1140,15 @@ class SqliteSpanStore:
         version, so snapshot caches pick up their links."""
         ids = sorted(set(trace_ids))
         updated = 0
-        parent = "p.trace_id = spans.trace_id AND p.span_id = spans.parent_id"
+        # Only from a parent sent with the same scoped ingest token (or both without one):
+        # a span cannot take another agent's session or task through its parent (#302).
+        mark = _json_path(INGEST_MARK)
+        same = (
+            f"(CASE WHEN json_valid(p.attributes) THEN json_extract(p.attributes, '{mark}') END)"
+            " IS (CASE WHEN json_valid(spans.attributes) THEN"
+            f" json_extract(spans.attributes, '{mark}') END)"
+        )
+        parent = f"p.trace_id = spans.trace_id AND p.span_id = spans.parent_id AND {same}"
         for i in range(0, len(ids), self._batch):
             chunk = ids[i : i + self._batch]
             sql = (

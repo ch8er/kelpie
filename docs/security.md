@@ -255,24 +255,25 @@ way the multi-host hub limits each `kelpie agent` to its own host:
 
 - **Who a span belongs to comes from the board.** Ingest looks the span's session up in
   what the last snapshots showed (for a session the board no longer shows, in the owners
-  Kelpie remembers for budgets), and its task too: a session of another owner, a task of
-  another owner, or a task other than the one the board gives the session is outside the
-  token's scope, and the span is rejected and counted
+  Kelpie remembers for budgets), and its task too: a session of another owner, a task other
+  than the session's own, or (without a known session) a task of another owner is outside
+  the token's scope, and the span is rejected and counted
   (`kelpie_spans_rejected_total{reason="out_of_scope"}`).
-- **Spans the board cannot place yet** (a session too new to be on it; a span with no
-  session and no task, which may inherit both from its parent once stored) are accepted,
-  marked with their token's name (`kelpie.ingest.token`, set by Kelpie; whatever a sender put
-  there is replaced or removed) and kept pending: every tick reads each one again from the
-  span store, whatever its times, and checks it against the board, for up to a day. Once
-  the board places it outside the scope, it is deleted from the store, and the totals and
-  budget usage are read again, before rules and budgets see it. After a restart the stored
-  spans of scoped tokens are pending again. Hook spans are folded into OTLP spans before
-  the check, so a fold that moves a span into another session is caught too.
-- **First come, first bound.** A session the board does not know belongs to the first token
-  that reports it; other tokens' spans for it are rejected. A forger could still claim a
-  session id before its agent starts (Hermes run ids are sequential) and report for it until
-  the board shows the run; from then on those spans are deleted and the agent's own token
-  reports for it.
+- **Ids the board does not show yet are bound.** A session too new to be on the board, or a
+  task not on it, belongs to the first token that reports it, and other tokens' spans for it
+  are rejected. Every tick checks the bound ids against the board; once it places one
+  outside the token's scope, every stored span of that token naming it is deleted (whatever
+  its times, and again for five minutes, for a request that was being stored meanwhile),
+  and the totals and budget usage are read again, before rules and budgets see it. Bindings
+  last for the span retention and are rebuilt from the store after a restart. Spans carry
+  their token's name (`kelpie.ingest.token`, set by Kelpie; whatever a sender put there is
+  replaced or removed), and a span takes a missing session or task from its parent only
+  when both came with the same scoped token. Hook spans are folded into OTLP spans before
+  the snapshot check, so a fold that moves a span into another session is caught too.
+- **What a forger can still do.** Claim a session id before its agent starts (Hermes run ids
+  are sequential) and report spans for it until the board shows the run; from then on they
+  are deleted, and the agent's own token reports for it. Hold up to 10,000 such ids, after
+  which its own unplaced spans are refused (other tokens are not affected).
 - **Every token is compared**, each in constant time; two tokens with the same value (or a
   scoped token equal to the shared one at startup) refuse to start, so a request maps to one
   scope. Scoped tokens are matched first, so a scoped token that later equals a rotated
@@ -281,13 +282,12 @@ way the multi-host hub limits each `kelpie agent` to its own host:
   (`kelpie traces rotate-token --token <name> [--grace 2h]`), with the same file rules,
   grace period and revocation (`--grace 0s`); the other tokens are untouched.
 - **Limits.** A `sessions` pattern grants every matching session, whoever owns it: keep
-  patterns specific. A span that never names a session or task the board knows is kept
-  after a day: it cannot trip rule 10 for a session on the board, but its tokens count
-  toward day and project budgets (a hard one stops runs only with `stop_on_shared_budgets`).
-  A scoped token may report for every session of its scope, so scope a token to one agent
-  (`owners`) where agents of one role do not trust each other. Requests are forwarded
-  (`[[traces.forward]]`) as received, rejected spans included. The shared token, when set,
-  still reports for every session: `kelpie doctor` warns while any rule is in `act`.
+  patterns specific. A span that names no session or task counts toward day and project
+  budgets only (a hard one stops runs only with `stop_on_shared_budgets`). A scoped token
+  may report for every session of its scope, so scope a token to one agent (`owners`) where
+  agents of one role do not trust each other. Requests are forwarded (`[[traces.forward]]`)
+  as received, rejected spans included. The shared token, when set, still reports for every
+  session: `kelpie doctor` warns while any rule is in `act`.
 
 **Moving from one token.**
 

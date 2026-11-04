@@ -2015,19 +2015,21 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
             "OTLP ingest on /v1/traces accepts spans without a token; set $%s",
             traces.token_env,
         )
-    guard = ScopeGuard(
-        {t.name: t.scope for t in traces.tokens},
-        store=span_store,
-        rejected=metrics.spans_rejected,
-    )
+    guard = None
     if scoped:
-        try:  # spans accepted before a restart are checked against the board again
+        guard = ScopeGuard(
+            {t.name: t.scope for t in traces.tokens},
+            store=span_store,
+            rejected=metrics.spans_rejected,
+            retention=traces.retention,
+        )
+        try:  # ids bound before a restart are checked against the board again
             restored = guard.restore(clock() - traces.retention, clock())
         except Exception as exc:
             log.error("cannot read the spans of [[traces.tokens]] to check them: %s", exc)
         else:
             if restored:
-                log.info("checking %d stored [[traces.tokens]] spans against the board", restored)
+                log.info("checking %d ids of [[traces.tokens]] spans against the board", restored)
     ingest = TraceIngest(
         store=span_store,
         clock=clock,
@@ -2039,7 +2041,7 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
         max_concurrent=traces.max_concurrent_requests,
         max_age=traces.retention,
         scoped=scoped,
-        guard=guard if scoped else None,
+        guard=guard,
     )
     forwarder = None
     for f in traces.forward:
@@ -2061,7 +2063,8 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
     window = SpanWindow(
         span_store, traces.window, traces.totals_window, traces.max_snapshot_spans, metrics
     )
-    guard.on_discard = window.invalidate
+    if guard is not None:
+        guard.on_discard = window.invalidate
     source = merged_snapshot(
         adapters,
         metrics,

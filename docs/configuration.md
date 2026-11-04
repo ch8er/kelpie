@@ -1179,22 +1179,25 @@ At least one of `owners`, `roles`, `sessions` and `boards` must be set. Who a se
 task belongs to comes from the board (for a session it no longer shows, from the owner
 Kelpie remembers for budgets), never from the span:
 
-- A span's session must be in scope; a task it names must be in scope too, unless it is the
-  task the board gives that session. A task other than the session's own is out of scope.
-- A span the board cannot place yet (a session too new to be on the board, or no session
-  and no task, which it may inherit from its parent later) is accepted and checked again on
-  every tick, read afresh from the span store, for up to a day; once the board places it
-  outside the scope it is deleted before rules, budgets and totals see it, and a restart
-  checks the stored ones again. A session the board does not know belongs to the first
-  token that reports it: other tokens' spans for it are out of scope.
+- A span's session must be in scope, and a task it names must be that session's own. A
+  task named without a session the board knows must be in scope, or be the task of a
+  session in scope.
+- A session or task the board does not show yet is bound to the first token that reports
+  it; other tokens' spans for it are rejected. Every tick checks the bound ids against the
+  board: once the board places one outside the token's scope, every stored span of that
+  token naming it is deleted, before rules, budgets and totals see it. Bindings last as long
+  as `retention` and are rebuilt from the store after a restart. A token may hold at most
+  10,000 bound ids the board does not show; more are refused (`reason="scope_backlog"`).
+- A span takes a missing session or task from its parent only when both came with the same
+  scoped token.
 - Out-of-scope spans are rejected (the export gets a partial success) or deleted, counted in
   `kelpie_spans_rejected_total{reason="out_of_scope"}`, with a warning logged at most once a
-  minute per token. At most 200,000 spans wait to be placed; more are refused
-  (`reason="scope_backlog"`).
+  minute per token.
 
 Kelpie refuses to start when a token is not set, cannot be read, equals another token or
-the shared one, or (off loopback) is weak. Removing an entry: its spans still waiting or in
-the snapshot window are deleted; with no entry left, stored spans stay as they are.
+the shared one, or (off loopback) is weak. Removing an entry: its spans in the snapshot
+window and those naming an id it held bound are deleted; with no entry left, stored spans
+stay as they are.
 
 The shared `[traces] token_env` token keeps working and may still report for every
 session; with `[[traces.tokens]]` and no shared token, a request without a token gets 401.

@@ -24,11 +24,13 @@ from kelpie.traces.ingest import Reply, ScopedToken, TraceIngest
 from kelpie.traces.otlp import PROTOBUF
 from kelpie.traces.scope import (
     OUT_OF_SCOPE,
+    SESSION,
     TOKEN_ATTRIBUTE,
     Place,
     ScopeGuard,
     ScopeIndex,
     TokenScope,
+    stamp,
 )
 from tests.traces.otlp_builders import NOW, S, request, sid
 from tests.traces.test_ingest import Headers, Observer
@@ -517,29 +519,56 @@ def test_own_session_with_another_agents_task_is_rejected() -> None:
     assert stored(store) == [] and observer.rejected[OUT_OF_SCOPE] == 1
 
 
-def test_pending_spans_are_checked_across_the_store_not_only_the_window() -> None:
+def test_bound_ids_are_checked_across_the_store_not_only_the_window() -> None:
     ingest, store, observer, guard = setup()
     old = replace(tool(1, "S-103", None), start=NOW - timedelta(hours=2))
-    post(ingest, [old], T2)  # unplaced: accepted, pending; outside any 30m window
-    assert len(stored(store)) == 1 and guard.pending() == 1
+    post(ingest, [old], T2)  # unplaced: accepted and bound; outside any 30m window
+    assert len(stored(store)) == 1 and guard.bound(SESSION, "S-103") == "dev-2"
     guard.check(later_board(("S-103", "T-103", "agent-dev-1")))  # no spans in the snapshot
-    assert stored(store) == [] and guard.pending() == 0
+    assert stored(store) == [] and guard.bound(SESSION, "S-103") is None
     assert observer.rejected == Counter({OUT_OF_SCOPE: 1})
+    post(ingest, [tool(2, "S-103", None)], T2)  # now placed elsewhere: rejected at ingest
+    assert stored(store) == []
 
 
-def test_pending_spans_in_scope_settle() -> None:
+def test_bound_ids_in_scope_settle() -> None:
     ingest, store, _, guard = setup()
     post(ingest, [tool(1, "S-104", None)], T2)
     guard.check(later_board(("S-104", "T-104", "agent-dev-2")))
-    assert len(stored(store)) == 1 and guard.pending() == 0
+    assert len(stored(store)) == 1 and guard.bound(SESSION, "S-104") == "dev-2"
 
 
-def test_restart_restores_pending_spans_and_bindings() -> None:
+def test_unplaced_session_with_own_task_is_bound_and_revoked() -> None:
+    ingest, store, observer, guard = setup()
+    forged = replace(tool(1, "S-105", "T-102"), start=NOW - timedelta(hours=3))
+    post(ingest, [forged], T2)  # its own task, a future session id
+    assert len(stored(store)) == 1
+    post(ingest, [tool(2, "S-105", "T-101")], T1)  # S-105 is bound to dev-2 already
+    assert observer.rejected[OUT_OF_SCOPE] == 1
+    guard.check(later_board(("S-105", "T-105", "agent-dev-1")))
+    assert stored(store) == []
+
+
+def test_a_span_stored_after_its_binding_was_revoked_is_deleted_too() -> None:
+    ingest, store, _, guard = setup()
+    post(ingest, [tool(1, "S-106", None)], T2)
+    guard.check(later_board(("S-106", "T-106", "agent-dev-1")))
+    late = stamp(stored_span("S-106"), "dev-2")
+    store.append_spans([late], NOW)  # an ingest that judged it before the revocation
+    guard.check(later_board(("S-106", "T-106", "agent-dev-1")))
+    assert stored(store) == []
+
+
+def stored_span(session: str) -> Span:
+    return Span("t2", "late", "execute_tool shell", SpanKind.TOOL, NOW, session_id=session)
+
+
+def test_restart_rebinds_ids_to_the_token_stored_first() -> None:
     ingest, store, observer, _ = setup()
     post(ingest, [tool(1, "S-103", None)], T2)
     fresh = ScopeGuard(SCOPES, store=store, rejected=observer.spans_rejected)  # a restart
     assert fresh.restore(NOW - timedelta(days=7), NOW) == 1
-    assert fresh.bound("S-103") == "dev-2"
+    assert fresh.bound(SESSION, "S-103") == "dev-2"
     fresh.check(later_board(("S-103", "T-103", "agent-dev-1")))
     assert stored(store) == []
 
@@ -617,10 +646,10 @@ def test_role_falls_back_to_the_tasks_role() -> None:
     assert index.session("S-201") == (Place("agent-x", "developer-b", None), "T-201")
 
 
-def test_backlog_of_unplaced_spans_is_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_unplaced_ids_per_token_are_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
     import kelpie.traces.scope as scope
 
-    monkeypatch.setattr(scope, "MAX_PENDING", 1)
+    monkeypatch.setattr(scope, "MAX_UNPLACED", 1)
     ingest, store, observer, _ = setup()
     post(ingest, [tool(1, "S-901", None), tool(2, "S-902", None)], T2)
     assert len(stored(store)) == 1 and observer.rejected[scope.SCOPE_BACKLOG] == 1
@@ -637,3 +666,54 @@ def test_window_reads_totals_again_after_a_discard() -> None:
     assert len(window.totals(NOW)) == 1  # cached for a minute
     window.invalidate()
     assert window.totals(NOW) == ()
+
+
+def test_children_inherit_only_from_a_parent_of_the_same_token() -> None:
+    ingest, store, _, _ = setup(shared=SHARED)
+    post(ingest, [tool(1, "S-101", "T-101")], SHARED)  # the victim's span, shared token
+    child = tool(2, None, None)
+    child.parent = sid(1)
+    post(ingest, [child], T2)  # names the victim's span as its parent
+    kept = {s.span_id: s for s in stored(store)}
+    assert kept[sid(2)].session_id is None and kept[sid(2)].task_id is None
+
+
+def test_local_task_id_of_a_placed_session_is_its_own_on_two_boards() -> None:
+    b = board()
+    mine = Task("qr:t_1a", "x", "in_progress", NOW, owner_id="agent-dev-2", board="qr")  # type: ignore[arg-type]
+    other = Task("zz:t_1a", "y", "in_progress", NOW, owner_id="agent-dev-1", board="zz")  # type: ignore[arg-type]
+    b = replace(
+        b,
+        tasks=(*b.tasks, mine, other),
+        sessions=(*b.sessions, Session("hermes-run-7", "qr:t_1a", "agent-dev-2", NOW)),
+    )
+    ingest, store, observer, guard = setup()
+    guard.index.update(b)
+    post(ingest, [tool(1, "hermes-run-7", "t_1a")], T2)
+    assert len(stored(store)) == 1 and not observer.rejected
+
+
+@pytest.mark.parametrize("kind", ["memory", "sqlite"])
+def test_store_marked_ids_discard_marked_and_same_mark_links(tmp_path: Path, kind: str) -> None:
+    from kelpie.core.storage import SqliteSpanStore
+
+    store: Any = MemorySpanStore() if kind == "memory" else SqliteSpanStore(tmp_path / "k.db")
+    mark = {TOKEN_ATTRIBUTE: "dev-2"}
+    a = Span("t", "a", "x", SpanKind.TOOL, NOW, session_id="S-1", task_id="T-1", attributes=mark)
+    b = Span("t", "b", "x", SpanKind.TOOL, NOW, parent_id="a", attributes=mark)  # inherits
+    c = Span("t", "c", "x", SpanKind.TOOL, NOW, parent_id="a")  # unmarked: does not
+    d = Span("u", "d", "x", SpanKind.TOOL, NOW, session_id="S-1")  # unmarked, same session
+    store.append_spans([a, b, c, d], NOW)
+    store.inherit_links(["t"])
+    got = {s.span_id: s for s in store.spans_since(NOW - timedelta(hours=1))}
+    assert (got["b"].session_id, got["b"].task_id) == ("S-1", "T-1")
+    assert got["c"].session_id is None
+    assert list(store.marked_ids(NOW - timedelta(days=1), TOKEN_ATTRIBUTE)) == [
+        ("S-1", "T-1", "dev-2")
+    ]
+    assert store.discard_marked("session_id", "S-1", TOKEN_ATTRIBUTE, "dev-2") == 2
+    assert sorted(s.span_id for s in store.spans_since(NOW - timedelta(hours=1))) == ["c", "d"]
+    with pytest.raises(ValueError):
+        store.discard_marked("name", "x", TOKEN_ATTRIBUTE, "dev-2")
+    if kind == "sqlite":
+        store.close()
