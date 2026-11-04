@@ -871,9 +871,12 @@ def test_two_boards_of_one_home_are_checked_one_by_one_without_a_failure(farm: F
     checks = {c.name: c for c in found}
     assert "1 running" in checks["kanban.db (sign)"].detail
     assert checks["hooks fire"].status == "PASS"
-    # #333: the worker-stop line holds for the boards too, and its self-test runs with them.
+    # #333: one worker-stop line for the boards (the host's verdict, PASS or a host WARN);
+    # a PASS points to the self-test, which now runs with a boards config.
     workers = checks["stop ends workers"]
-    assert workers.status in ("PASS", "WARN") and "end_worker = false" not in workers.detail
+    assert workers.status == "PASS" or (
+        workers.status == "WARN" and "end_worker" not in workers.fix
+    )
     if workers.status == "PASS":
         assert "kelpie selftest stop --adapter hermes" in workers.detail
     assert not [c.name for c in found if c.status == "FAIL"]

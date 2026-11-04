@@ -93,7 +93,8 @@ class HermesBoards:
     @property
     def cli_environ(self) -> Mapping[str, str] | None:
         """The environment every board's Hermes commands start from (the self-test's
-        throwaway home); ``None``: Kelpie's own, allow-listed."""
+        throwaway home); ``None``: Kelpie's own, allow-listed. Only the boards run the CLI
+        (``host`` and ``state`` only read), so only they get it."""
         return self.boards[0].cli_environ
 
     @cli_environ.setter

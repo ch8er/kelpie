@@ -17,6 +17,7 @@ from pathlib import Path
 
 import pytest
 
+from kelpie.adapters.hermes.adapter import HermesAdapter
 from kelpie.adapters.hermes.worker import host_table
 from kelpie.app import HermesBoardSettings, HermesSettings, Settings
 from kelpie.cli import main
@@ -109,7 +110,23 @@ def test_a_multi_board_config_passes_through_the_boards_adapter(fake: Path, tmp_
     assert not farm.exists()  # the user's boards and keys: never opened nor created
     block = json.loads((fake.parent / "block-env.json").read_text())
     assert block["HERMES_HOME"].startswith(str(tmp_path / "kelpie-selftest-"))
+    assert block["HERMES_KANBAN_DB"].startswith(str(tmp_path / "kelpie-selftest-"))
+    assert block["HERMES_KANBAN_DB"].endswith("/kanban/boards/kelpie-selftest/kanban.db")
     assert leftovers(tmp_path) == []
+
+
+@pytest.mark.parametrize("multi", [False, True])
+def test_the_users_hermes_home_state_is_never_read(
+    fake: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, multi: bool
+) -> None:
+    """The self-test reads no state.db of the user's Hermes home (``state_home``)."""
+    reads: list[object] = []
+    monkeypatch.setattr(HermesAdapter, "_state", lambda self, *a, **kw: reads.append(a))
+    home = tmp_path / "users-hermes"
+    boards = (HermesBoardSettings("qr", tmp_path / "qr.db"),) if multi else ()
+    code, lines = run(fake, state_home=home, boards=boards)
+    assert code == 0, "\n".join(lines)
+    assert reads == []
 
 
 def test_the_cli_runs_it_with_a_multi_board_config(

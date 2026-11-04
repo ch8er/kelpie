@@ -153,12 +153,12 @@ def test_rule_10_stops_only_the_run_on_the_board_in_the_prefix(
     assert env["HERMES_KANBAN_DB"] == str(sign.path)
     assert (env["HERMES_KANBAN_TASK"], env["HERMES_KANBAN_RUN_ID"]) == ("t_s1", "1")
     # Signed with sign's own key (next to the ledger), which qr's key does not verify.
-    keys = {n: load_key(tmp_db.parent / f"hermes-wait-{n}.key", create=False) for n in BOARDS}
+    keys = {n: load_key(tmp_db.parent / f"hermes-wait-{n}.key", create=n == "qr") for n in BOARDS}
     assert keys["sign"] is not None and keys["sign"] != keys["qr"]
     comment = str(call["argv"][6])
     assert verify_stop(comment, "t_s1", keys["sign"], datetime.now(UTC), timedelta(seconds=30))
-    if keys["qr"] is not None:
-        assert not verify_stop(comment, "t_s1", keys["qr"], datetime.now(UTC), timedelta(minutes=1))
+    assert keys["qr"] is not None
+    assert not verify_stop(comment, "t_s1", keys["qr"], datetime.now(UTC), timedelta(minutes=1))
 
     # sign: blocked, run ended, worker ended. qr: running, run open, worker alive.
     assert sign_worker.wait(timeout=10) == -signal.SIGTERM
