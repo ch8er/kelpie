@@ -1198,7 +1198,8 @@ Kelpie remembers for budgets), never from the span:
 Kelpie refuses to start when a token is not set, cannot be read, equals another token or
 the shared one, or (off loopback) is weak. A removed (or renamed) entry covers nothing: its
 stored spans stay as history while the board does not show their session or task, and are
-deleted once it does.
+deleted once it does. So renaming an entry drops that agent's stored spend (with budgets on,
+Kelpie remembers nearly every session's owner): rename between budget windows, or not at all.
 
 The shared `[traces] token_env` token keeps working and may still report for every
 session; with `[[traces.tokens]]` and no shared token, a request without a token gets 401.
