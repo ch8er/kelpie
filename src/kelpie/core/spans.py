@@ -165,8 +165,16 @@ class SpanStore(Protocol):
     def count(self) -> int: ...
 
     def discard(self, keys: Collection[SpanKey]) -> int:
-        """Delete these spans (spans a scoped ingest token was found not to own, #302).
-        Returns the number deleted."""
+        """Delete these spans (spans a scoped ingest token was found not to own, #302) and
+        decide again which tokens of their traces count. Returns the number deleted."""
+        ...
+
+    def spans_by_key(self, keys: Collection[SpanKey]) -> Sequence[Span]:
+        """The stored spans among ``keys``, as they are now (links filled in since)."""
+        ...
+
+    def spans_with_attribute(self, after: datetime, key: str) -> Sequence[Span]:
+        """Stored spans (last time at or after ``after``) whose attributes hold ``key``."""
         ...
 
     def inherit_links(self, trace_ids: Collection[str]) -> int:
@@ -452,12 +460,24 @@ class MemorySpanStore:
 
     def discard(self, keys: Collection[SpanKey]) -> int:
         with self._lock:
-            found = [k for k in keys if k in self._spans]
+            found = [k for k in set(keys) if k in self._spans]
             for key in found:
                 self._delete(key)
+            for trace_id in {k[0] for k in found} & set(self._traces):
+                self._recount(trace_id)
             if found:
                 self.epoch += 1
             return len(found)
+
+    def spans_by_key(self, keys: Collection[SpanKey]) -> Sequence[Span]:
+        with self._lock:
+            return [self._spans[k][0] for k in set(keys) if k in self._spans]
+
+    def spans_with_attribute(self, after: datetime, key: str) -> Sequence[Span]:
+        with self._lock:
+            return [
+                s for s, _ in self._spans.values() if key in s.attributes and last_at(s) >= after
+            ]
 
     def _delete(self, key: SpanKey) -> None:
         del self._spans[key]

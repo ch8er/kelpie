@@ -35,7 +35,7 @@ from kelpie.core.model import Span
 from kelpie.core.spans import SpanStore
 from kelpie.traces import otlp
 from kelpie.traces.auth import TokenCheck, TokenFile
-from kelpie.traces.scope import OUT_OF_SCOPE, ScopeGuard, stamp
+from kelpie.traces.scope import ScopeGuard, stamp
 from kelpie.traces.semconv import MappingOptions, map_spans
 
 log = logging.getLogger(__name__)
@@ -253,9 +253,8 @@ class TraceIngest:
             mapped = replace(mapped, spans=[rewrite(s) for s in mapped.spans])
         if sender:  # a scoped token: only its own sessions
             assert self.guard is not None  # __post_init__
-            kept = self.guard.ingest_filter(sender, mapped.spans, now)
-            if len(kept) < len(mapped.spans):
-                rejected[OUT_OF_SCOPE] += len(mapped.spans) - len(kept)
+            kept, refused = self.guard.ingest_filter(sender, mapped.spans, now)
+            rejected.update(refused)
             mapped = replace(mapped, spans=kept)
         else:  # no span of the shared token may claim a scoped token's name
             mapped = replace(mapped, spans=[stamp(s, None) for s in mapped.spans])

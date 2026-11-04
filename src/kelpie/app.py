@@ -1237,8 +1237,6 @@ def merged_snapshot(
                     spans=_board_tasks(merge_spans(stored, merged.spans), merged.tasks),
                     span_totals=totals,
                 )
-                if scopes is not None:
-                    merged = _in_scope(merged, scopes, spans, metrics)
         if resources is not None:
             try:
                 merged = replace(merged, resources=merged.resources + tuple(resources.read(now)))
@@ -1266,6 +1264,8 @@ def merged_snapshot(
         folded = merge_hook_spans(merged.spans)
         metrics.hook_spans_merged(folded.merged)
         merged = replace(merged, spans=folded.spans)
+        if scopes is not None and spans is not None:  # after folding: a fold moves sessions
+            merged = _in_scope(merged, scopes, spans, metrics)
         if offenders is not None:
             try:
                 remembered = spans.attribution(merged.now) if spans is not None else None
@@ -1337,10 +1337,16 @@ def _scoped_tokens(
 def _in_scope(
     snapshot: Snapshot, scopes: ScopeGuard, spans: SpanWindow, metrics: Metrics
 ) -> Snapshot:
-    """``snapshot`` without the spans scoped ingest tokens may not report; the totals are
-    read again when any were dropped (they were deleted from the store)."""
-    checked, dropped = scopes.check(snapshot)
-    if not dropped:
+    """``snapshot`` without the spans scoped ingest tokens may not report (#302); when any
+    were deleted, the totals are read again (budgets read usage after this, afresh)."""
+    try:
+        remembered = spans.attribution(snapshot.now)
+    except Exception as exc:
+        log.error("span store failed to read: %s", exc)
+        metrics.span_store_failed()
+        remembered = None
+    checked = scopes.check(snapshot, remembered)
+    if checked is snapshot:
         return checked
     try:
         return replace(checked, span_totals=spans.totals(snapshot.now))
@@ -2009,15 +2015,19 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
             "OTLP ingest on /v1/traces accepts spans without a token; set $%s",
             traces.token_env,
         )
-    guard = (
-        ScopeGuard(
-            {t.name: t.scope for t in traces.tokens},
-            discard=span_store.discard,
-            rejected=metrics.spans_rejected,
-        )
-        if scoped
-        else None
+    guard = ScopeGuard(
+        {t.name: t.scope for t in traces.tokens},
+        store=span_store,
+        rejected=metrics.spans_rejected,
     )
+    if scoped:
+        try:  # spans accepted before a restart are checked against the board again
+            restored = guard.restore(clock() - traces.retention, clock())
+        except Exception as exc:
+            log.error("cannot read the spans of [[traces.tokens]] to check them: %s", exc)
+        else:
+            if restored:
+                log.info("checking %d stored [[traces.tokens]] spans against the board", restored)
     ingest = TraceIngest(
         store=span_store,
         clock=clock,
@@ -2029,7 +2039,7 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
         max_concurrent=traces.max_concurrent_requests,
         max_age=traces.retention,
         scoped=scoped,
-        guard=guard,
+        guard=guard if scoped else None,
     )
     forwarder = None
     for f in traces.forward:
@@ -2051,6 +2061,7 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
     window = SpanWindow(
         span_store, traces.window, traces.totals_window, traces.max_snapshot_spans, metrics
     )
+    guard.on_discard = window.invalidate
     source = merged_snapshot(
         adapters,
         metrics,

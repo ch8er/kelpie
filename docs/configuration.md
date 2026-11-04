@@ -1171,19 +1171,30 @@ another agent's run). One table per token; none by default. Not used with `[hub]
 | `token_env` | required | variable name | The variable holding the token; with `token_file`, the variable name inside that file. Each entry needs its own, and not the shared `[traces] token_env`. |
 | `token_file` | none | path | An env file holding `<token_env>=<token>`, read again when it changes and rotated with `kelpie traces rotate-token --token <name>` (the same rules as `[traces] token_file`; several entries may share one file, each with its own line). |
 | `owners` | `[]` | owner ids | Sessions and tasks of these owners. |
-| `roles` | `[]` | role names | Sessions and tasks whose owner has one of these roles. |
-| `sessions` | `[]` | patterns | Session ids matching one of these `fnmatch` patterns (`hermes-run-*`, `dev-1-*`), also before the board shows the session. A pattern of only `*` and `?` is refused. |
+| `roles` | `[]` | role names | Sessions and tasks whose owner (else the task) has one of these roles. |
+| `sessions` | `[]` | patterns | Session ids matching one of these `fnmatch` patterns (`hermes-run-*`, `dev-1-*`), whoever the board says owns them: keep patterns specific. A pattern of only `*` and `?` is refused. With only `sessions`, a session the board does not show must match one. |
 | `boards` | `[]` | board names | Tasks on these boards (Hermes named boards), and sessions of those tasks. |
 
-At least one of `owners`, `roles`, `sessions` and `boards` must be set; a span is in scope
-when any of them covers it. Who a session or task belongs to comes from the board, never
-from the span. A span whose session (or, without one, its task) the board places outside
-the token's scope is rejected (the export gets a partial success) and counted in
-`kelpie_spans_rejected_total{reason="out_of_scope"}`, with a warning logged at most once a
-minute per token. A span the board does not show yet is accepted and checked again on every
-tick; once the board places it outside the scope it is dropped and deleted before any rule
-or budget sees it. Kelpie refuses to start when a token is not set, cannot be read, equals
-another token or the shared one, or (off loopback) is weak.
+At least one of `owners`, `roles`, `sessions` and `boards` must be set. Who a session or
+task belongs to comes from the board (for a session it no longer shows, from the owner
+Kelpie remembers for budgets), never from the span:
+
+- A span's session must be in scope; a task it names must be in scope too, unless it is the
+  task the board gives that session. A task other than the session's own is out of scope.
+- A span the board cannot place yet (a session too new to be on the board, or no session
+  and no task, which it may inherit from its parent later) is accepted and checked again on
+  every tick, read afresh from the span store, for up to a day; once the board places it
+  outside the scope it is deleted before rules, budgets and totals see it, and a restart
+  checks the stored ones again. A session the board does not know belongs to the first
+  token that reports it: other tokens' spans for it are out of scope.
+- Out-of-scope spans are rejected (the export gets a partial success) or deleted, counted in
+  `kelpie_spans_rejected_total{reason="out_of_scope"}`, with a warning logged at most once a
+  minute per token. At most 200,000 spans wait to be placed; more are refused
+  (`reason="scope_backlog"`).
+
+Kelpie refuses to start when a token is not set, cannot be read, equals another token or
+the shared one, or (off loopback) is weak. Removing an entry: its spans still waiting or in
+the snapshot window are deleted; with no entry left, stored spans stay as they are.
 
 The shared `[traces] token_env` token keeps working and may still report for every
 session; with `[[traces.tokens]]` and no shared token, a request without a token gets 401.

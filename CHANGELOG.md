@@ -62,13 +62,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 - Per-agent traces tokens (audit M1, #302): `[[traces.tokens]]` gives each agent's exporter
   a token of its own that may report spans only for its owners, roles, sessions (patterns)
-  or boards. Who a session belongs to comes from the board: a span for another agent's
-  session is rejected and counted (`kelpie_spans_rejected_total{reason="out_of_scope"}`),
-  and one the board could not place yet is checked again every tick and deleted once it
-  falls outside the scope, so an agent can no longer make rule 10 stop another agent's run
-  with forged spans. `kelpie traces rotate-token --token <name>` rotates one of them. The
-  shared `[traces] token_env` keeps working unchanged; `kelpie doctor` warns ("traces tokens
-  per agent") while a rule is in `act` and the shared token (or no token) still reports for
+  or boards. Who a session or task belongs to comes from the board: a span for another
+  agent's session or task is rejected and counted
+  (`kelpie_spans_rejected_total{reason="out_of_scope"}`); one the board cannot place yet is
+  checked again every tick against the span store and deleted once it falls outside the
+  scope, and a session the board does not know belongs to the first token that reports it.
+  So an agent with its own token can no longer make rule 10 stop another agent's run with
+  forged spans. `kelpie traces rotate-token --token <name>` rotates one of them. The shared
+  `[traces] token_env` keeps working unchanged; `kelpie doctor` warns ("traces tokens per
+  agent") while a rule is in `act` and the shared token (or no token) still reports for
   every session. Migration: [docs/security.md](docs/security.md#per-agent-traces-tokens).
 - One acting Kelpie per board is enforced: `kelpie serve` with `dry_run` off and a rule in
   `act` whose actions an adapter carries out (not one that only alerts or cancels CI

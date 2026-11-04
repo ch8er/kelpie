@@ -78,7 +78,7 @@ def setup(
     shared: str | None = None, scopes: dict[str, TokenScope] = SCOPES
 ) -> tuple[TraceIngest, MemorySpanStore, Observer, ScopeGuard]:
     store, observer = MemorySpanStore(), Observer()
-    guard = ScopeGuard(scopes, discard=store.discard, rejected=observer.spans_rejected)
+    guard = ScopeGuard(scopes, store=store, rejected=observer.spans_rejected)
     guard.index.update(board())
     tokens = {"dev-1": T1, "dev-2": T2}
     ingest = TraceIngest(
@@ -213,8 +213,7 @@ def test_guard_drops_provisional_spans_once_the_board_places_them_elsewhere() ->
         sessions=(*later.sessions, Session("S-103", "T-103", "agent-dev-1", NOW)),
         spans=tuple(stored(store)),
     )
-    checked, dropped = guard.check(later)
-    assert dropped == 1
+    checked = guard.check(later)
     assert [s.session_id for s in checked.spans] == ["S-102"]
     assert [s.session_id for s in stored(store)] == ["S-102"]  # deleted from the store
     assert observer.rejected == Counter({OUT_OF_SCOPE: 1})
@@ -224,8 +223,8 @@ def test_guard_leaves_shared_and_hook_spans_alone_and_drops_unknown_tokens() -> 
     guard = ScopeGuard(SCOPES)
     plain = Span("t", "a", "x", SpanKind.TOOL, NOW, session_id="S-101")
     foreign = replace(plain, span_id="b", attributes={TOKEN_ATTRIBUTE: "gone"})
-    checked, dropped = guard.check(replace(board(), spans=(plain, foreign)))
-    assert dropped == 1 and [span_key(s) for s in checked.spans] == [("t", "a")]
+    checked = guard.check(replace(board(), spans=(plain, foreign)))
+    assert [span_key(s) for s in checked.spans] == [("t", "a")]
 
 
 def test_index_keeps_sessions_the_board_dropped_for_a_day() -> None:
@@ -233,10 +232,9 @@ def test_index_keeps_sessions_the_board_dropped_for_a_day() -> None:
     index.update(board())
     gone = Snapshot(now=NOW + timedelta(hours=2))
     index.update(gone)
-    span = Span("t", "a", "x", SpanKind.TOOL, NOW, session_id="S-101")
-    assert index.place(span) == Place("agent-dev-1", "developer", "main")
+    assert index.session("S-101") == (Place("agent-dev-1", "developer", "main"), "T-101")
     index.update(Snapshot(now=NOW + timedelta(hours=25)))
-    assert index.place(span) is None
+    assert index.session("S-101") is None
 
 
 # --- config --------------------------------------------------------------------------------
@@ -318,7 +316,7 @@ def test_m1_forged_session_fixture() -> None:
         )
     secrets = {name: f"{name}-secret-0123456789abcdef" for name in scopes}
     store, observer = MemorySpanStore(), Observer()
-    guard = ScopeGuard(scopes, discard=store.discard, rejected=observer.spans_rejected)
+    guard = ScopeGuard(scopes, store=store, rejected=observer.spans_rejected)
     guard.index.update(snapshot)
     ingest = TraceIngest(
         store,
@@ -341,7 +339,7 @@ def test_m1_forged_session_fixture() -> None:
     assert dict(accepted) == fixture["expected"]["accepted"]
     assert dict(observer.rejected) == fixture["expected"]["rejected"]
 
-    board_, _ = guard.check(replace(snapshot, spans=tuple(stored(store))))
+    board_ = guard.check(replace(snapshot, spans=tuple(stored(store))))
     rule = REGISTRY["loop_breaker"]({})
     stops = {a.params["session_id"] for a in rule.evaluate(board_) if a.kind is ActionKind.STOP}
     assert set(fixture["expected"]["stopped_sessions"]) <= stops
@@ -429,7 +427,7 @@ def test_snapshot_drops_out_of_scope_spans(tmp_path: Path) -> None:
 
     store = MemorySpanStore()
     metrics = Metrics()
-    guard = ScopeGuard(SCOPES, discard=store.discard, rejected=metrics.spans_rejected)
+    guard = ScopeGuard(SCOPES, store=store, rejected=metrics.spans_rejected)
     metrics.set_traces(True)
     ingest = TraceIngest(store, lambda: NOW, scoped=[ScopedToken("dev-2", T2)], guard=guard)
     post(ingest, [tool(1, "S-101", "T-101")], T2)  # the board is not read yet: provisional
@@ -498,3 +496,144 @@ def test_store_discard(tmp_path: Path, kind: str) -> None:
     assert store.discard([]) == 0
     if kind == "sqlite":
         store.close()
+
+
+# --- bypasses closed (first review of #340) ------------------------------------------------
+
+
+def later_board(*extra: tuple[str, str, str]) -> Snapshot:
+    """The board, plus (session, task, owner) runs that started since."""
+    b = board()
+    return replace(
+        b,
+        tasks=(*b.tasks, *(Task(t, "x", "in_progress", NOW, owner_id=o) for _, t, o in extra)),  # type: ignore[arg-type]
+        sessions=(*b.sessions, *(Session(s, t, o, NOW) for s, t, o in extra)),
+    )
+
+
+def test_own_session_with_another_agents_task_is_rejected() -> None:
+    ingest, store, observer, _ = setup()
+    post(ingest, [tool(1, "S-101", "T-102")], T1)  # its own session, the victim's task
+    assert stored(store) == [] and observer.rejected[OUT_OF_SCOPE] == 1
+
+
+def test_pending_spans_are_checked_across_the_store_not_only_the_window() -> None:
+    ingest, store, observer, guard = setup()
+    old = replace(tool(1, "S-103", None), start=NOW - timedelta(hours=2))
+    post(ingest, [old], T2)  # unplaced: accepted, pending; outside any 30m window
+    assert len(stored(store)) == 1 and guard.pending() == 1
+    guard.check(later_board(("S-103", "T-103", "agent-dev-1")))  # no spans in the snapshot
+    assert stored(store) == [] and guard.pending() == 0
+    assert observer.rejected == Counter({OUT_OF_SCOPE: 1})
+
+
+def test_pending_spans_in_scope_settle() -> None:
+    ingest, store, _, guard = setup()
+    post(ingest, [tool(1, "S-104", None)], T2)
+    guard.check(later_board(("S-104", "T-104", "agent-dev-2")))
+    assert len(stored(store)) == 1 and guard.pending() == 0
+
+
+def test_restart_restores_pending_spans_and_bindings() -> None:
+    ingest, store, observer, _ = setup()
+    post(ingest, [tool(1, "S-103", None)], T2)
+    fresh = ScopeGuard(SCOPES, store=store, rejected=observer.spans_rejected)  # a restart
+    assert fresh.restore(NOW - timedelta(days=7), NOW) == 1
+    assert fresh.bound("S-103") == "dev-2"
+    fresh.check(later_board(("S-103", "T-103", "agent-dev-1")))
+    assert stored(store) == []
+
+
+def test_remembered_owner_places_a_session_the_board_dropped() -> None:
+    from kelpie.core.spans import Attribution
+
+    ingest, store, observer, guard = setup()
+    guard.index.update(
+        Snapshot(now=NOW + timedelta(hours=25)),
+        Attribution(owners={"S-102": "agent-dev-2"}, session_tasks={"S-102": "T-102"}),
+    )
+    post(ingest, [tool(1, "S-102", None)], T1)
+    assert stored(store) == [] and observer.rejected[OUT_OF_SCOPE] == 1
+
+
+def test_an_unplaced_session_is_bound_to_its_first_token() -> None:
+    ingest, store, observer, _ = setup()
+    post(ingest, [tool(1, "S-900", None)], T2)
+    post(ingest, [tool(2, "S-900", None)], T1)
+    assert [s.span_id for s in stored(store)] == [sid(1)]
+    assert observer.rejected[OUT_OF_SCOPE] == 1
+
+
+def test_sessions_only_scope_needs_a_matching_pattern_while_unplaced() -> None:
+    scopes = {**SCOPES, "dev-2": TokenScope("dev-2", sessions=("new-2-*",))}
+    ingest, store, observer, _ = setup(scopes=scopes)
+    post(ingest, [tool(1, "new-2-a", None), tool(2, "other", None)], T2)
+    assert [s.span_id for s in stored(store)] == [sid(1)]
+    assert observer.rejected[OUT_OF_SCOPE] == 1
+
+
+def test_children_that_inherit_a_forged_session_go_with_it() -> None:
+    ingest, store, _, guard = setup()
+    parent = tool(1, "S-103", None)
+    child = tool(2, None, None, parent=None)
+    child.parent = sid(1)
+    post(ingest, [parent, child], T2)
+    assert {s.session_id for s in stored(store)} == {"S-103"}  # the child inherited it
+    guard.check(later_board(("S-103", "T-103", "agent-dev-1")))
+    assert stored(store) == []
+
+
+def test_a_span_folded_into_another_session_is_deleted() -> None:
+    ingest, store, _, guard = setup()
+    post(ingest, [tool(1, "S-102", "T-102")], T2)  # in scope as sent
+    (span,) = stored(store)
+    folded = replace(span, session_id="S-101", task_id="T-101")  # a hook call's session
+    checked = guard.check(replace(board(), spans=(folded,)))
+    assert checked.spans == () and stored(store) == []
+
+
+def test_hermes_task_found_by_its_id_on_its_board() -> None:
+    b = board()
+    hermes = Task("qr:t_1a", "x", "in_progress", NOW, owner_id="agent-dev-2", board="qr")  # type: ignore[arg-type]
+    b = replace(b, tasks=(*b.tasks, hermes))
+    index = ScopeIndex()
+    index.update(b)
+    assert index.task("t_1a") == (Place("agent-dev-2", "developer-b", "qr"), "qr:t_1a")
+    ingest, store, observer, guard = setup()
+    guard.index.update(b)
+    post(ingest, [tool(1, None, "t_1a")], T1)
+    assert stored(store) == [] and observer.rejected[OUT_OF_SCOPE] == 1
+
+
+def test_role_falls_back_to_the_tasks_role() -> None:
+    b = replace(
+        board(),
+        owners=(),
+        tasks=(Task("T-201", "x", "in_progress", NOW, owner_id="agent-x", role="developer-b"),),  # type: ignore[arg-type]
+        sessions=(Session("S-201", "T-201", "agent-x", NOW),),
+    )
+    index = ScopeIndex()
+    index.update(b)
+    assert index.session("S-201") == (Place("agent-x", "developer-b", None), "T-201")
+
+
+def test_backlog_of_unplaced_spans_is_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
+    import kelpie.traces.scope as scope
+
+    monkeypatch.setattr(scope, "MAX_PENDING", 1)
+    ingest, store, observer, _ = setup()
+    post(ingest, [tool(1, "S-901", None), tool(2, "S-902", None)], T2)
+    assert len(stored(store)) == 1 and observer.rejected[scope.SCOPE_BACKLOG] == 1
+
+
+def test_window_reads_totals_again_after_a_discard() -> None:
+    from kelpie.traces.store import SpanWindow
+
+    store = MemorySpanStore()
+    window = SpanWindow(store, timedelta(minutes=30), timedelta(hours=24), 1000)
+    store.append_spans([Span("t", "a", "x", SpanKind.TOOL, NOW, session_id="S-1")], NOW)
+    assert len(window.totals(NOW)) == 1
+    store.discard([("t", "a")])
+    assert len(window.totals(NOW)) == 1  # cached for a minute
+    window.invalidate()
+    assert window.totals(NOW) == ()

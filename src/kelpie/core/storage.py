@@ -1065,11 +1065,41 @@ class SqliteSpanStore:
         return deleted
 
     def discard(self, keys: Collection[SpanKey]) -> int:
-        """Delete these spans (out of a scoped ingest token's scope, #302)."""
+        """Delete these spans (out of a scoped ingest token's scope, #302) in short batches,
+        then decide again which tokens of their traces count."""
+        keys = sorted(set(keys))
         deleted = 0
-        for key in keys:
-            deleted += self._delete("DELETE FROM spans WHERE trace_id = ? AND span_id = ?", key)
+        for i in range(0, len(keys), self._batch):
+            chunk = keys[i : i + self._batch]
+            where = " OR ".join("(trace_id = ? AND span_id = ?)" for _ in chunk)
+            args = tuple(v for key in chunk for v in key)
+            deleted += self._delete(f"DELETE FROM spans WHERE {where}", args)
+        if deleted:
+            self._decide(k[0] for k in keys)
         return deleted
+
+    def spans_by_key(self, keys: Collection[SpanKey]) -> Sequence[Span]:
+        """The stored spans among ``keys``, as they are now (links filled in since)."""
+        keys = sorted(set(keys))
+        found: list[Span] = []
+        for i in range(0, len(keys), self._batch):
+            chunk = keys[i : i + self._batch]
+            where = " OR ".join("(trace_id = ? AND span_id = ?)" for _ in chunk)
+            args = tuple(v for key in chunk for v in key)
+            found += [
+                _span(r)
+                for r in self._read(f"SELECT {_SPAN_COLUMNS} FROM spans WHERE {where}", args)
+            ]
+        return found
+
+    def spans_with_attribute(self, after: datetime, key: str) -> Sequence[Span]:
+        """Stored spans (last time at or after ``after``) whose attributes hold ``key``."""
+        sql = (
+            f"SELECT {_SPAN_COLUMNS} FROM spans WHERE last_at >= ? AND attributes LIKE ?"
+            " AND json_valid(attributes) AND json_extract(attributes, ?) IS NOT NULL"
+        )
+        pattern = "%" + json.dumps(key) + "%"
+        return [_span(r) for r in self._read(sql, (_ts(after), pattern, f'$."{key}"'))]
 
     def _delete(self, sql: str, args: tuple[object, ...]) -> int:
         with self._lock:
