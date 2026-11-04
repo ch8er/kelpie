@@ -97,6 +97,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 - What Kelpie can write to GitHub, with the token each write needs:
   [docs/security.md](docs/security.md#what-kelpie-can-write-to-github).
 
+### Fixed
+
+- `kelpie selftest stop --adapter hermes` works with `[[adapters.hermes.boards]]`: it failed
+  with `'HermesBoards' object has no attribute 'cli_environ'` before rule 10 could stop the
+  run, so rule 10's act gate could not be met on a multi-board farm. With boards configured
+  the self-test now stops the run through the boards adapter, routed by the board prefix of
+  the run's id, as on the farm; it no longer reads the user's Hermes home's `state.db`. Rule
+  10's real stop on a multi-board config was not affected: a test now checks it end to end
+  on two boards (the block runs with that board's `HERMES_KANBAN_DB` and key, the worker
+  ends, the other board is untouched), on Linux and macOS
+  ([#333](https://github.com/ch8er/kelpie/issues/333)).
+
 ## [0.1.0a1] - 2026-11-03
 
 First public pre-release, an alpha: interfaces and configuration keys may still

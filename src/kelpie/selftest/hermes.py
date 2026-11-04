@@ -15,7 +15,9 @@ Hermes home, boards, profiles and gateway are never read or written. In it:
 3. rule 10 (``loop_breaker``, with the thresholds of the user's config) runs in ``act``
    against that board and spool, through the Hermes adapter built from the user's
    ``[adapters.hermes]`` (``cli``, ``cli_timeout``, ``end_worker``, ``worker_grace``,
-   ``author``), until it stops the run;
+   ``author``), until it stops the run; with ``[[adapters.hermes.boards]]`` the throwaway
+   board is the only board of a boards adapter, so the stop is routed by the board prefix
+   of the run's id (``kelpie-selftest:hermes-run-1``) as on a multi-board farm;
 4. checks: the task is blocked for a human, the block is signed by Kelpie, the run's worker
    processes are gone and the model gets no more calls;
 5. cleanup: every process still running with that ``HERMES_HOME`` (or working in the
@@ -45,11 +47,12 @@ from typing import Any
 
 from kelpie.adapters.hermes import adapter as hermes_adapter
 from kelpie.adapters.hermes.adapter import HermesAdapter
+from kelpie.adapters.hermes.boards import HermesBoards
 from kelpie.adapters.hermes.stop import ENV_EXACT, ENV_PREFIXES
 from kelpie.adapters.hermes.worker import PROC, Proc, _same, host_table, run_worker
 from kelpie.adapters.hermes.worker import end as end_processes
 from kelpie.alerts.telegram import format_message
-from kelpie.app import ConfigError, HermesSettings, Settings, load_rules
+from kelpie.app import ConfigError, HermesBoardSettings, HermesSettings, Settings, load_rules
 from kelpie.core.actions import ActionKind
 from kelpie.core.alerts import AlertEvent, format_age
 from kelpie.core.config import EngineConfig, Mode
@@ -383,14 +386,15 @@ def _steps(
     key = tmp / "wait.key"  # signs this stop only; tmp is private (mkdtemp: 0700)
     key.write_bytes(secrets.token_bytes(32))
     key.chmod(0o600)
-    adapter = replace(
-        hermes,
-        db_path=db,
-        spool=spool,
-        git_state=False,
-        enabled=True,
-        wait_key=key,
-    ).build()
+    # The throwaway board in the shape of the user's config: with [[adapters.hermes.boards]]
+    # the stop goes through the boards adapter and is routed by the board prefix of the run's
+    # id, as on the farm. Never the user's Hermes home (state_home) nor their boards.
+    throwaway = replace(hermes, spool=spool, git_state=False, enabled=True, state_home=None)
+    if hermes.boards:
+        throwaway = replace(throwaway, boards=(HermesBoardSettings(BOARD, db, key),))
+    else:
+        throwaway = replace(throwaway, db_path=db, wait_key=key)
+    adapter = throwaway.build()
     adapter.cli_environ = cli.env  # the block runs against the throwaway home too
     alerts = CaptureAlerts()
     engine = Engine(
@@ -419,14 +423,15 @@ def _steps(
     report.ok(
         "rule 10 stopped the run",
         f"after {_calls(spool, rid)} identical tool calls ({thresholds}), "
-        f"{stopped_at - started:.0f}s after the agent started: {stop.detail}",
+        f"{stopped_at - started:.0f}s after the agent started{_routed(stop.action.params)}: "
+        f"{stop.detail}",
     )
     for event in alerts.events:
         report.note("the alert, as Telegram would show it:")
         for line in format_message(event).splitlines():
             report.note(f"| {line}")
 
-    _check_board(report, db, task, adapter)
+    _check_board(report, db, task, hermes.author)
     _check_processes(report, recorded, hermes.end_worker)
     _check_quiet(report, llm, stopped_at)
 
@@ -489,7 +494,7 @@ def _rule(settings: Settings) -> tuple[Rule, str]:  # raises ConfigError
     return rule, f"limit {calls}{within}"
 
 
-def _snapshot(adapter: HermesAdapter) -> Snapshot:
+def _snapshot(adapter: HermesAdapter | HermesBoards) -> Snapshot:
     return adapter.snapshot(datetime.now(UTC))
 
 
@@ -503,7 +508,14 @@ def _calls(spool: Path, rid: int) -> int:
     return n
 
 
-def _check_board(report: Report, db: Path, task: str, adapter: HermesAdapter) -> None:
+def _routed(params: Mapping[str, Any]) -> str:
+    """How the stop reached the board, when it was routed by a board prefix."""
+    session = str(params.get("session_id") or "")
+    board, sep, _ = session.partition(":")
+    return f" (boards config: {session}, routed to board {board})" if sep else ""
+
+
+def _check_board(report: Report, db: Path, task: str, author: str) -> None:
     row = _read(db, "SELECT status, block_kind FROM tasks WHERE id = ?", (task,))
     if not row or (row[0]["status"], row[0]["block_kind"]) != ("blocked", "needs_input"):
         state = dict(row[0]) if row else "missing"
@@ -516,12 +528,12 @@ def _check_board(report: Report, db: Path, task: str, adapter: HermesAdapter) ->
             db, "SELECT author FROM task_comments WHERE task_id = ? ORDER BY id", (task,)
         )
     ]
-    if authors and all(a == adapter.author for a in authors):
-        report.ok("block signed by Kelpie", f"comment author {adapter.author!r}")
+    if authors and all(a == author for a in authors):
+        report.ok("block signed by Kelpie", f"comment author {author!r}")
     else:
         report.fail(
             "block signed by Kelpie",
-            f"comment authors {authors} (expected {adapter.author!r})\n"
+            f"comment authors {authors} (expected {author!r})\n"
             "this Hermes does not sign with $HERMES_PROFILE_NAME; tell the Kelpie maintainers",
         )
 

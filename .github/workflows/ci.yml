@@ -115,7 +115,8 @@ jobs:
 
   # macOS: the libproc process table that ends a stopped Hermes run's worker there, against
   # real processes, and its fingerprint against psutil's (what Hermes records on macOS); and
-  # kelpie selftest stop end to end against a fake Hermes.
+  # rule 10's stop on a two-board config; and kelpie selftest stop end to end against a fake
+  # Hermes, single-board and multi-board.
   macos:
     needs: changes
     if: needs.changes.outputs.code == 'true'
@@ -132,6 +133,7 @@ jobs:
           tests/adapters/test_hermes_proctable.py
           tests/adapters/test_hermes_worker.py
           tests/adapters/test_hermes_stop.py
+          tests/adapters/test_hermes_boards_stop.py
           tests/selftest
 
   ci-ok:

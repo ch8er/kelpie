@@ -240,6 +240,11 @@ started for it, a runaway left by a failed step; never `hermes gateway stop`, wh
 manager could route to a real gateway), deletes the directory, and exits 0 only if every step
 passed. SIGTERM to the self-test cleans up the same way.
 
+With `[[adapters.hermes.boards]]` the self-test keeps that shape: the throwaway board is the
+board of a boards adapter, so rule 10's stop is routed by the board prefix of the run's id
+(`kelpie-selftest:hermes-run-1`) and signed with that board's own key, as on your farm. Your
+boards, their databases and their keys are not opened.
+
 `kelpie doctor` shows the same in one line, without running anything: "stop ends workers: via
 Linux /proc" (or "via macOS libproc"), or a WARN with the reason when this host cannot.
 
