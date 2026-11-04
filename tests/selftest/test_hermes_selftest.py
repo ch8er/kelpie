@@ -17,8 +17,9 @@ from pathlib import Path
 
 import pytest
 
+from kelpie.adapters.hermes.adapter import HermesAdapter
 from kelpie.adapters.hermes.worker import host_table
-from kelpie.app import HermesSettings, Settings
+from kelpie.app import HermesBoardSettings, HermesSettings, Settings
 from kelpie.cli import main
 from kelpie.core.config import EngineConfig
 from kelpie.selftest import hermes as selftest
@@ -87,6 +88,65 @@ def test_a_stop_passes_end_to_end(fake: Path, tmp_path: Path) -> None:
     assert block["HERMES_HOME"].startswith(str(tmp_path / "kelpie-selftest-"))
     assert block["HOME"].startswith(str(tmp_path / "kelpie-selftest-"))
     assert block["HERMES_PROFILE_NAME"] == "kelpie"
+
+
+def test_a_multi_board_config_passes_through_the_boards_adapter(fake: Path, tmp_path: Path) -> None:
+    """Issue 333: with [[adapters.hermes.boards]] the self-test stops the run through the
+    boards adapter, routed by the board prefix of the run's id, and never opens the user's
+    boards."""
+    farm = tmp_path / "farm"
+    boards = tuple(
+        HermesBoardSettings(name, farm / name / "kanban.db", farm / f"{name}.key")
+        for name in ("qr", "sign")
+    )
+    code, lines = run(fake, boards=boards)
+    assert code == 0, "\n".join(lines)
+    assert not any(line.startswith("FAIL") for line in lines)
+    stopped = next(line for line in lines if "rule 10 stopped" in line)
+    assert "routed to board kelpie-selftest" in stopped
+    assert "kelpie-selftest:hermes-run-1" in stopped and "after SIGTERM" in stopped
+    assert any(line.startswith("PASS  worker ended") for line in lines)
+    assert lines[-1] == "selftest stop: passed"
+    assert not farm.exists()  # the user's boards and keys: never opened nor created
+    block = json.loads((fake.parent / "block-env.json").read_text())
+    assert block["HERMES_HOME"].startswith(str(tmp_path / "kelpie-selftest-"))
+    assert block["HERMES_KANBAN_DB"].startswith(str(tmp_path / "kelpie-selftest-"))
+    assert block["HERMES_KANBAN_DB"].endswith("/kanban/boards/kelpie-selftest/kanban.db")
+    assert leftovers(tmp_path) == []
+
+
+@pytest.mark.parametrize("multi", [False, True])
+def test_the_users_hermes_home_state_is_never_read(
+    fake: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, multi: bool
+) -> None:
+    """The self-test reads no state.db of the user's Hermes home (``state_home``)."""
+    reads: list[object] = []
+    monkeypatch.setattr(HermesAdapter, "_state", lambda self, *a, **kw: reads.append(a))
+    home = tmp_path / "users-hermes"
+    boards = (HermesBoardSettings("qr", tmp_path / "qr.db"),) if multi else ()
+    code, lines = run(fake, state_home=home, boards=boards)
+    assert code == 0, "\n".join(lines)
+    assert reads == []
+
+
+def test_the_cli_runs_it_with_a_multi_board_config(
+    fake: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The farm's path: a config file with two boards (keys defaulted next to the ledger)."""
+    config = tmp_path / "kelpie.toml"
+    farm = tmp_path / "farm"
+    config.write_text(
+        f'[storage]\npath = "{tmp_path / "kelpie.db"}"\n'
+        f'[adapters.hermes]\ncli = "{fake}"\n'
+        f'[[adapters.hermes.boards]]\nname = "qr"\ndb_path = "{farm / "qr.db"}"\n'
+        f'[[adapters.hermes.boards]]\nname = "sign"\ndb_path = "{farm / "sign.db"}"\n'
+    )
+    assert main(["--config", str(config), "selftest", "stop", "--adapter", "hermes"]) == 0
+    out = capsys.readouterr().out
+    assert out.rstrip().endswith("selftest stop: passed"), out
+    assert "routed to board kelpie-selftest" in out
+    assert not farm.exists()
+    assert not list(tmp_path.glob("hermes-wait*.key"))  # the user's keys are not created
 
 
 def test_a_worker_ignoring_sigterm_is_killed(fake: Path) -> None:

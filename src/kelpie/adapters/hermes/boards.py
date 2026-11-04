@@ -27,7 +27,7 @@ tasks and runs to a board. :class:`HermesBoards` reads each board with its own
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -89,6 +89,18 @@ class HermesBoards:
     def clock(self, clock: Callable[[], datetime]) -> None:
         for b in self.boards:
             b.clock = clock
+
+    @property
+    def cli_environ(self) -> Mapping[str, str] | None:
+        """The environment every board's Hermes commands start from (the self-test's
+        throwaway home); ``None``: Kelpie's own, allow-listed. Only the boards run the CLI
+        (``host`` and ``state`` only read), so only they get it."""
+        return self.boards[0].cli_environ
+
+    @cli_environ.setter
+    def cli_environ(self, environ: Mapping[str, str] | None) -> None:
+        for b in self.boards:
+            b.cli_environ = environ
 
     def act_locks(self) -> tuple[ActLock, ...]:
         """Every board's act lock (audit M7)."""

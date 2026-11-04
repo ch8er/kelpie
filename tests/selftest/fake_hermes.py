@@ -13,7 +13,8 @@ takes it), ``author`` (blocks are signed ``default``, as a Hermes that ignores
 ``HERMES_PROFILE_NAME``), ``deaf`` (the worker and its tool command ignore SIGTERM),
 ``silent`` (no tool call reaches the spool: rule 10 never fires), ``noenv`` (the submitter
 and the tool command show no ``HERMES_HOME``). Several words combine. ``kanban block`` writes
-the ``HERMES_HOME``, ``HOME`` and ``HERMES_PROFILE_NAME`` it got to ``block-env.json``.
+the ``HERMES_HOME``, ``HOME``, ``HERMES_PROFILE_NAME`` and ``HERMES_KANBAN_DB`` it got to
+``block-env.json``.
 """
 
 from __future__ import annotations
@@ -204,7 +205,8 @@ def main(argv: list[str]) -> int:
         if verb == "dispatch":
             return dispatch(board)
     if argv[:2] == ["kanban", "block"]:
-        seen = {k: os.environ.get(k) for k in ("HERMES_HOME", "HOME", "HERMES_PROFILE_NAME")}
+        names = ("HERMES_HOME", "HOME", "HERMES_PROFILE_NAME", "HERMES_KANBAN_DB")
+        seen = {k: os.environ.get(k) for k in names}
         (Path(BIN_DIR) / "block-env.json").write_text(json.dumps(seen))
         if "author" in mode():
             os.environ["HERMES_PROFILE_NAME"] = "default"
