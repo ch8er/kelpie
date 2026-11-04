@@ -46,7 +46,7 @@ from kelpie.alerts.buttons import (
 )
 from kelpie.alerts.config import AlertSettings, load_alerts
 from kelpie.alerts.delivery import Delivery
-from kelpie.configpaths import read_config
+from kelpie.configpaths import expand, read_config
 from kelpie.connectors.cost_reports import CostReportsSettings, load_cost_reports
 from kelpie.connectors.github import (
     BlockConditionPattern,
@@ -355,7 +355,7 @@ def load_settings(path: Path | None) -> Settings:
         raise ConfigError("[storage] must be a table")
     if extra := set(storage) - {"path"}:
         raise ConfigError(f"unknown [storage] keys: {sorted(extra)}")
-    raw_db = os.environ.get("KELPIE_DB") or storage.get("path", str(DEFAULT_DB))
+    raw_db = expand(os.environ.get("KELPIE_DB") or "") or storage.get("path", str(DEFAULT_DB))
     if not isinstance(raw_db, str) or not raw_db.strip():
         raise ConfigError("storage path must be a non-empty string")
     db_path = None if raw_db == ":memory:" else Path(raw_db)

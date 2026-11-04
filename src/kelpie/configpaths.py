@@ -3,8 +3,9 @@ config file is read, before any section is loaded, so ``[storage] path``, ``[rep
 the boards' ``db_path`` and the rest all behave the same (issue 334).
 
 Only ``~`` and ``~user`` at the start of a value are expanded (as the shell does), never
-``$VARS``: a value is data, not a command line. A value that is not a string (``false`` to
-turn a path off) is left as it is, for its section's loader to accept or refuse.
+``$VARS``: a value is data, not a command line. ``$KELPIE_DB``, which replaces ``[storage]
+path``, is expanded the same way. A value that is not a string (``false`` to turn a path
+off) is left as it is, for its section's loader to accept or refuse.
 
 ``PATH_KEYS`` lists every such key. A key is a dotted path into the file's tables; a part
 ending in ``[]`` is a list (an array of tables, or of strings for the last part). A new
@@ -69,8 +70,10 @@ class ConfiguredPath:
 
 
 def expand(value: str) -> str:
-    """``~`` or ``~user`` at the start expanded; nothing else (no ``$VARS``)."""
-    return os.path.expanduser(value) if value.startswith("~") else value
+    """``~`` or ``~user`` at the start (after leading blanks, which loaders strip) expanded;
+    nothing else (no ``$VARS``)."""
+    bare = value.lstrip()
+    return os.path.expanduser(bare) if bare.startswith("~") else value
 
 
 def read_config(path: Path) -> dict[str, Any]:
@@ -84,9 +87,18 @@ def read_config(path: Path) -> dict[str, Any]:
 
 
 def configured_paths(data: Mapping[str, Any]) -> list[ConfiguredPath]:
-    """Every path value the config sets (strings only), in ``PATH_KEYS`` order."""
+    """Every path value the config sets (strings only), in ``PATH_KEYS`` order; none of an
+    adapter whose section says ``enabled = false``."""
     found: list[ConfiguredPath] = []
+    adapters = data.get("adapters")
+    off = {
+        f"adapters.{name}."
+        for name, section in (adapters.items() if isinstance(adapters, Mapping) else ())
+        if isinstance(section, Mapping) and section.get("enabled") is False
+    }
     for key, kind in PATH_KEYS.items():
+        if any(key.startswith(prefix) for prefix in off):
+            continue
         for where, value in _values(data, key.split("."), ""):
             if isinstance(value, str):
                 found.append(ConfiguredPath(where, value, kind))
@@ -101,6 +113,9 @@ def _expand_at(node: object, parts: list[str]) -> None:
         return
     value = node[name]
     if is_list:
+        if isinstance(value, str) and not rest:  # one pattern for a list of them
+            node[name] = expand(value)
+            return
         if not isinstance(value, list):
             return
         if rest:
@@ -127,6 +142,9 @@ def _values(node: object, parts: list[str], at: str) -> Iterator[tuple[str, obje
             yield from _values(value, rest, here)
         else:
             yield here, value
+        return
+    if isinstance(value, str) and not rest:
+        yield f"{here}[1]", value
         return
     if not isinstance(value, list):
         return

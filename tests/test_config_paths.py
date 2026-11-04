@@ -244,3 +244,32 @@ def test_non_path_keys_and_false_are_left_alone(home: Path, tmp_path: Path) -> N
     data = read_config(config)
     assert data["adapters"]["hermes"] == {"spool": False, "author": "~kelpie"}
     assert data["storage"]["path"] == ":memory:"
+
+
+def test_one_pattern_for_a_list_and_leading_blanks(home: Path, tmp_path: Path) -> None:
+    config = tmp_path / "kelpie.toml"
+    config.write_text(
+        '[instructions]\n[[instructions.files]]\npaths = "~/AGENTS.md"\n'
+        '[report]\ndir = "  ~/reports"\n'
+    )
+    data = read_config(config)
+    assert data["instructions"]["files"][0]["paths"] == f"{home}/AGENTS.md"
+    assert data["report"]["dir"] == f"{home}/reports"
+    keys = [p.key for p in configured_paths(data)]
+    assert keys == ["report.dir", "instructions.files[1].paths[1]"]
+
+
+def test_a_disabled_adapters_paths_are_not_listed(home: Path, tmp_path: Path) -> None:
+    config = tmp_path / "kelpie.toml"
+    config.write_text(
+        '[adapters.claude_code]\nenabled = false\ntasks_dir = "~/gone"\n'
+        '[adapters.openclaw]\nstate_dir = "~/.openclaw"\n'
+    )
+    assert [p.key for p in configured_paths(read_config(config))] == ["adapters.openclaw.state_dir"]
+
+
+def test_kelpie_db_is_expanded_too(
+    home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("KELPIE_DB", "~/kelpie/env.db")
+    assert load_settings(None).db_path == home / "kelpie" / "env.db"

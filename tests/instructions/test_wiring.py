@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -41,7 +42,7 @@ def test_defaults_of_the_configured_platforms_after_the_configured_files(
     )
     w = instruction_watch(s, build_adapters(s))
     assert w is not None
-    assert w.sources[0].paths == ("~/farm/dev/CLAUDE.md",)
+    assert w.sources[0].paths == (os.path.expanduser("~/farm/dev/CLAUDE.md"),)  # #334
     platforms = {src.platform for src in w.sources[1:]}
     assert platforms == {"hermes", "claude-code", "openclaw"}
     hermes_roles = [src for src in w.sources if src.platform == "hermes" and src.role_of]

@@ -112,7 +112,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
   `[storage] path` kept a literal `~` (`kelpie serve` stopped with `cannot open ledger
   database ~/...`), and so did `[agent] ca_file`, `[hub] tls_cert` and `tls_key`, and the
   `cli` of the Hermes and OpenClaw adapters; the other keys were expanded each by its own
-  loader or adapter. Only a leading `~`; `$VARS` are not expanded. The keys are listed in
+  loader or adapter. `$KELPIE_DB` is expanded the same way. Only a leading `~` (or
+  `~user`); `$VARS` are not expanded. The keys are listed in
   `kelpie.configpaths.PATH_KEYS`, and a test fails when a settings field holds a path whose
   key is not there. `kelpie doctor` has a "config paths exist" line naming each path Kelpie
   reads that does not exist after expansion (FAIL when the ledger's directory is missing)
