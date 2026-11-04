@@ -1196,8 +1196,9 @@ Kelpie remembers for budgets), never from the span:
   minute per token.
 
 Kelpie refuses to start when a token is not set, cannot be read, equals another token or
-the shared one, or (off loopback) is weak. Removing or renaming an entry leaves its stored
-spans as they are (history), unchecked from then on.
+the shared one, or (off loopback) is weak. A removed (or renamed) entry covers nothing: its
+stored spans stay as history while the board does not show their session or task, and are
+deleted once it does.
 
 The shared `[traces] token_env` token keeps working and may still report for every
 session; with `[[traces.tokens]]` and no shared token, a request without a token gets 401.

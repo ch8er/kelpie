@@ -292,8 +292,10 @@ way the multi-host hub limits each `kelpie agent` to its own host:
   as received, rejected spans included. The largest tool outputs and the daily report fold
   stored OTLP tool calls with hook calls by their call id over the whole day, outside the
   snapshot the check sees: a span carrying another agent's (provider-generated) tool call id
-  could be counted under that agent's session there, never in rule 10 or budgets. Removing
-  or renaming an entry leaves its stored spans unchecked. The shared token, when set, still
+  could be counted under that agent's session there, never in rule 10 or budgets. A removed
+  (or renamed) entry covers nothing: its spans stay while the board does not show their
+  session or task, and are deleted once it does, so removing a misbehaving agent's token
+  also removes what it claimed in advance. The shared token, when set, still
   reports for every session: `kelpie doctor` warns while any rule is in `act`.
 
 **Moving from one token.**

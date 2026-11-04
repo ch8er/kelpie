@@ -220,25 +220,26 @@ def test_guard_drops_provisional_spans_once_the_board_places_them_elsewhere() ->
     assert observer.rejected == Counter({OUT_OF_SCOPE: 1})
 
 
-def test_guard_leaves_shared_hook_and_removed_tokens_spans_alone() -> None:
+def test_guard_leaves_shared_and_hook_spans_alone() -> None:
     guard = ScopeGuard(SCOPES)
     plain = Span("t", "a", "x", SpanKind.TOOL, NOW, session_id="S-101")
-    foreign = replace(plain, span_id="b", attributes={TOKEN_ATTRIBUTE: "gone"})
-    forged = replace(plain, span_id="c", attributes={TOKEN_ATTRIBUTE: "dev-2"})
-    checked, _ = guard.check(replace(board(), spans=(plain, foreign, forged)))
-    assert [span_key(s) for s in checked.spans] == [("t", "a"), ("t", "b")]
+    gone = replace(plain, span_id="b", attributes={TOKEN_ATTRIBUTE: "gone"})  # removed token
+    unplaced = replace(gone, span_id="c", session_id="S-999")
+    forged = replace(plain, span_id="d", attributes={TOKEN_ATTRIBUTE: "dev-2"})
+    checked, _ = guard.check(replace(board(), spans=(plain, gone, unplaced, forged)))
+    assert [span_key(s) for s in checked.spans] == [("t", "a"), ("t", "c")]
 
 
-def test_restore_skips_tokens_no_longer_configured() -> None:
+def test_a_removed_tokens_spans_go_once_the_board_places_them() -> None:
     store = MemorySpanStore()
-    gone = Span(
-        "t", "a", "x", SpanKind.TOOL, NOW, session_id="S-9", attributes={TOKEN_ATTRIBUTE: "old"}
-    )
-    store.append_spans([gone], NOW)
-    guard = ScopeGuard(SCOPES, store=store)
-    assert guard.restore(NOW - timedelta(days=7), NOW) == 0
+    mark = {TOKEN_ATTRIBUTE: "old"}
+    forged = Span("t", "a", "x", SpanKind.TOOL, NOW, session_id="S-9", attributes=mark)
+    chat = replace(forged, span_id="b", session_id="chat-1")
+    store.append_spans([forged, chat], NOW)
+    guard = ScopeGuard(SCOPES, store=store)  # a restart without the "old" entry
+    assert guard.restore(NOW - timedelta(days=7), NOW) == 2
     guard.check(later_board(("S-9", "T-9", "agent-dev-1")))
-    assert len(stored(store)) == 1
+    assert [s.session_id for s in stored(store)] == ["chat-1"]  # history while unplaced
 
 
 def test_index_keeps_sessions_the_board_dropped_for_a_day() -> None:
@@ -763,3 +764,24 @@ def test_the_unplaced_cap_counts_ids_used_within_a_day(monkeypatch: pytest.Monke
     later = replace(tool(3, "chat-2", None), start=clock[0] - timedelta(minutes=1))
     post(ingest, [later], T2)
     assert observer.rejected[scope.SCOPE_BACKLOG] == 1 and guard.bound(SESSION, "chat-1") == "dev-2"
+
+
+def test_use_refreshes_a_binding_and_requests_stay_fast() -> None:
+    import time
+
+    import kelpie.traces.scope as scope
+
+    ingest, store, _, guard = setup()
+    post(ingest, [tool(1, "chat-1", None)], T2)
+    clock = NOW + timedelta(days=6)
+    guard.ingest_filter("dev-2", [stored(store)[0]], clock)  # used again on day 6
+    guard.check(replace(Snapshot(now=NOW + timedelta(days=8))))  # 7d retention after first use
+    assert guard.bound(SESSION, "chat-1") == "dev-2"
+    spans = [
+        Span("t", f"{n:x}", "x", SpanKind.TOOL, NOW, session_id=f"c-{n}")
+        for n in range(scope.MAX_UNPLACED + 2000)
+    ]
+    started = time.monotonic()
+    kept, refused = guard.ingest_filter("dev-2", spans, NOW)
+    assert time.monotonic() - started < 5
+    assert refused[scope.SCOPE_BACKLOG] > 0 and len(kept) <= scope.MAX_UNPLACED
