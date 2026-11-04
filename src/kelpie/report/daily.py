@@ -155,7 +155,7 @@ from kelpie.core.spans import (
 )
 from kelpie.core.spend import SpendConfig, SpendMode, gap_causes
 from kelpie.core.states import OpenState
-from kelpie.core.storage import TokenRow
+from kelpie.core.storage import ActionDay, TokenRow
 from kelpie.report import farm, intervals, md
 from kelpie.report.attribution import CallOwners, call_owners
 from kelpie.report.boards import BoardLine, board_lines, rest_line
@@ -182,6 +182,7 @@ from kelpie.report.verify import (
     Verification,
     filter_events,
     mode_events,
+    summed_entries,
     verify_all,
 )
 from kelpie.report.verify import DEFAULT_WINDOW as DEFAULT_VERIFY_WINDOW
@@ -339,6 +340,9 @@ class ReportInputs:
     day: date
     tz: tzinfo
     actions: Sequence[LedgerEntry] = ()
+    # The ledger's daily sums (#318): a rule's mode change on a day whose raw rows
+    # retention pruned is read from them.
+    action_days: Sequence[ActionDay] = ()
     states: Sequence[StateRow] = ()
     spans: Sequence[Span] = ()
     tasks: Sequence[Task] = ()
@@ -982,7 +986,11 @@ def _verifications(
     reach = since - 2 * inputs.verify_window
     events = [
         *inputs.fixes,
-        *mode_events(e for e in inputs.actions if e.at < end),
+        *mode_events(
+            e
+            for e in (*summed_entries(inputs.action_days, inputs.actions), *inputs.actions)
+            if e.at < end
+        ),
         *filter_events(found, replace(inputs.outputs, window=inputs.verify_window)),
     ]
     events = [e for e in events if reach <= e.at < end]

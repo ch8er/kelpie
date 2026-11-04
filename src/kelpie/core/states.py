@@ -90,6 +90,13 @@ class MemoryStateStore:
         if (state := self.states.pop(state_id, None)) is not None:
             self.closed.append((state, at))
 
+    def prune_closed(self, before: datetime) -> int:
+        """Drop states closed before ``before`` (#318); open states are never dropped."""
+        kept = [(s, at) for s, at in self.closed if at >= before]
+        gone = len(self.closed) - len(kept)
+        self.closed[:] = kept
+        return gone
+
 
 @dataclass(slots=True)
 class StateTracker:

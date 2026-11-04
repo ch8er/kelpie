@@ -105,6 +105,13 @@ from kelpie.core.ports import (
     inapplicable_actions,
 )
 from kelpie.core.prices import CHECKED, canonical_model, platform_wrapped
+from kelpie.core.retention import (
+    STORAGE_KEYS,
+    LedgerRetention,
+    StorageRetention,
+    ledger_keep,
+    load_storage_retention,
+)
 from kelpie.core.rule import Rule
 from kelpie.core.serde import parse_duration
 from kelpie.core.snooze import (
@@ -128,6 +135,7 @@ from kelpie.core.storage import (
     SchemaOutdated,
     SqliteCostReports,
     SqliteInstructionStore,
+    SqliteLedgerPruner,
     SqliteLedgerStore,
     SqliteSpanStore,
 )
@@ -285,6 +293,7 @@ class Settings:
     github_issues: GitHubIssuesSettings | None = None  # None: no [adapters.github_issues]
     linear: LinearSettings | None = None  # None: no [adapters.linear]
     db_path: Path | None = DEFAULT_DB  # None keeps the ledger in memory
+    storage: StorageRetention = field(default_factory=StorageRetention)  # [storage] retention
     source: Path | None = None  # the file the settings came from, if any
     traces: TraceSettings = field(default_factory=TraceSettings)
     budgets: BudgetConfig = field(default_factory=BudgetConfig)  # [[budgets]], [prices]
@@ -354,8 +363,12 @@ def load_settings(path: Path | None) -> Settings:
     storage = data.get("storage", {})
     if not isinstance(storage, Mapping):
         raise ConfigError("[storage] must be a table")
-    if extra := set(storage) - {"path"}:
+    if extra := set(storage) - STORAGE_KEYS:
         raise ConfigError(f"unknown [storage] keys: {sorted(extra)}")
+    try:
+        storage_retention = load_storage_retention(storage, engine)
+    except ValueError as exc:
+        raise ConfigError(str(exc)) from exc
     raw_db = expand(os.environ.get("KELPIE_DB") or "") or storage.get("path", str(DEFAULT_DB))
     if not isinstance(raw_db, str) or not raw_db.strip():
         raise ConfigError("storage path must be a non-empty string")
@@ -399,6 +412,7 @@ def load_settings(path: Path | None) -> Settings:
         github_issues=_load_github_issues(data.get("adapters", {}), github),
         linear=_load_linear(data.get("adapters", {})),
         db_path=db_path,
+        storage=storage_retention,
         source=path,
         traces=traces,
         budgets=budgets,
@@ -1699,11 +1713,14 @@ class App:
     # Background services started by server.run after the loop and stopped first on close,
     # before the alert delivery they may use (the scheduled daily report).
     services: list[Service] = field(default_factory=list)
+    ledger_retention: LedgerRetention | None = None  # raw ledger and closed states (#318)
 
     def close(self) -> None:
         for service in self.services:
             service.stop()
         self.loop.stop()
+        if self.ledger_retention is not None:
+            self.ledger_retention.stop()  # its own connection: before the ledger store's
         if self.alerts is not None:
             self.alerts.close()
         if self.forwarder is not None:
@@ -1946,6 +1963,7 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
         raise ConfigError(f"cannot open ledger database {settings.db_path}: {exc}") from exc
     # SQLite keeps open alert states across restarts; in memory they live with the process.
     states: StateStore = store if isinstance(store, SqliteLedgerStore) else MemoryStateStore()
+    ledger_retention = build_ledger_retention(settings, store, states, clock)
     metrics.set_alert_channels(c.name for c in settings.alerts.channels)
     costs = cost_report_steps(settings, metrics, costs_source)
     enrich += costs
@@ -1996,7 +2014,7 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
             snoozes=snooze_reader(settings, store),
             instructions=instruction_watch(settings, adapters),
         )
-        loop = ControlLoop(engine, source, metrics)
+        loop = ControlLoop(engine, source, metrics, housekeeping=ledger_retention.maybe_start)
         app = App(
             settings,
             loaded,
@@ -2005,6 +2023,7 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
             metrics,
             store,
             alerts=_start_alerts(settings, engine, metrics, store, clock),
+            ledger_retention=ledger_retention,
         )
         return _with_hub(app, hub)
     span_store = _open_span_store(settings.db_path)
@@ -2080,7 +2099,12 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
         instructions=instruction_watch(settings, adapters),
         scopes=guard,
     )
-    loop = ControlLoop(engine, source, metrics, housekeeping=retention.maybe_start)
+    loop = ControlLoop(
+        engine,
+        source,
+        metrics,
+        housekeeping=_both(retention.maybe_start, ledger_retention.maybe_start),
+    )
     alerts = _start_alerts(settings, engine, metrics, store, clock)
     if hub is not None:
         # A span whose ids no agent token vouches for could be forged into any host's
@@ -2104,8 +2128,53 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
         retention,
         forwarder,
         alerts,
+        ledger_retention=ledger_retention,
     )
     return _with_hub(app, hub, relayed)
+
+
+def build_ledger_retention(
+    settings: Settings,
+    store: LedgerStore,
+    states: StateStore,
+    clock: Callable[[], datetime],
+) -> LedgerRetention:
+    """The action ledger's retention (#318): SQLite rows summed per day and pruned on a
+    connection of their own; in memory, entries and closed states older than retention."""
+    kept = settings.storage
+    keep = ledger_keep(settings.engine)
+    if isinstance(store, SqliteLedgerStore) and settings.db_path is not None:
+        try:
+            pruner = SqliteLedgerPruner(settings.db_path)
+        except (OSError, sqlite3.Error, RuntimeError) as exc:
+            raise ConfigError(f"cannot open ledger database {settings.db_path}: {exc}") from exc
+        return LedgerRetention(
+            lambda now: pruner.prune(now, kept.retention, kept.max_rows, keep),
+            clock,
+            close=pruner.close,
+        )
+
+    def in_memory(now: datetime) -> tuple[int, int]:
+        gone = store.prune(now - kept.retention) if isinstance(store, MemoryLedgerStore) else 0
+        closed = (
+            states.prune_closed(now - kept.retention) if isinstance(states, MemoryStateStore) else 0
+        )
+        return gone, closed
+
+    return LedgerRetention(in_memory, clock)
+
+
+def _both(*steps: Callable[[], object]) -> Callable[[], None]:
+    """Housekeeping steps run one after the other; each must return at once."""
+
+    def run() -> None:
+        for step in steps:
+            try:
+                step()
+            except Exception:
+                log.exception("housekeeping failed")
+
+    return run
 
 
 def _build_hub(

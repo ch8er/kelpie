@@ -20,7 +20,7 @@ from kelpie.core.config import Mode
 from kelpie.core.files import write_private
 from kelpie.core.model import HostSleep, Reconciliation, Snapshot, Snooze, source_agent
 from kelpie.core.spend import SpendConfig
-from kelpie.core.storage import TokenRow
+from kelpie.core.storage import ActionDay, TokenRow
 from kelpie.report.config import ReportSettings
 from kelpie.report.daily import (
     DailyReport,
@@ -96,12 +96,14 @@ def load_inputs(sources: ReportSources, day: date, board: Snapshot) -> ReportInp
         reach - sources.report.verify_window,
     ) - timedelta(hours=1)
     actions, states, spans, fixes, attribution = [], [], [], [], None
+    summed: list[ActionDay] = []
     snoozes: list[Snooze] = []
     tokens: list[TokenRow] = []
     sleeps: list[HostSleep] = []
     if sources.db_path is not None and sources.db_path.exists():
         with ReportStore(sources.db_path) as store:
             actions = store.actions(history, end)
+            summed = store.action_days(history, end)
             states = store.states(history, end)
             spans = store.spans(history, end)
             fixes = store.fixes(reach - sources.report.verify_window, end)
@@ -120,6 +122,7 @@ def load_inputs(sources: ReportSources, day: date, board: Snapshot) -> ReportInp
         day=day,
         tz=tz,
         actions=actions,
+        action_days=summed,
         states=states,
         spans=merged,
         tasks=board.tasks,

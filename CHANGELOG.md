@@ -10,6 +10,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ### Added
 
+- Action-ledger retention (#318): `[storage] retention` (30 days) and `max_rows` (a
+  million) bound the raw action ledger, pruned by whole UTC days in a background thread of
+  `kelpie serve` on its own connection, in short transactions. Each day is summed first into
+  daily aggregates kept for good (per rule, action kind and mode: entries, executed,
+  suppressed, failed), from which the report's before/after reads a rule's mode change once
+  raw rows are gone. Alert states closed past retention go too; open states and snoozes
+  never. The in-memory ledger keeps at most 100,000 entries. Schema 11 adds the aggregate
+  tables; `kelpie doctor` shows the database's size and its oldest raw ledger row.
 - Known runners anywhere in a command (#197 part 2b): `[traces] known_runners` (OTLP) and
   `KELPIE_KNOWN_RUNNERS` on agent hosts (the Hermes plugin, the Claude Code hook and the
   OpenClaw hook, which also takes `knownRunners` in its config) name build and test runners
