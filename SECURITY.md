@@ -74,12 +74,13 @@ Open findings of the pre-release security audit
 fixing. Reports that only restate them are not new, but ways to make them worse are in
 scope. Details and what to do meanwhile: [docs/security.md](docs/security.md#known-residual-risks).
 
-- **Rule 10 trusts every holder of the traces token (M1).** In `act` mode `loop_breaker`
-  stops a run on span evidence. A span's session id, and a hook spool line's run id, are
-  whatever the sender writes, and every agent's exporter holds the one ingest token. So an
-  agent can make Kelpie stop another agent's run. This matters on farms where agents are
-  untrusted or sandboxed and share one traces token; keep rule 10 in `observe` or `suggest`
-  there. The fix is per-agent ingest tokens ([#302](https://github.com/ch8er/kelpie/issues/302)).
+- **Rule 10 trusts hook spool lines and the shared traces token (M1).** In `act` mode
+  `loop_breaker` stops a run on span evidence. A span's session id, and a hook spool line's
+  run id, are whatever the sender writes. Per-agent ingest tokens (`[[traces.tokens]]`)
+  limit each agent's spans to its own sessions; the shared token, ingest without a token
+  and the spool still let an agent name another agent's run. Where agents are untrusted or
+  sandboxed, give each its own token and keep rule 10 in `observe` or `suggest` until the
+  spool check of [#302](https://github.com/ch8er/kelpie/issues/302) lands.
 - **`kelpie serve`'s HTTP port has no pre-auth deadline or connection cap (M5).** Keep it on
   loopback (the default) or behind a reverse proxy that limits connections and request
   time. Fix: [#304](https://github.com/ch8er/kelpie/issues/304).

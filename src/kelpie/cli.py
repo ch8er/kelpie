@@ -63,18 +63,28 @@ def _relative_at(argv: list[str]) -> list[str]:
     return out
 
 
-def _rotate_token(settings: Settings, grace_text: str | None) -> int:
-    """``kelpie traces rotate-token``: counts and times only, never a token."""
+def _rotate_token(settings: Settings, grace_text: str | None, name: str | None = None) -> int:
+    """``kelpie traces rotate-token [--token NAME]``: counts and times only, never a token.
+    Without ``--token`` the shared ``[traces]`` token; with it, that ``[[traces.tokens]]``
+    entry's (#302)."""
     from kelpie.core.serde import parse_duration
     from kelpie.traces.auth import TokenFileError, rotate
     from kelpie.traces.config import MAX_TOKEN_GRACE
 
     traces = settings.traces
-    path = traces.token_file
+    path, env, label = traces.token_file, traces.token_env, "[traces]"
+    if name is not None:
+        entry = traces.scoped(name)
+        if entry is None:
+            known = ", ".join(t.name for t in traces.tokens) or "none"
+            print(f"kelpie: no [[traces.tokens]] entry {name!r} (configured: {known})",
+                  file=sys.stderr)  # fmt: skip
+            return 2
+        path, env, label = entry.token_file, entry.token_env, f"[[traces.tokens]] {name}"
     if path is None:
         print(
-            "kelpie: set [traces] token_file first: rotating a token read from "
-            f"${traces.token_env} would need kelpie serve and every agent restarted",
+            f"kelpie: set {label} token_file first: rotating a token read from "
+            f"${env} would need kelpie serve and every agent restarted",
             file=sys.stderr,
         )
         return 2
@@ -87,7 +97,7 @@ def _rotate_token(settings: Settings, grace_text: str | None) -> int:
         print("kelpie: --grace must be between 0s and 7d", file=sys.stderr)
         return 2
     try:
-        done = rotate(path, traces.token_env, grace, datetime.now(UTC))
+        done = rotate(path, env, grace, datetime.now(UTC))
     except TokenFileError as exc:
         print(f"kelpie: {exc}", file=sys.stderr)
         return 2
@@ -248,6 +258,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     rotate.add_argument(
         "--grace", help="how long the old token stays valid (default: [traces] token_grace)"
     )
+    rotate.add_argument(
+        "--token",
+        metavar="NAME",
+        help="rotate this [[traces.tokens]] entry's token instead of the shared one",
+    )
 
     args = parser.parse_args(_relative_at(sys.argv[1:] if argv is None else list(argv)))
     logging.basicConfig(
@@ -328,7 +343,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command == "spool":
             return _scrub(settings, args.paths, args.dry_run)
         if args.command == "traces":
-            return _rotate_token(settings, args.grace)
+            return _rotate_token(settings, args.grace, args.token)
         if args.command == "selftest":
             from kelpie.selftest.hermes import run as run_selftest
 

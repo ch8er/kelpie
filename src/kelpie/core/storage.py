@@ -40,6 +40,7 @@ from kelpie.core.spans import (
     MAX_LINK_DEPTH,
     Attribution,
     SpanChanges,
+    SpanKey,
     TokenUsage,
     attribution_stale,
     counted_llm,
@@ -1061,6 +1062,13 @@ class SqliteSpanStore:
                     for table in ("span_sessions", "span_task_labels"):
                         self._db.execute(f"DELETE FROM {table} WHERE seen_at < ?", (_ts(before),))
                 self._sessions = self._labels = None  # reload on the next write
+        return deleted
+
+    def discard(self, keys: Collection[SpanKey]) -> int:
+        """Delete these spans (out of a scoped ingest token's scope, #302)."""
+        deleted = 0
+        for key in keys:
+            deleted += self._delete("DELETE FROM spans WHERE trace_id = ? AND span_id = ?", key)
         return deleted
 
     def _delete(self, sql: str, args: tuple[object, ...]) -> int:

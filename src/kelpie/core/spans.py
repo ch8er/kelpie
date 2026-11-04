@@ -164,6 +164,11 @@ class SpanStore(Protocol):
 
     def count(self) -> int: ...
 
+    def discard(self, keys: Collection[SpanKey]) -> int:
+        """Delete these spans (spans a scoped ingest token was found not to own, #302).
+        Returns the number deleted."""
+        ...
+
     def inherit_links(self, trace_ids: Collection[str]) -> int:
         """Fill a missing ``task_id``/``session_id`` from the parent span, for stored spans
         of these traces, down to every descendant. Exporters send a trace in several
@@ -444,6 +449,15 @@ class MemorySpanStore:
             for tid in [k for k, v in self._labels.items() if v[1] < before]:
                 del self._labels[tid]
             return len(old) + excess
+
+    def discard(self, keys: Collection[SpanKey]) -> int:
+        with self._lock:
+            found = [k for k in keys if k in self._spans]
+            for key in found:
+                self._delete(key)
+            if found:
+                self.epoch += 1
+            return len(found)
 
     def _delete(self, key: SpanKey) -> None:
         del self._spans[key]

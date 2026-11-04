@@ -1,0 +1,52 @@
+# Audit M1 (#275, #302): a span names its session itself. With one ingest token for every
+# agent, agent-dev-2 could send identical tool spans tagged with agent-dev-1's live session,
+# and rule 10 in act stopped agent-dev-1's run. With per-agent tokens, ingest checks every
+# span against the board: a session the board gives to another owner is outside the
+# sender's scope, so the span is rejected and counted; spans for its own session go through.
+#
+# `requests` is fixture-only: each request is sent to OTLP ingest with that token. A span is
+# a tool call in a session (`calls` identical calls with the same arguments).
+# `expected` / `not_expected` are read by tests/traces/test_token_scopes.py.
+id: m1-forged-session
+description: >
+  agent-dev-2 forges ten identical tool calls into agent-dev-1's session under its own
+  token, and also loops in its own session. The forged spans are rejected (out of scope),
+  agent-dev-1's run is not stopped; agent-dev-2's own loop still trips rule 10.
+config:
+  tokens:
+    - {name: dev-1, owners: [agent-dev-1]}
+    - {name: dev-2, roles: [developer-b]}
+snapshot:
+  now: "2026-03-02T12:00:00+00:00"
+  owners:
+    - {id: agent-dev-1, role: developer}
+    - {id: agent-dev-2, role: developer-b}
+  tasks:
+    - {id: T-101, title: "Victim task", status: in_progress, owner_id: agent-dev-1,
+       status_since: "2026-03-02T11:00:00+00:00"}
+    - {id: T-102, title: "Sender task", status: in_progress, owner_id: agent-dev-2,
+       status_since: "2026-03-02T11:00:00+00:00"}
+  sessions:
+    - {id: S-101, task_id: T-101, owner_id: agent-dev-1, started_at: "2026-03-02T11:00:00+00:00",
+       last_heartbeat: "2026-03-02T11:59:00+00:00"}
+    - {id: S-102, task_id: T-102, owner_id: agent-dev-2, started_at: "2026-03-02T11:00:00+00:00",
+       last_heartbeat: "2026-03-02T11:59:00+00:00"}
+requests:
+  - token: dev-2  # forged: another agent's session
+    session_id: S-101
+    task_id: T-101
+    calls: 10
+  - token: dev-2  # its own session: a real loop
+    session_id: S-102
+    task_id: T-102
+    calls: 8
+  - token: dev-1  # agent-dev-1's own healthy call
+    session_id: S-101
+    task_id: T-101
+    calls: 1
+expected:
+  accepted: {dev-1: 1, dev-2: 8}
+  rejected: {out_of_scope: 10}
+  stopped_sessions: [S-102]
+not_expected:
+  stopped_sessions: [S-101]

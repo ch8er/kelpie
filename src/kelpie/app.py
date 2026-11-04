@@ -150,7 +150,8 @@ from kelpie.traces.auth import TokenFile, TokenFileError, loose_mode
 from kelpie.traces.config import TraceSettings, load_traces
 from kelpie.traces.forward import Forwarder
 from kelpie.traces.hooks import merge_hook_spans
-from kelpie.traces.ingest import IGNORED, TraceIngest
+from kelpie.traces.ingest import IGNORED, ScopedToken, TraceIngest
+from kelpie.traces.scope import ScopeGuard
 from kelpie.traces.store import OffenderWatch, SpanRetention, SpanWindow, merge_spans
 
 log = logging.getLogger(__name__)
@@ -1110,6 +1111,7 @@ def merged_snapshot(
     remote: Callable[[datetime], Snapshot] | None = None,
     snoozes: SnoozeReader | None = None,
     instructions: InstructionWatch | None = None,
+    scopes: ScopeGuard | None = None,
 ) -> Callable[[], Snapshot]:
     """Snapshot source that merges ``snapshot(now)`` of every adapter able to give one.
 
@@ -1144,7 +1146,9 @@ def merged_snapshot(
     included: an agent never sends snoozes), from the store and the block reasons' markers.
     With ``instructions``, the instruction files of this host are measured (hourly) into
     ``Snapshot.instruction_files`` and ``instruction_duplicates``; a failed scan is logged
-    and the tick goes on without them.
+    and the tick goes on without them. With ``scopes`` (per-agent ingest tokens, #302), spans
+    a scoped token sent for a session or task the board places outside its scope are
+    dropped (and deleted from the span store) before rules, budgets and totals see them.
     """
     last = _LastBudgets()
     carried: dict[str, Contribution] = {}  # per connector step, from its last good tick
@@ -1233,6 +1237,8 @@ def merged_snapshot(
                     spans=_board_tasks(merge_spans(stored, merged.spans), merged.tasks),
                     span_totals=totals,
                 )
+                if scopes is not None:
+                    merged = _in_scope(merged, scopes, spans, metrics)
         if resources is not None:
             try:
                 merged = replace(merged, resources=merged.resources + tuple(resources.read(now)))
@@ -1281,6 +1287,67 @@ def merged_snapshot(
         return merged
 
     return source
+
+
+def _scoped_tokens(
+    traces: TraceSettings, shared: str | None, clock: Callable[[], datetime]
+) -> list[ScopedToken]:
+    """The ``[[traces.tokens]]`` tokens ingest checks (#302): from their env vars, or their
+    token files (trusted as ``[traces] token_file`` is, read again when they change). Each
+    must differ from the others and from the shared token, or which scope a request gets
+    would depend on the order. Raises ConfigError naming the entry, never a token."""
+    if not traces.enabled:
+        return []
+    out: list[ScopedToken] = []
+    seen: dict[str, str] = {} if shared is None else {shared: "the shared [traces] token"}
+    for entry in traces.tokens:
+        try:
+            value = entry.token()
+            file = (
+                TokenFile(
+                    entry.token_file,
+                    entry.token_env,
+                    clock,
+                    on_error=lambda why, n=entry.name: log.error(
+                        "[[traces.tokens]] %s: token_file %s", n, why
+                    ),
+                )
+                if entry.token_file is not None
+                else None
+            )
+        except ValueError as exc:  # TokenFileError included
+            raise ConfigError(str(exc)) from None
+        if (other := seen.get(value)) is not None:
+            raise ConfigError(
+                f"[[traces.tokens]] {entry.name}: its token is the same as {other}'s; "
+                "give every agent a token of its own"
+            )
+        seen[value] = f"[[traces.tokens]] {entry.name}"
+        if entry.token_file is not None and loose_mode(entry.token_file):
+            log.warning(
+                "[[traces.tokens]] %s: token_file %s can be read by others than its owner: "
+                "chmod 600 it",
+                entry.name,
+                entry.token_file,
+            )
+        out.append(ScopedToken(entry.name, None if file is not None else value, file))
+    return out
+
+
+def _in_scope(
+    snapshot: Snapshot, scopes: ScopeGuard, spans: SpanWindow, metrics: Metrics
+) -> Snapshot:
+    """``snapshot`` without the spans scoped ingest tokens may not report; the totals are
+    read again when any were dropped (they were deleted from the store)."""
+    checked, dropped = scopes.check(snapshot)
+    if not dropped:
+        return checked
+    try:
+        return replace(checked, span_totals=spans.totals(snapshot.now))
+    except Exception as exc:
+        log.error("span store failed to read: %s", exc)
+        metrics.span_store_failed()
+        return checked
 
 
 @dataclass(slots=True)
@@ -1859,6 +1926,12 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
                 traces.token_file,
             )
         metrics.token_file = tokens.status
+    scoped = _scoped_tokens(traces, token, clock) if settings.hub is None else []
+    if settings.hub is not None and traces.tokens:
+        log.warning(
+            "[[traces.tokens]] is not used with [hub]: this port takes no spans, and each "
+            "kelpie agent reports with its own [[hub.agents]] token"
+        )
     try:
         store: LedgerStore = (
             MemoryLedgerStore() if settings.db_path is None else SqliteLedgerStore(settings.db_path)
@@ -1931,11 +2004,20 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
     span_store = _open_span_store(settings.db_path)
     metrics.set_traces(True, [*(str(k) for k in SpanKind), IGNORED])
     metrics.set_span_rows_source(span_store.count)
-    if token is None and hub is None:
+    if token is None and hub is None and not scoped:
         log.warning(
             "OTLP ingest on /v1/traces accepts spans without a token; set $%s",
             traces.token_env,
         )
+    guard = (
+        ScopeGuard(
+            {t.name: t.scope for t in traces.tokens},
+            discard=span_store.discard,
+            rejected=metrics.spans_rejected,
+        )
+        if scoped
+        else None
+    )
     ingest = TraceIngest(
         store=span_store,
         clock=clock,
@@ -1946,6 +2028,8 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
         options=traces.options,
         max_concurrent=traces.max_concurrent_requests,
         max_age=traces.retention,
+        scoped=scoped,
+        guard=guard,
     )
     forwarder = None
     for f in traces.forward:
@@ -1980,6 +2064,7 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
         remote=remote,
         snoozes=snooze_reader(settings, store),
         instructions=instruction_watch(settings, adapters),
+        scopes=guard,
     )
     loop = ControlLoop(engine, source, metrics, housekeeping=retention.maybe_start)
     alerts = _start_alerts(settings, engine, metrics, store, clock)
@@ -2762,8 +2847,14 @@ def _traces_status(traces: TraceSettings, hub: bool = False) -> str:
         auth = f"bearer token from {traces.token_file} (rotatable, grace {grace})"
     elif token:
         auth = f"bearer token from ${traces.token_env}"
+    elif traces.tokens:
+        auth = "no shared token"
     else:
         auth = f"open (${traces.token_env} unset)"
+    if traces.tokens:
+        names = ", ".join(t.name for t in traces.tokens[:5])
+        more = f" and {len(traces.tokens) - 5} more" if len(traces.tokens) > 5 else ""
+        auth += f", {len(traces.tokens)} per-agent token(s) ({names}{more})"
     forward = "".join(f", forward to {f.name} ({f.display_endpoint})" for f in traces.forward)
     window, retention = _span(traces.window), _span(traces.retention)
     return f"POST /v1/traces, {auth}, window {window}, retention {retention}{forward}"
