@@ -263,17 +263,20 @@ way the multi-host hub limits each `kelpie agent` to its own host:
   task not on it, belongs to the first token that reports it, and other tokens' spans for it
   are rejected. Every tick checks the bound ids against the board; once it places one
   outside the token's scope, every stored span of that token naming it is deleted (whatever
-  its times, and again for five minutes, for a request that was being stored meanwhile),
-  and the totals and budget usage are read again, before rules and budgets see it. Bindings
-  last for the span retention and are rebuilt from the store after a restart. Spans carry
+  its times), and the totals and budget usage are read again, before rules and budgets see
+  it. That check runs alone: a request judges and stores its spans with no check in
+  between, so no span judged before a revocation is stored after it. A binding lasts for
+  the span retention after its last use; bindings are rebuilt from the store after a restart
+  (for the tokens still configured). Spans carry
   their token's name (`kelpie.ingest.token`, set by Kelpie; whatever a sender put there is
   replaced or removed), and a span takes a missing session or task from its parent only
   when both came with the same scoped token. Hook spans are folded into OTLP spans before
   the snapshot check, so a fold that moves a span into another session is caught too.
 - **What a forger can still do.** Claim a session id before its agent starts (Hermes run ids
   are sequential) and report spans for it until the board shows the run; from then on they
-  are deleted, and the agent's own token reports for it. Hold up to 10,000 such ids, after
-  which its own unplaced spans are refused (other tokens are not affected).
+  are deleted, and the agent's own token reports for it. Hold up to 10,000 such ids used
+  within a day, after which its spans naming new ones are refused (other tokens are not
+  affected).
 - **Every token is compared**, each in constant time; two tokens with the same value (or a
   scoped token equal to the shared one at startup) refuse to start, so a request maps to one
   scope. Scoped tokens are matched first, so a scoped token that later equals a rotated
@@ -286,8 +289,12 @@ way the multi-host hub limits each `kelpie agent` to its own host:
   budgets only (a hard one stops runs only with `stop_on_shared_budgets`). A scoped token
   may report for every session of its scope, so scope a token to one agent (`owners`) where
   agents of one role do not trust each other. Requests are forwarded (`[[traces.forward]]`)
-  as received, rejected spans included. The shared token, when set, still reports for every
-  session: `kelpie doctor` warns while any rule is in `act`.
+  as received, rejected spans included. The largest tool outputs and the daily report fold
+  stored OTLP tool calls with hook calls by their call id over the whole day, outside the
+  snapshot the check sees: a span carrying another agent's (provider-generated) tool call id
+  could be counted under that agent's session there, never in rule 10 or budgets. Removing
+  or renaming an entry leaves its stored spans unchecked. The shared token, when set, still
+  reports for every session: `kelpie doctor` warns while any rule is in `act`.
 
 **Moving from one token.**
 

@@ -30,7 +30,6 @@ from kelpie.traces.scope import (
     ScopeGuard,
     ScopeIndex,
     TokenScope,
-    stamp,
 )
 from tests.traces.otlp_builders import NOW, S, request, sid
 from tests.traces.test_ingest import Headers, Observer
@@ -215,18 +214,31 @@ def test_guard_drops_provisional_spans_once_the_board_places_them_elsewhere() ->
         sessions=(*later.sessions, Session("S-103", "T-103", "agent-dev-1", NOW)),
         spans=tuple(stored(store)),
     )
-    checked = guard.check(later)
+    checked, _ = guard.check(later)
     assert [s.session_id for s in checked.spans] == ["S-102"]
     assert [s.session_id for s in stored(store)] == ["S-102"]  # deleted from the store
     assert observer.rejected == Counter({OUT_OF_SCOPE: 1})
 
 
-def test_guard_leaves_shared_and_hook_spans_alone_and_drops_unknown_tokens() -> None:
+def test_guard_leaves_shared_hook_and_removed_tokens_spans_alone() -> None:
     guard = ScopeGuard(SCOPES)
     plain = Span("t", "a", "x", SpanKind.TOOL, NOW, session_id="S-101")
     foreign = replace(plain, span_id="b", attributes={TOKEN_ATTRIBUTE: "gone"})
-    checked = guard.check(replace(board(), spans=(plain, foreign)))
-    assert [span_key(s) for s in checked.spans] == [("t", "a")]
+    forged = replace(plain, span_id="c", attributes={TOKEN_ATTRIBUTE: "dev-2"})
+    checked, _ = guard.check(replace(board(), spans=(plain, foreign, forged)))
+    assert [span_key(s) for s in checked.spans] == [("t", "a"), ("t", "b")]
+
+
+def test_restore_skips_tokens_no_longer_configured() -> None:
+    store = MemorySpanStore()
+    gone = Span(
+        "t", "a", "x", SpanKind.TOOL, NOW, session_id="S-9", attributes={TOKEN_ATTRIBUTE: "old"}
+    )
+    store.append_spans([gone], NOW)
+    guard = ScopeGuard(SCOPES, store=store)
+    assert guard.restore(NOW - timedelta(days=7), NOW) == 0
+    guard.check(later_board(("S-9", "T-9", "agent-dev-1")))
+    assert len(stored(store)) == 1
 
 
 def test_index_keeps_sessions_the_board_dropped_for_a_day() -> None:
@@ -341,7 +353,7 @@ def test_m1_forged_session_fixture() -> None:
     assert dict(accepted) == fixture["expected"]["accepted"]
     assert dict(observer.rejected) == fixture["expected"]["rejected"]
 
-    board_ = guard.check(replace(snapshot, spans=tuple(stored(store))))
+    board_, _ = guard.check(replace(snapshot, spans=tuple(stored(store))))
     rule = REGISTRY["loop_breaker"]({})
     stops = {a.params["session_id"] for a in rule.evaluate(board_) if a.kind is ActionKind.STOP}
     assert set(fixture["expected"]["stopped_sessions"]) <= stops
@@ -549,18 +561,33 @@ def test_unplaced_session_with_own_task_is_bound_and_revoked() -> None:
     assert stored(store) == []
 
 
-def test_a_span_stored_after_its_binding_was_revoked_is_deleted_too() -> None:
-    ingest, store, _, guard = setup()
-    post(ingest, [tool(1, "S-106", None)], T2)
-    guard.check(later_board(("S-106", "T-106", "agent-dev-1")))
-    late = stamp(stored_span("S-106"), "dev-2")
-    store.append_spans([late], NOW)  # an ingest that judged it before the revocation
-    guard.check(later_board(("S-106", "T-106", "agent-dev-1")))
-    assert stored(store) == []
+def test_check_waits_for_requests_between_judging_and_storing() -> None:
+    import threading
+
+    guard = setup()[3]
+    done = threading.Event()
+    with guard.barrier.shared():  # an ingest request between judging and storing
+        worker = threading.Thread(target=lambda: (guard.check(board()), done.set()))
+        worker.start()
+        assert not done.wait(0.2)  # the check waits
+        with pytest.raises(TimeoutError):  # and no new request starts meanwhile
+            _try_shared(guard, 0.1)
+    worker.join(2)
+    assert done.is_set()
 
 
-def stored_span(session: str) -> Span:
-    return Span("t2", "late", "execute_tool shell", SpanKind.TOOL, NOW, session_id=session)
+def _try_shared(guard: ScopeGuard, timeout: float) -> None:
+    import threading
+
+    got = threading.Event()
+
+    def run() -> None:
+        with guard.barrier.shared():
+            got.set()
+
+    threading.Thread(target=run, daemon=True).start()
+    if not got.wait(timeout):
+        raise TimeoutError
 
 
 def test_restart_rebinds_ids_to_the_token_stored_first() -> None:
@@ -617,7 +644,7 @@ def test_a_span_folded_into_another_session_is_deleted() -> None:
     post(ingest, [tool(1, "S-102", "T-102")], T2)  # in scope as sent
     (span,) = stored(store)
     folded = replace(span, session_id="S-101", task_id="T-101")  # a hook call's session
-    checked = guard.check(replace(board(), spans=(folded,)))
+    checked, _ = guard.check(replace(board(), spans=(folded,)))
     assert checked.spans == () and stored(store) == []
 
 
@@ -717,3 +744,22 @@ def test_store_marked_ids_discard_marked_and_same_mark_links(tmp_path: Path, kin
         store.discard_marked("name", "x", TOKEN_ATTRIBUTE, "dev-2")
     if kind == "sqlite":
         store.close()
+
+
+def test_the_unplaced_cap_counts_ids_used_within_a_day(monkeypatch: pytest.MonkeyPatch) -> None:
+    import kelpie.traces.scope as scope
+
+    monkeypatch.setattr(scope, "MAX_UNPLACED", 1)
+    store, observer = MemorySpanStore(), Observer()
+    clock = [NOW]
+    guard = ScopeGuard(SCOPES, store=store, rejected=observer.spans_rejected)
+    ingest = TraceIngest(
+        store, lambda: clock[0], observer, scoped=[ScopedToken("dev-2", T2)], guard=guard
+    )
+    post(ingest, [tool(1, "chat-1", None)], T2)
+    post(ingest, [tool(2, "chat-2", None)], T2)
+    assert observer.rejected[scope.SCOPE_BACKLOG] == 1
+    clock[0] = NOW + timedelta(hours=25)
+    later = replace(tool(3, "chat-2", None), start=clock[0] - timedelta(minutes=1))
+    post(ingest, [later], T2)
+    assert observer.rejected[scope.SCOPE_BACKLOG] == 1 and guard.bound(SESSION, "chat-1") == "dev-2"

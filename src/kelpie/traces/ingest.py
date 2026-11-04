@@ -251,20 +251,18 @@ class TraceIngest:
         rejected.update(mapped.rejected)
         if rewrite is not None:
             mapped = replace(mapped, spans=[rewrite(s) for s in mapped.spans])
-        if sender:  # a scoped token: only its own sessions
-            assert self.guard is not None  # __post_init__
-            kept, refused = self.guard.ingest_filter(sender, mapped.spans, now)
-            rejected.update(refused)
-            mapped = replace(mapped, spans=kept)
-        else:  # no span of the shared token may claim a scoped token's name
+        if not sender:  # no span of the shared token may claim a scoped token's name
             mapped = replace(mapped, spans=[stamp(s, None) for s in mapped.spans])
-        try:
-            self.store.append_spans(mapped.spans, now)
-            if mapped.spans:
-                self.store.inherit_links({s.trace_id for s in mapped.spans})
-        except Exception as exc:  # the store is down: let the exporter retry
-            log.error("cannot store %d spans: %s", len(mapped.spans), exc)
-            return _error(503, encoding, otlp.UNAVAILABLE, "span store unavailable", close=False)
+            stored = self._store(mapped.spans, now, encoding)
+        else:  # a scoped token: only its own sessions, judged and stored as one step
+            assert self.guard is not None  # __post_init__
+            with self.guard.barrier.shared():  # the guard's tick cannot run in between
+                kept, refused = self.guard.ingest_filter(sender, mapped.spans, now)
+                rejected.update(refused)
+                mapped = replace(mapped, spans=kept)
+                stored = self._store(mapped.spans, now, encoding)
+        if stored is not None:
+            return stored
         self._observe(mapped.spans, mapped.ignored, rejected)
         total = sum(rejected.values())
         message = "; ".join(f"{n} {reason}" for reason, n in sorted(rejected.items()))
@@ -275,6 +273,17 @@ class TraceIngest:
             except Exception:
                 log.exception("accepted-request hook failed")
         return Reply(200, otlp.encode_response(media, total, message), media)
+
+    def _store(self, spans: Sequence[Span], now: datetime, encoding: str) -> Reply | None:
+        """Store ``spans`` and fill their links; the error reply when the store is down."""
+        try:
+            self.store.append_spans(spans, now)
+            if spans:
+                self.store.inherit_links({s.trace_id for s in spans})
+        except Exception as exc:  # the store is down: let the exporter retry
+            log.error("cannot store %d spans: %s", len(spans), exc)
+            return _error(503, encoding, otlp.UNAVAILABLE, "span store unavailable", close=False)
+        return None
 
     def _observe(self, spans: Sequence[Span], ignored: int, rejected: Mapping[str, int]) -> None:
         if self.observer is None:

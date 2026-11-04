@@ -1345,8 +1345,8 @@ def _in_scope(
         log.error("span store failed to read: %s", exc)
         metrics.span_store_failed()
         remembered = None
-    checked = scopes.check(snapshot, remembered)
-    if checked is snapshot:
+    checked, deleted = scopes.check(snapshot, remembered)
+    if not deleted:
         return checked
     try:
         return replace(checked, span_totals=spans.totals(snapshot.now))

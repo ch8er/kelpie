@@ -1172,7 +1172,7 @@ another agent's run). One table per token; none by default. Not used with `[hub]
 | `token_file` | none | path | An env file holding `<token_env>=<token>`, read again when it changes and rotated with `kelpie traces rotate-token --token <name>` (the same rules as `[traces] token_file`; several entries may share one file, each with its own line). |
 | `owners` | `[]` | owner ids | Sessions and tasks of these owners. |
 | `roles` | `[]` | role names | Sessions and tasks whose owner (else the task) has one of these roles. |
-| `sessions` | `[]` | patterns | Session ids matching one of these `fnmatch` patterns (`hermes-run-*`, `dev-1-*`), whoever the board says owns them: keep patterns specific. A pattern of only `*` and `?` is refused. With only `sessions`, a session the board does not show must match one. |
+| `sessions` | `[]` | patterns | Session ids matching one of these `fnmatch` patterns (`hermes-run-*`, `dev-1-*`), whoever the board says owns them: keep patterns specific. A pattern of only `*` and `?` is refused. With only `sessions`, a session the board does not show must match one, so use it only where the exporter's session ids are the platform's run ids (an exporter that reports its chat id as the session needs `owners` or `roles`). |
 | `boards` | `[]` | board names | Tasks on these boards (Hermes named boards), and sessions of those tasks. |
 
 At least one of `owners`, `roles`, `sessions` and `boards` must be set. Who a session or
@@ -1185,9 +1185,10 @@ Kelpie remembers for budgets), never from the span:
 - A session or task the board does not show yet is bound to the first token that reports
   it; other tokens' spans for it are rejected. Every tick checks the bound ids against the
   board: once the board places one outside the token's scope, every stored span of that
-  token naming it is deleted, before rules, budgets and totals see it. Bindings last as long
-  as `retention` and are rebuilt from the store after a restart. A token may hold at most
-  10,000 bound ids the board does not show; more are refused (`reason="scope_backlog"`).
+  token naming it is deleted, before rules, budgets and totals see it. A binding lasts for
+  `retention` after its last use, and bindings are rebuilt from the store after a restart.
+  A token may hold at most 10,000 such ids that it used within the last day; spans naming
+  a new one beyond that are refused (`reason="scope_backlog"`).
 - A span takes a missing session or task from its parent only when both came with the same
   scoped token.
 - Out-of-scope spans are rejected (the export gets a partial success) or deleted, counted in
@@ -1195,9 +1196,8 @@ Kelpie remembers for budgets), never from the span:
   minute per token.
 
 Kelpie refuses to start when a token is not set, cannot be read, equals another token or
-the shared one, or (off loopback) is weak. Removing an entry: its spans in the snapshot
-window and those naming an id it held bound are deleted; with no entry left, stored spans
-stay as they are.
+the shared one, or (off loopback) is weak. Removing or renaming an entry leaves its stored
+spans as they are (history), unchecked from then on.
 
 The shared `[traces] token_env` token keeps working and may still report for every
 session; with `[[traces.tokens]]` and no shared token, a request without a token gets 401.

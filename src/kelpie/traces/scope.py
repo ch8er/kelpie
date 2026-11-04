@@ -16,10 +16,11 @@ span. Every id a span names is checked on its own:
   on it) is *bound* to the first token that reports it, and only that token may report for
   it. Every tick checks the bound ids against the board: once the board places one inside
   the token's scope the binding settles; once it places one outside, the binding is revoked
-  and every stored span of that token naming it is deleted (again for a few minutes, so a
-  span stored while the binding was revoked goes too). With only ``sessions`` patterns, an
-  unplaced session must match one. Bindings live as long as the span retention, and
-  rebuild from the store after a restart.
+  and every stored span of that token naming it is deleted. The check runs alone: an ingest
+  request judges and stores its spans with no check in between (:class:`Barrier`), so no
+  span judged before a revocation is stored after it. With only ``sessions`` patterns, an
+  unplaced session must match one. A binding lives for the span retention after its last
+  use, and bindings rebuild from the store after a restart.
 
 A span inherits a missing session or task only from a parent sent with the same scoped
 token (:data:`kelpie.core.spans.INGEST_MARK`), so it cannot take another agent's ids through
@@ -35,7 +36,8 @@ import fnmatch
 import logging
 import threading
 from collections import Counter
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from enum import StrEnum
@@ -51,7 +53,8 @@ TOKEN_ATTRIBUTE = INGEST_MARK
 OUT_OF_SCOPE = "out_of_scope"  # spans_rejected reason
 SCOPE_BACKLOG = "scope_backlog"  # spans_rejected reason: a token bound too many unplaced ids
 INDEX_KEEP = timedelta(hours=24)  # a session or task the board stopped showing is kept this long
-REVOKE_AGAIN = timedelta(minutes=5)  # a revoked id's spans are deleted again this long
+UNPLACED_ACTIVE = timedelta(hours=24)  # an unplaced id counts toward the cap this long after use
+MAX_BINDINGS = 1_000_000  # all tokens; the least recently used go first
 MAX_INDEX = 200_000  # entries per map; the oldest go first
 MAX_UNPLACED = 10_000  # ids one token may hold bound while the board does not place them
 LOG_EVERY = timedelta(minutes=1)
@@ -173,7 +176,9 @@ class ScopeIndex:
                 while len(table) > MAX_INDEX:
                     del table[next(iter(table))]
             self._local = {k: v for k, v in local.items() if k not in tasks}
-            self._alias = alias
+            self._alias.update(alias)  # kept: a finished session's task by its local id
+            while len(self._alias) > MAX_INDEX:
+                del self._alias[next(iter(self._alias))]
             self._task_sessions = of_task
 
     def session(self, session_id: str) -> tuple[Place, str | None] | None:
@@ -213,9 +218,52 @@ class ScopeIndex:
 @dataclass(slots=True)
 class _Binding:
     token: str
-    since: datetime
+    last: datetime  # last reported (or bound)
     settled: bool = False  # the board placed it inside the token's scope
-    revoked: datetime | None = None  # the board placed it outside: its spans are deleted
+    revoked: datetime | None = None  # the board placed it outside: its spans were deleted
+
+
+class Barrier:
+    """Many ingest requests at once (``shared``), or the guard's check alone
+    (``exclusive``): a request judges and stores its spans with no check in between, so a
+    span judged before a revocation is stored before the revocation deletes."""
+
+    def __init__(self) -> None:
+        self._cond = threading.Condition()
+        self._readers = 0
+        self._writer = False
+        self._waiting = 0
+
+    @contextmanager
+    def shared(self) -> Iterator[None]:
+        with self._cond:
+            while self._writer or self._waiting:
+                self._cond.wait()
+            self._readers += 1
+        try:
+            yield
+        finally:
+            with self._cond:
+                self._readers -= 1
+                if not self._readers:
+                    self._cond.notify_all()
+
+    @contextmanager
+    def exclusive(self) -> Iterator[None]:
+        with self._cond:
+            self._waiting += 1
+            try:
+                while self._writer or self._readers:
+                    self._cond.wait()
+            finally:
+                self._waiting -= 1
+            self._writer = True
+        try:
+            yield
+        finally:
+            with self._cond:
+                self._writer = False
+                self._cond.notify_all()
 
 
 def stamp(span: Span, token: str | None) -> Span:
@@ -245,7 +293,7 @@ class ScopeGuard:
     ``store``), deletes the snapshot's spans of scoped tokens that are now out of scope (a
     folded span takes the hook's session), counts what it deleted through ``rejected`` and
     calls ``on_discard`` (cached totals and usage are stale then). A span of a token no
-    longer configured counts as out of scope."""
+    longer configured is left as it is (history)."""
 
     scopes: Mapping[str, TokenScope]
     store: SpanStore | None = None
@@ -253,8 +301,8 @@ class ScopeGuard:
     on_discard: Callable[[], None] | None = None
     retention: timedelta = timedelta(days=7)
     index: ScopeIndex = field(default_factory=ScopeIndex)
-    _bound: dict[tuple[str, str], _Binding] = field(default_factory=dict)
-    _unplaced: Counter[str] = field(default_factory=Counter)  # per token: bound, not settled
+    barrier: Barrier = field(default_factory=Barrier)
+    _bound: dict[tuple[str, str], _Binding] = field(default_factory=dict)  # oldest use first
     _logged: dict[str, datetime] = field(default_factory=dict)
     _lock: threading.Lock = field(default_factory=threading.Lock)
 
@@ -343,43 +391,63 @@ class ScopeGuard:
         return kept, rejected
 
     def _bind(self, token: str, ids: list[tuple[str, str]], now: datetime) -> str | None:
-        """Bind ``ids`` to ``token``, all or none; why not, when another token bound one
-        meanwhile (out of scope) or the token holds too many unplaced ids (backlog)."""
+        """Bind ``ids`` to ``token`` (or note their use), all or none; why not, when another
+        token bound one meanwhile (out of scope) or the token holds too many ids the board
+        does not place that it used within :data:`UNPLACED_ACTIVE` (backlog)."""
         with self._lock:
-            new = [k for k in ids if k not in self._bound]
-            if any(
-                self._bound[k].token != token or self._bound[k].revoked is not None
-                for k in ids
-                if k in self._bound
-            ):
+            held = [self._bound.get(k) for k in ids]
+            if any(b is not None and (b.token != token or b.revoked) for b in held):
                 return OUT_OF_SCOPE
-            if self._unplaced[token] + len(new) > MAX_UNPLACED:
+            new = [k for k, b in zip(ids, held, strict=True) if b is None]
+            if new and self._active(token, now) + len(new) > MAX_UNPLACED:
                 return SCOPE_BACKLOG
-            for key in new:
-                self._bound[key] = _Binding(token, now)
-            self._unplaced[token] += len(new)
+            for key, b in zip(ids, held, strict=True):
+                self._bound.pop(key, None)  # re-inserted last: the most recent use at the end
+                self._bound[key] = _Binding(token, now) if b is None else replace(b, last=now)
+            while len(self._bound) > MAX_BINDINGS:
+                del self._bound[next(iter(self._bound))]
             return None
 
+    def _active(self, token: str, now: datetime) -> int:
+        """Unsettled ids bound to ``token`` used within :data:`UNPLACED_ACTIVE` (lock held)."""
+        n = 0
+        for b in reversed(self._bound.values()):  # the most recently used first
+            if now - b.last > UNPLACED_ACTIVE:
+                break
+            if b.token == token and not b.settled and b.revoked is None:
+                n += 1
+        return n
+
     def restore(self, after: datetime, now: datetime) -> int:
-        """After a restart: bind the ids of the stored spans of scoped tokens (last time at
-        or after ``after``) to the token whose span was stored first, so the next tick checks
-        them against the board again. Returns how many ids were bound."""
+        """After a restart: bind the ids of the stored spans of configured scoped tokens
+        (last time at or after ``after``) to the token whose span was stored first, so the
+        next tick checks them against the board again. Spans of a token no longer
+        configured are left as they are. Returns how many ids were bound."""
         if self.store is None:
             return 0
         bound = 0
         with self._lock:
             for session_id, task_id, token in self.store.marked_ids(after, TOKEN_ATTRIBUTE):
+                if token not in self.scopes:
+                    continue
                 for kind, value in ((SESSION, session_id), (TASK, task_id)):
                     if value is not None and (kind, value) not in self._bound:
                         self._bound[(kind, value)] = _Binding(token, now)
-                        self._unplaced[token] += 1
                         bound += 1
         return bound
 
     # --- every tick -----------------------------------------------------------------------
 
-    def check(self, snapshot: Snapshot, remembered: Attribution | None = None) -> Snapshot:
-        """The snapshot without spans out of their token's scope; those are deleted."""
+    def check(
+        self, snapshot: Snapshot, remembered: Attribution | None = None
+    ) -> tuple[Snapshot, int]:
+        """The snapshot without spans out of their token's scope, and how many spans were
+        deleted from the store. Runs alone: no ingest request is between judging and storing
+        its spans meanwhile (:class:`Barrier`)."""
+        with self.barrier.exclusive():
+            return self._check(snapshot, remembered)
+
+    def _check(self, snapshot: Snapshot, remembered: Attribution | None) -> tuple[Snapshot, int]:
         self.index.update(snapshot, remembered)
         now = snapshot.now
         deleted = 0
@@ -387,40 +455,37 @@ class ScopeGuard:
         with self._lock:
             bindings = list(self._bound.items())
         for (kind, value), held in bindings:
-            if now - held.since > self.retention:
-                self._forget(kind, value)
+            if now - held.last > self.retention:
+                with self._lock:
+                    self._bound.pop((kind, value), None)
                 continue
-            if held.revoked is not None:
-                if now - held.revoked <= REVOKE_AGAIN:
-                    revoke.append((kind, value, held.token))
-                continue
-            if held.settled:
+            if held.settled or held.revoked is not None:
                 continue
             scope = self.scopes.get(held.token)
-            if scope is None:
-                verdict: Verdict | None = Verdict.OUT
-            else:
-                verdict = self._placed(kind, value, scope)
+            verdict = Verdict.OUT if scope is None else self._placed(kind, value, scope)
             if verdict is Verdict.OUT:
                 with self._lock:
                     held.revoked = now
-                    self._unplaced[held.token] -= 1
                 revoke.append((kind, value, held.token))
                 self._log(held.token, f"{kind.removesuffix('_id')} {_short(value)!r}", now)
             elif verdict is Verdict.IN:
                 with self._lock:
                     held.settled = True
-                    self._unplaced[held.token] -= 1
         if self.store is not None:
             for kind, value, token in revoke:
                 try:
                     deleted += self.store.discard_marked(kind, value, TOKEN_ATTRIBUTE, token)
-                except Exception as exc:  # deleted again next tick, while REVOKE_AGAIN lasts
+                except Exception as exc:
                     log.error("cannot delete out-of-scope spans: %s", exc)
+                    with self._lock:  # tried again next tick
+                        if (held := self._bound.get((kind, value))) is not None:
+                            held.revoked = None
         out: set[SpanKey] = set()
         for span in snapshot.spans:
             token = span.attributes.get(TOKEN_ATTRIBUTE)
-            if isinstance(token, str) and self.judge(token, span)[0] is Verdict.OUT:
+            if not isinstance(token, str) or token not in self.scopes:
+                continue  # unscoped, or a token no longer configured: history
+            if self.judge(token, span)[0] is Verdict.OUT:
                 out.add(span_key(span))
                 self._log(token, f"session {_short(span.session_id)!r}", now)
         if out and self.store is not None:
@@ -433,8 +498,9 @@ class ScopeGuard:
         if (deleted or out) and self.on_discard is not None:
             self.on_discard()
         if not out:
-            return snapshot
-        return replace(snapshot, spans=tuple(s for s in snapshot.spans if span_key(s) not in out))
+            return snapshot, deleted
+        kept = tuple(s for s in snapshot.spans if span_key(s) not in out)
+        return replace(snapshot, spans=kept), deleted + len(out)
 
     def _placed(self, kind: str, value: str, scope: TokenScope) -> Verdict | None:
         """IN or OUT once the board places a bound id; None while it does not."""
@@ -448,12 +514,6 @@ class ScopeGuard:
         if task is None:
             return None
         return Verdict.IN if self._task_in_scope(scope, task) else Verdict.OUT
-
-    def _forget(self, kind: str, value: str) -> None:
-        with self._lock:
-            held = self._bound.pop((kind, value), None)
-            if held is not None and not held.settled and held.revoked is None:
-                self._unplaced[held.token] -= 1
 
     def _log(self, token: str, what: str, now: datetime) -> None:
         if self._due(token, now):
