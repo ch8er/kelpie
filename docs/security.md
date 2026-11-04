@@ -244,6 +244,74 @@ compose file) a weak token is taken as no token would be. `kelpie doctor` warns 
 weak token wherever serve listens ("traces token kept private"). `kelpie traces
 rotate-token` and `openssl rand -hex 32` give strong ones.
 
+## Per-agent traces tokens
+
+A span says which session and task it belongs to, so with one ingest token every agent's
+exporter can report for every other agent too: identical tool calls, an error streak or
+spend in another agent's session, enough for rule 10 to stop that run (audit M1).
+`[[traces.tokens]]` ([configuration.md](configuration.md#tracestokens)) gives each agent a
+token of its own, limited to the owners, roles, sessions or boards it may report for, the
+way the multi-host hub limits each `kelpie agent` to its own host:
+
+- **Who a span belongs to comes from the board.** Ingest looks the span's session up in
+  what the last snapshots showed (for a session the board no longer shows, in the owners
+  Kelpie remembers for budgets), and its task too: a session of another owner, a task other
+  than the session's own, or (without a known session) a task of another owner is outside
+  the token's scope, and the span is rejected and counted
+  (`kelpie_spans_rejected_total{reason="out_of_scope"}`).
+- **Ids the board does not show yet are bound.** A session too new to be on the board, or a
+  task not on it, belongs to the first token that reports it, and other tokens' spans for it
+  are rejected. Every tick checks the bound ids against the board; once it places one
+  outside the token's scope, every stored span of that token naming it is deleted (whatever
+  its times), and the totals and budget usage are read again, before rules and budgets see
+  it. That check runs alone: a request judges and stores its spans with no check in
+  between, so no span judged before a revocation is stored after it. A binding lasts for
+  the span retention after its last use; bindings are rebuilt from the store after a restart
+  (for the tokens still configured). Spans carry
+  their token's name (`kelpie.ingest.token`, set by Kelpie; whatever a sender put there is
+  replaced or removed), and a span takes a missing session or task from its parent only
+  when both came with the same scoped token. Hook spans are folded into OTLP spans before
+  the snapshot check, so a fold that moves a span into another session is caught too.
+- **What a forger can still do.** Claim a session id before its agent starts (Hermes run ids
+  are sequential) and report spans for it until the board shows the run; from then on they
+  are deleted, and the agent's own token reports for it. Hold up to 10,000 such ids used
+  within a day, after which its spans naming new ones are refused (other tokens are not
+  affected).
+- **Every token is compared**, each in constant time; two tokens with the same value (or a
+  scoped token equal to the shared one at startup) refuse to start, so a request maps to one
+  scope. Scoped tokens are matched first, so a scoped token that later equals a rotated
+  shared one still reports only for its scope.
+- **Rotation per token.** An entry with `token_file` rotates like the shared token
+  (`kelpie traces rotate-token --token <name> [--grace 2h]`), with the same file rules,
+  grace period and revocation (`--grace 0s`); the other tokens are untouched.
+- **Limits.** A `sessions` pattern grants every matching session, whoever owns it: keep
+  patterns specific. A span that names no session or task counts toward day and project
+  budgets only (a hard one stops runs only with `stop_on_shared_budgets`). A scoped token
+  may report for every session of its scope, so scope a token to one agent (`owners`) where
+  agents of one role do not trust each other. Requests are forwarded (`[[traces.forward]]`)
+  as received, rejected spans included. The largest tool outputs and the daily report fold
+  stored OTLP tool calls with hook calls by their call id over the whole day, outside the
+  snapshot the check sees: a span carrying another agent's (provider-generated) tool call id
+  could be counted under that agent's session there, never in rule 10 or budgets. A removed
+  (or renamed) entry covers nothing: its spans stay while the board does not show their
+  session or task, and are deleted once it does, so removing a misbehaving agent's token
+  also removes what it claimed in advance. The shared token, when set, still
+  reports for every session: `kelpie doctor` warns while any rule is in `act`.
+
+**Moving from one token.**
+
+1. For each agent (or group of agents that trust each other), generate a token
+   (`openssl rand -hex 32`, or `kelpie traces rotate-token --token <name>` with a
+   `token_file`) and add a `[[traces.tokens]]` entry naming its owners (or roles, sessions,
+   boards). Restart `kelpie serve`; the shared token keeps working meanwhile.
+2. Point each agent's exporter at its own token and restart the agents. A span that its
+   new token may not report shows up in `kelpie_spans_rejected_total{reason="out_of_scope"}`
+   and the log: widen that entry's scope rather than falling back to the shared token.
+3. When no exporter uses the shared token any more, unset `$KELPIE_TRACES_TOKEN` (remove
+   `[traces] token_env` and `token_file`) and restart `kelpie serve`. From then on a request
+   without one of the agents' tokens gets 401, and `kelpie doctor` passes "traces tokens per
+   agent".
+
 ## CI and release workflows
 
 Every workflow action is pinned to a commit. Checkouts keep no token in `.git/config`
@@ -295,50 +363,43 @@ holding it):
 What 0.1.0a1 ships knowing, from the audit's open medium findings. Each has a follow-up;
 this section shrinks as they land.
 
-### Rule 10 in act trusts every holder of the traces token (M1)
+### Rule 10 in act trusts hook spool lines and the shared traces token (M1)
 
-`loop_breaker` (rule 10) stops a run that repeats identical tool calls, hits an error
-streak or exceeds a hard budget (`[[budgets]] hard`), and it reads all of that from spans.
-Kelpie cannot tell who wrote a span:
+`loop_breaker` (rule 10) stops a run that repeats identical tool calls, hits an error streak
+or exceeds a hard budget (`[[budgets]] hard`), and it reads all of that from spans. Two
+sources can name another agent's run:
 
-- **OTLP spans.** A span's session id is whatever the sender writes in it, and the ingest has
-  one token that every agent's exporter holds. Whoever has the token can send a few identical
-  tool spans tagged with another agent's session id; without a token (loopback, or
-  `allow_unauthenticated`), any process that reaches the port can.
+- **OTLP spans under the shared token**, or with no token at all (loopback, or
+  `allow_unauthenticated`). A span's session id is whatever the sender writes in it. Fixed by
+  [per-agent tokens](#per-agent-traces-tokens): an agent's own token may report only for its
+  own sessions. Farms that keep one shared token keep this risk, and `kelpie doctor` warns
+  while a rule acts.
 - **Hook spool lines.** A line names its run (Hermes `run_id`, Claude Code and OpenClaw
   `session_id`), and any agent that can write to the spool (the same user, or a container
-  with it mounted) can name another agent's run.
+  with it mounted) can name another agent's run. The Hermes check that a line comes from the
+  run's own worker is the second half of
+  [#302](https://github.com/ch8er/kelpie/issues/302).
 
 With rule 10 in `act`, either makes Kelpie stop the other agent's run, and on Hermes end
 its worker processes; forged spend can do the same through a hard budget (with
-`stop_on_shared_budgets`, through a shared one). The stop looks like Kelpie's own decision.
-In `observe` and `suggest` no run is stopped. Forged spans can also make rule 2 in `act`
-comment on another agent's task (its CI-polling note), hold back `checkpoints`' commit
-reminders, and skew alerts and the daily report; rule 10 is the only rule that stops a run.
+`stop_on_shared_budgets`, through a shared one). In `observe` and `suggest` no run is
+stopped. Forged spans can also make rule 2 in `act` comment on another agent's task (its
+CI-polling note), hold back `checkpoints`' commit reminders, and skew alerts and the daily
+report; rule 10 is the only rule that stops a run.
 
 **Who is affected.** Farms that run rule 10 in `act` and whose agents are untrusted or
 sandboxed (in a container, as another user, on another machine reporting straight to
-`kelpie serve`) while sharing the one traces token. An unsandboxed agent running as the same
-user as its peers gains nothing new: it could already signal their processes or block their
-tasks. Across hosts the multi-host hub is not affected: it namespaces every span and run by
-the `kelpie agent` whose token sent it, so one host cannot reach another host's runs. Agents
-on one host share that host's OTLP relay, which takes spans without a token, so within a
-host the risk is the same as on a single-host farm.
+`kelpie serve`) while sharing the one traces token or one spool. An unsandboxed agent
+running as the same user as its peers gains nothing new: it could already signal their
+processes or block their tasks. Across hosts the multi-host hub is not affected: it
+namespaces every span and run by the `kelpie agent` whose token sent it. Agents on one host
+share that host's OTLP relay, which takes spans without a token, so within a host the risk
+is the same as on a single-host farm.
 
-**What to do meanwhile.**
-
-- On such farms keep `loop_breaker` in `observe` or `suggest`
-  ([act-checklist.md](act-checklist.md)); a person decides each stop.
-- Or give agents that do not trust each other separate farms: their own `kelpie serve` and
-  traces token, or their own host with its own `kelpie agent` behind a hub.
-- Set a traces token, keep the ingest on loopback or a private address, and do not hand
-  the token to processes that are not agents' exporters. The shipped docker compose file
-  allows ingest without a token (its port is on `127.0.0.1`): before rule 10 acts there,
-  set `KELPIE_TRACES_TOKEN` and drop `KELPIE_TRACES_ALLOW_UNAUTHENTICATED`.
-
-**The fix.** Per-agent ingest tokens, each allowed to report only for its own owners and
-sessions, and a check that a spool line comes from the run it names
-([#302](https://github.com/ch8er/kelpie/issues/302)). This section goes when it lands.
+**What to do.** Give every agent its own `[[traces.tokens]]` entry and retire the shared
+token ([above](#per-agent-traces-tokens)). Until the spool check lands, on farms whose
+agents can write each other's spool keep `loop_breaker` in `observe` or `suggest`
+([act-checklist.md](act-checklist.md)), or give such agents separate farms.
 
 ### `kelpie serve`'s HTTP server has no connection guards (M5)
 

@@ -38,6 +38,7 @@ from kelpie.traces.forward import (
 )
 from kelpie.traces.ingest import DEFAULT_MAX_BODY_BYTES, DEFAULT_MAX_CONCURRENT
 from kelpie.traces.outputs import Filter, OutputSettings, normalize_platform
+from kelpie.traces.scope import TokenScope
 from kelpie.traces.semconv import DEFAULT_SESSION_ATTRIBUTE, DEFAULT_TASK_ATTRIBUTE, MappingOptions
 from kelpie.traces.store import DEFAULT_MAX_SNAPSHOT_SPANS
 
@@ -65,8 +66,12 @@ KEYS = frozenset(
         "commands",
         "known_runners",
         "outputs",
+        "tokens",
     }
 )
+TOKEN_KEYS = frozenset({"name", "token_env", "token_file", "owners", "roles", "sessions", "boards"})
+MAX_SCOPED_TOKENS = 256
+MAX_SCOPE_ENTRIES = 1024  # names or patterns per list
 OUTPUT_KEYS = frozenset(
     {"threshold_tokens", "min_calls", "repeat_days", "window", "min_sample", "owners", "filters"}
 )
@@ -143,6 +148,54 @@ def _loopback(parts: SplitResult) -> bool:
 
 
 @dataclass(frozen=True, slots=True)
+class ScopedTokenSettings:
+    """One ``[[traces.tokens]]`` entry: a token of its own (``token_env``, or
+    ``<token_env>=<token>`` in ``token_file``) that may report only for its scope (#302)."""
+
+    name: str
+    token_env: str
+    token_file: Path | None = None
+    owners: frozenset[str] = frozenset()
+    roles: frozenset[str] = frozenset()
+    sessions: tuple[str, ...] = ()
+    boards: frozenset[str] = frozenset()
+
+    @property
+    def scope(self) -> TokenScope:
+        return TokenScope(self.name, self.owners, self.roles, self.sessions, self.boards)
+
+    @property
+    def where(self) -> str:
+        """Where the token is read from, for messages (never the token)."""
+        return f"{self.token_file}" if self.token_file is not None else f"${self.token_env}"
+
+    def token(self, environ: Mapping[str, str] = os.environ) -> str:
+        """The token; raises ValueError naming the variable or file when it is missing."""
+        label = f"[[traces.tokens]] {self.name}"
+        if self.token_file is not None:
+            try:
+                text = read_token_file(self.token_file)
+                found = parse_token_file(text, self.token_env, str(self.token_file)).token
+            except OSError as exc:
+                raise ValueError(
+                    f"{label}: token_file {self.token_file}: cannot read it ({exc.strerror}); "
+                    f"`kelpie traces rotate-token --token {self.name}` creates it"
+                ) from None
+            except TokenFileError as exc:
+                raise ValueError(f"{label}: token_file {exc}") from None
+            if found is None:
+                raise ValueError(
+                    f"{label}: token_file {self.token_file}: no {self.token_env}= line; "
+                    f"`kelpie traces rotate-token --token {self.name}` writes one"
+                )
+            return found
+        token = environ.get(self.token_env, "").strip()
+        if not token:
+            raise ValueError(f"{label}: ${self.token_env} is not set")
+        return token
+
+
+@dataclass(frozen=True, slots=True)
 class TraceSettings:
     enabled: bool = True
     token_env: str = DEFAULT_TOKEN_ENV
@@ -167,6 +220,11 @@ class TraceSettings:
     # Runner names recorded when a command names them anywhere (#197 part 2b); empty: none.
     known_runners: tuple[str, ...] = ()
     outputs: OutputSettings = field(default_factory=OutputSettings)
+    # Per-agent tokens, each limited to its own owners, roles, sessions and boards (#302).
+    tokens: tuple[ScopedTokenSettings, ...] = ()
+
+    def scoped(self, name: str) -> ScopedTokenSettings | None:
+        return next((t for t in self.tokens if t.name == name), None)
 
     @property
     def options(self) -> MappingOptions:
@@ -223,8 +281,16 @@ class TraceSettings:
         if not self.enabled or is_loopback(host):
             return
         token = self.token(environ)
-        if token:
-            why = weak_token(token)
+        for scoped in self.tokens:
+            why = weak_token(scoped.token(environ))
+            if why is not None and not self.unauthenticated_allowed(environ):
+                raise ValueError(
+                    f"[[traces.tokens]] {scoped.name}: the token in {scoped.where} {why}, and "
+                    f"OTLP ingest listens on {host}: replace it with a random token (`kelpie "
+                    f"traces rotate-token --token {scoped.name}`, or `openssl rand -hex 32`)"
+                )
+        if token or self.tokens:
+            why = weak_token(token) if token else None
             if why is not None and not self.unauthenticated_allowed(environ):
                 where = (
                     f"the token in {self.token_file}"
@@ -334,6 +400,7 @@ def load_traces(section: Any) -> TraceSettings:
         raise ValueError(f"[traces] token_grace: {exc}") from exc
     if not timedelta(0) <= token_grace <= MAX_TOKEN_GRACE:
         raise ValueError("[traces] token_grace must be between 0s and 7d")
+    tokens = _load_tokens(section.get("tokens", []), strings["token_env"])
     forward = _load_forward(section.get("forward", []))
     if forward and not enabled:
         raise ValueError(
@@ -359,7 +426,80 @@ def load_traces(section: Any) -> TraceSettings:
         commands=_flag_default(section, "commands"),
         known_runners=_known_runners(section.get("known_runners", [])),
         outputs=outputs,
+        tokens=tokens,
     )
+
+
+def _load_tokens(raw: Any, shared_env: str) -> tuple[ScopedTokenSettings, ...]:
+    """``[[traces.tokens]]``: a name, ``token_env`` (and optionally ``token_file``) and at
+    least one non-empty list among owners, roles, sessions and boards."""
+    if not isinstance(raw, list) or not all(isinstance(x, Mapping) for x in raw):
+        raise ValueError("[[traces.tokens]] must be an array of tables")
+    if len(raw) > MAX_SCOPED_TOKENS:
+        raise ValueError(f"[[traces.tokens]]: at most {MAX_SCOPED_TOKENS} tokens")
+    out: list[ScopedTokenSettings] = []
+    for i, entry in enumerate(raw):
+        where = f"[[traces.tokens]] #{i + 1}"
+        if extra := set(entry) - TOKEN_KEYS:
+            raise ValueError(f"unknown {where} keys: {sorted(extra)}")
+        name = entry.get("name")
+        if not isinstance(name, str) or not name.strip() or len(name.strip()) > 64:
+            raise ValueError(f"{where}: name must be a non-empty string of at most 64 characters")
+        name = name.strip()
+        where = f"[[traces.tokens]] {name}"
+        env = entry.get("token_env")
+        if not isinstance(env, str) or not env.strip():
+            raise ValueError(f"{where}: token_env is required (the variable's name)")
+        env = env.strip()
+        if looks_like_token(env):  # never echoed
+            raise ValueError(f"{where}: token_env looks like a token: name the variable instead")
+        if not valid_name(env):
+            raise ValueError(f"{where}: token_env must be the name of an environment variable")
+        if env == shared_env:
+            raise ValueError(
+                f"{where}: token_env {env} is the shared [traces] token_env; give it its own"
+            )
+        file = entry.get("token_file")
+        if file is not None and (not isinstance(file, str) or not file.strip()):
+            raise ValueError(f"{where}: token_file must be a path")
+        if file is not None and looks_like_token(Path(file.strip()).name):
+            raise ValueError(f"{where}: token_file looks like a token, not a path to a file")
+        lists: dict[str, tuple[str, ...]] = {}
+        for key in ("owners", "roles", "sessions", "boards"):
+            value = entry.get(key, [])
+            if (
+                not isinstance(value, list)
+                or not all(isinstance(v, str) and v.strip() for v in value)
+                or len(value) > MAX_SCOPE_ENTRIES
+            ):
+                raise ValueError(
+                    f"{where}: {key} must be a list of at most {MAX_SCOPE_ENTRIES} non-empty "
+                    "strings"
+                )
+            lists[key] = tuple(dict.fromkeys(v.strip() for v in value))
+        if not any(lists.values()):
+            raise ValueError(
+                f"{where}: list the owners, roles, sessions or boards it may report for "
+                "(a token for every session is the shared [traces] token_env)"
+            )
+        if any(p.strip("*?") == "" for p in lists["sessions"]):
+            raise ValueError(f"{where}: a sessions pattern of only * and ? matches every session")
+        out.append(
+            ScopedTokenSettings(
+                name=name,
+                token_env=env,
+                token_file=Path(file.strip()).expanduser() if file is not None else None,
+                owners=frozenset(lists["owners"]),
+                roles=frozenset(lists["roles"]),
+                sessions=lists["sessions"],
+                boards=frozenset(lists["boards"]),
+            )
+        )
+    if len({t.name for t in out}) != len(out):
+        raise ValueError("[[traces.tokens]] names must be unique")
+    if len({(t.token_env, t.token_file) for t in out}) != len(out):
+        raise ValueError("[[traces.tokens]] each token needs its own token_env (or token_file)")
+    return tuple(out)
 
 
 def _known_runners(value: object) -> tuple[str, ...]:

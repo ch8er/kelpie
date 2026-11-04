@@ -35,6 +35,7 @@ from kelpie.core.model import Span
 from kelpie.core.spans import SpanStore
 from kelpie.traces import otlp
 from kelpie.traces.auth import TokenCheck, TokenFile
+from kelpie.traces.scope import ScopeGuard, stamp
 from kelpie.traces.semconv import MappingOptions, map_spans
 
 log = logging.getLogger(__name__)
@@ -63,6 +64,28 @@ class IngestObserver(Protocol):
         ...
 
 
+@dataclass(slots=True)
+class ScopedToken:
+    """A ``[[traces.tokens]]`` token: from its env var (``token``) or its token file
+    (``file``, rotated without a restart). Its scope is ``ScopeGuard.scopes[name]``."""
+
+    name: str
+    token: str | None = field(default=None, repr=False)
+    file: TokenFile | None = None
+
+    def check(self, credentials: str) -> TokenCheck:
+        if self.file is not None:
+            return self.file.check(credentials)
+        if self.token is not None and hmac.compare_digest(
+            credentials.encode(), self.token.encode()
+        ):
+            return TokenCheck.CURRENT
+        return TokenCheck.INVALID
+
+
+_SHARED = ""  # _authorized: the shared token (or no token needed)
+
+
 class Headers(Protocol):
     def get(self, name: str, default: str | None = None) -> str | None: ...
 
@@ -87,10 +110,18 @@ class TraceIngest:
     options: MappingOptions = field(default_factory=MappingOptions)
     max_concurrent: int = DEFAULT_MAX_CONCURRENT
     max_age: timedelta = DEFAULT_MAX_AGE  # older spans would be pruned at once: rejected
+    # Per-agent tokens ([[traces.tokens]], #302) and the guard holding their scopes; with
+    # them, a request needs a token even when the shared one is not set.
+    scoped: Sequence[ScopedToken] = ()
+    guard: ScopeGuard | None = None
     _slots: threading.BoundedSemaphore = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         self._slots = threading.BoundedSemaphore(max(1, self.max_concurrent))
+        if self.scoped and (
+            self.guard is None or any(t.name not in self.guard.scopes for t in self.scoped)
+        ):
+            raise ValueError("every scoped traces token needs its scope in the guard")
 
     # Called with every accepted request as received (body, Content-Type, Content-Encoding),
     # e.g. :meth:`kelpie.traces.forward.Forwarder.submit`. Must not block.
@@ -112,16 +143,36 @@ class TraceIngest:
             self.observer.traces_request(reply.status)
         return reply
 
-    def _authorized(self, header: str | None) -> bool:
-        if self.tokens is None:
-            return self.token is None or _authorized(header, self.token)
+    def _authorized(self, header: str | None) -> str | None:
+        """Who sent the request: ``_SHARED`` for the shared token (or when no token is
+        needed), a scoped token's name, or None (refused). Every token is compared, in
+        constant time each."""
         credentials = _credentials(header)
-        verdict = TokenCheck.INVALID if credentials is None else self.tokens.check(credentials)
-        if verdict is TokenCheck.GRACE and self.observer is not None:
-            grace = getattr(self.observer, "traces_grace_request", None)
-            if callable(grace):
-                grace()
-        return verdict is not TokenCheck.INVALID
+        found: str | None = None
+        grace = False
+        if credentials is not None:
+            for scoped in self.scoped:
+                verdict = scoped.check(credentials)
+                if verdict is not TokenCheck.INVALID and found is None:
+                    found, grace = scoped.name, verdict is TokenCheck.GRACE
+        if found is None:
+            if self.tokens is None:
+                if self.token is None:
+                    open_ingest = not self.scoped
+                    return _SHARED if open_ingest else None
+                ok = credentials is not None and hmac.compare_digest(
+                    credentials.encode(), self.token.encode()
+                )
+                return _SHARED if ok else None
+            verdict = TokenCheck.INVALID if credentials is None else self.tokens.check(credentials)
+            if verdict is TokenCheck.INVALID:
+                return None
+            found, grace = _SHARED, verdict is TokenCheck.GRACE
+        if grace and self.observer is not None:
+            hook = getattr(self.observer, "traces_grace_request", None)
+            if callable(hook):
+                hook()
+        return found
 
     def _handle(
         self,
@@ -145,7 +196,8 @@ class TraceIngest:
         if length > self.max_body_bytes:
             message = f"body over {self.max_body_bytes} bytes"
             return _error(413, encoding, otlp.RESOURCE_EXHAUSTED, message)
-        if not authenticated and not self._authorized(headers.get("Authorization")):
+        sender = _SHARED if authenticated else self._authorized(headers.get("Authorization"))
+        if sender is None:
             return _error(401, encoding, otlp.UNAUTHENTICATED, "missing or invalid bearer token")
         if media not in (otlp.JSON, otlp.PROTOBUF):
             message = f"unsupported content type {media!r}; use {otlp.PROTOBUF} or {otlp.JSON}"
@@ -160,7 +212,9 @@ class TraceIngest:
         try:
             original_type = headers.get("Content-Type") or media
             body = read(length)
-            return self._ingest(body, media, original_type, content_encoding, encoding, rewrite)
+            return self._ingest(
+                body, media, original_type, content_encoding, encoding, rewrite, sender
+            )
         finally:
             self._slots.release()
 
@@ -172,6 +226,7 @@ class TraceIngest:
         content_encoding: str,
         encoding: str,
         rewrite: Callable[[Span], Span] | None = None,
+        sender: str = _SHARED,
     ) -> Reply:
         received = body  # forwarded as received, still compressed
         if content_encoding == "gzip":
@@ -196,13 +251,18 @@ class TraceIngest:
         rejected.update(mapped.rejected)
         if rewrite is not None:
             mapped = replace(mapped, spans=[rewrite(s) for s in mapped.spans])
-        try:
-            self.store.append_spans(mapped.spans, now)
-            if mapped.spans:
-                self.store.inherit_links({s.trace_id for s in mapped.spans})
-        except Exception as exc:  # the store is down: let the exporter retry
-            log.error("cannot store %d spans: %s", len(mapped.spans), exc)
-            return _error(503, encoding, otlp.UNAVAILABLE, "span store unavailable", close=False)
+        if not sender:  # no span of the shared token may claim a scoped token's name
+            mapped = replace(mapped, spans=[stamp(s, None) for s in mapped.spans])
+            stored = self._store(mapped.spans, now, encoding)
+        else:  # a scoped token: only its own sessions, judged and stored as one step
+            assert self.guard is not None  # __post_init__
+            with self.guard.barrier.shared():  # the guard's tick cannot run in between
+                kept, refused = self.guard.ingest_filter(sender, mapped.spans, now)
+                rejected.update(refused)
+                mapped = replace(mapped, spans=kept)
+                stored = self._store(mapped.spans, now, encoding)
+        if stored is not None:
+            return stored
         self._observe(mapped.spans, mapped.ignored, rejected)
         total = sum(rejected.values())
         message = "; ".join(f"{n} {reason}" for reason, n in sorted(rejected.items()))
@@ -213,6 +273,17 @@ class TraceIngest:
             except Exception:
                 log.exception("accepted-request hook failed")
         return Reply(200, otlp.encode_response(media, total, message), media)
+
+    def _store(self, spans: Sequence[Span], now: datetime, encoding: str) -> Reply | None:
+        """Store ``spans`` and fill their links; the error reply when the store is down."""
+        try:
+            self.store.append_spans(spans, now)
+            if spans:
+                self.store.inherit_links({s.trace_id for s in spans})
+        except Exception as exc:  # the store is down: let the exporter retry
+            log.error("cannot store %d spans: %s", len(spans), exc)
+            return _error(503, encoding, otlp.UNAVAILABLE, "span store unavailable", close=False)
+        return None
 
     def _observe(self, spans: Sequence[Span], ignored: int, rejected: Mapping[str, int]) -> None:
         if self.observer is None:

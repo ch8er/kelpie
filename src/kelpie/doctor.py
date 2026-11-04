@@ -508,6 +508,63 @@ def check_traces_token(settings: Settings, environ: Mapping[str, str]) -> Check:
     return _pass(TOKEN_CHECK, f"no backup or readable copy in {len(roots)} folder(s){more}{where}")
 
 
+SCOPES_CHECK = "traces tokens per agent"
+
+
+def check_traces_scopes(
+    settings: Settings, loaded: LoadedRules, environ: Mapping[str, str]
+) -> Check:
+    """Per-agent ingest tokens (#302, audit M1). FAIL when a ``[[traces.tokens]]`` token
+    cannot be read (serve would not start); WARN when one is weak, or when a rule is in
+    ``act`` while ingest takes spans for every session (the shared token, or no token):
+    then any holder of it can report spans for another agent's session, and rule 10 would
+    stop that agent's run on them."""
+    traces = settings.traces
+    if not traces.enabled:
+        return _skip(SCOPES_CHECK, "[traces] disabled")
+    if settings.hub is not None:
+        return _skip(SCOPES_CHECK, "[hub] is set: each agent reports with its own token")
+    problems: list[str] = []
+    fixes: list[str] = []
+    for entry in traces.tokens:
+        try:
+            value = entry.token(environ)
+        except ValueError as exc:
+            return _fail(SCOPES_CHECK, str(exc), "set the variable, or fix token_file")
+        if (weak := weak_token(value)) is not None:
+            problems.append(f"{entry.name}: the token in {entry.where} {weak}")
+            fixes.append(f"`kelpie traces rotate-token --token {entry.name}`")
+    try:
+        shared = traces.token(environ)
+    except ValueError:
+        shared = None  # the token check reports it
+    unscoped = shared is not None or not traces.tokens
+    acting = [s.name for s in loaded.statuses if s.implemented and s.mode is Mode.ACT]
+    if unscoped and acting:
+        who = (
+            f"the shared token (${traces.token_env})"
+            if shared is not None
+            else "ingest without a token (any process that reaches the port)"
+        )
+        problems.append(
+            f"{who} may report spans for every session, and {_names(acting)} in act: an agent "
+            "holding it can make rule 10 stop another agent's run"
+        )
+        fixes.append(
+            "give every agent its own [[traces.tokens]] entry (docs/security.md#per-agent-"
+            "traces-tokens), move the exporters to them, then unset the shared token; or "
+            "keep loop_breaker in observe or suggest"
+        )
+    if problems:
+        return _warn(SCOPES_CHECK, "; ".join(problems), "; ".join(fixes))
+    if not traces.tokens:
+        return _skip(SCOPES_CHECK, "no [[traces.tokens]]; no rule acts")
+    detail = f"{len(traces.tokens)} token(s), each limited to its own sessions"
+    if shared is not None:
+        detail += f"; the shared ${traces.token_env} still reports for every session"
+    return _pass(SCOPES_CHECK, detail)
+
+
 def _paths(paths: list[Path], limit: int = 5) -> str:
     shown = ", ".join(str(p) for p in paths[:limit])
     return shown + (f" and {len(paths) - limit} more" if len(paths) > limit else "")
@@ -1448,6 +1505,7 @@ def run_checks(
     ]
     checks.append(check_spans(settings, at, total, " or ".join(exporters) or "your exporter"))
     checks.append(check_traces_token(settings, environ))
+    checks.append(check_traces_scopes(settings, loaded, environ))
     checks.append(check_private_files(settings))
     checks.append(check_prices(settings, at))
     checks.append(check_spend_modes(settings, at))

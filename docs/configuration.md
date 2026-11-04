@@ -25,7 +25,7 @@ configure what exists.
 - [[adapters.hermes]](#adaptershermes), [[adapters.claude_code]](#adaptersclaude_code),
   [[adapters.openclaw]](#adaptersopenclaw), [[adapters.github_issues]](#adaptersgithub_issues),
   [[adapters.linear]](#adapterslinear)
-- [[traces]](#traces), [[[traces.forward]]](#tracesforward),
+- [[traces]](#traces), [[[traces.tokens]]](#tracestokens), [[[traces.forward]]](#tracesforward),
   [[traces.outputs]](#tracesoutputs)
 - [[[budgets]] and [prices]](#budgets-and-prices), [[spend]](#spend)
 - [[resources.prometheus]](#resourcesprometheus)
@@ -1156,6 +1156,69 @@ yet). `kelpie doctor` warns when the token is in a backup (`*.bak*`, `*~`, `*.or
 `*.old`) or a file others can read under the token file's folder, the Hermes home or
 `~/.claude`, and lists the other files that hold a copy. See
 [security.md](security.md#traces-token).
+
+### [[traces.tokens]]
+
+Per-agent ingest tokens (#302): each agent's exporter gets a token of its own that may
+report spans only for that agent's sessions, so an agent cannot report tool calls, errors
+or spend for another agent's run (audit M1: forged identical calls made rule 10 stop
+another agent's run). One table per token; none by default. Not used with `[hub]` (each
+`kelpie agent` already reports with its own `[[hub.agents]]` token).
+
+| Key | Default | Unit | Meaning |
+| --- | --- | --- | --- |
+| `name` | required | text, at most 64 characters, unique | Names the token in logs, `kelpie status`, `kelpie doctor` and `kelpie traces rotate-token --token <name>`. |
+| `token_env` | required | variable name | The variable holding the token; with `token_file`, the variable name inside that file. Each entry needs its own, and not the shared `[traces] token_env`. |
+| `token_file` | none | path | An env file holding `<token_env>=<token>`, read again when it changes and rotated with `kelpie traces rotate-token --token <name>` (the same rules as `[traces] token_file`; several entries may share one file, each with its own line). |
+| `owners` | `[]` | owner ids | Sessions and tasks of these owners. |
+| `roles` | `[]` | role names | Sessions and tasks whose owner (else the task) has one of these roles. |
+| `sessions` | `[]` | patterns | Session ids matching one of these `fnmatch` patterns (`hermes-run-*`, `dev-1-*`), whoever the board says owns them: keep patterns specific. A pattern of only `*` and `?` is refused. With only `sessions`, a session the board does not show must match one, so use it only where the exporter's session ids are the platform's run ids (an exporter that reports its chat id as the session needs `owners` or `roles`). |
+| `boards` | `[]` | board names | Tasks on these boards (Hermes named boards), and sessions of those tasks. |
+
+At least one of `owners`, `roles`, `sessions` and `boards` must be set. Who a session or
+task belongs to comes from the board (for a session it no longer shows, from the owner
+Kelpie remembers for budgets), never from the span:
+
+- A span's session must be in scope, and a task it names must be that session's own. A
+  task named without a session the board knows must be in scope, or be the task of a
+  session in scope.
+- A session or task the board does not show yet is bound to the first token that reports
+  it; other tokens' spans for it are rejected. Every tick checks the bound ids against the
+  board: once the board places one outside the token's scope, every stored span of that
+  token naming it is deleted, before rules, budgets and totals see it. A binding lasts for
+  `retention` after its last use, and bindings are rebuilt from the store after a restart.
+  A token may hold at most 10,000 such ids that it used within the last day; spans naming
+  a new one beyond that are refused (`reason="scope_backlog"`).
+- A span takes a missing session or task from its parent only when both came with the same
+  scoped token.
+- Out-of-scope spans are rejected (the export gets a partial success) or deleted, counted in
+  `kelpie_spans_rejected_total{reason="out_of_scope"}`, with a warning logged at most once a
+  minute per token.
+
+Kelpie refuses to start when a token is not set, cannot be read, equals another token or
+the shared one, or (off loopback) is weak. A removed (or renamed) entry covers nothing: its
+stored spans stay as history while the board does not show their session or task, and are
+deleted once it does. So renaming an entry drops that agent's stored spend (with budgets on,
+Kelpie remembers nearly every session's owner): rename between budget windows, or not at all.
+
+The shared `[traces] token_env` token keeps working and may still report for every
+session; with `[[traces.tokens]]` and no shared token, a request without a token gets 401.
+`kelpie doctor` warns ("traces tokens per agent") when a rule is in `act` and the shared
+token is set or ingest takes spans without a token. Moving from one token:
+[security.md](security.md#per-agent-traces-tokens).
+
+```toml
+[[traces.tokens]]
+name = "dev-1"
+token_env = "KELPIE_TRACES_TOKEN_DEV_1"
+owners = ["agent-dev-1"]
+
+[[traces.tokens]]
+name = "reviewers"
+token_env = "KELPIE_TRACES_TOKEN_REVIEWERS"
+token_file = "~/.config/kelpie/traces.env"
+roles = ["reviewer"]
+```
 
 ### [[traces.forward]]
 

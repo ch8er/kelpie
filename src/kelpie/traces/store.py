@@ -89,6 +89,12 @@ class SpanWindow:
             self.observer.snapshot_spans(len(found), dropped)
         return tuple(found)
 
+    def invalidate(self) -> None:
+        """Read totals, usage and attribution from the store again next time (spans were
+        deleted out of turn, #302)."""
+        with self._lock:
+            self._totals_at = self._usage_at = self._attribution_at = None
+
     def totals(self, now: datetime) -> tuple[SpanTotals, ...]:
         with self._lock:
             at = self._totals_at

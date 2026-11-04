@@ -37,6 +37,7 @@ PATH_KEYS: Mapping[str, Kind] = {
     "storage.path": Kind.PARENT,
     "report.dir": Kind.EXISTS,
     "traces.token_file": Kind.EXISTS,
+    "traces.tokens[].token_file": Kind.EXISTS,
     "agent.ca_file": Kind.EXISTS,
     "hub.tls_cert": Kind.EXISTS,
     "hub.tls_key": Kind.EXISTS,

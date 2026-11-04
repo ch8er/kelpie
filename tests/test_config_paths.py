@@ -26,6 +26,7 @@ FIELDS: dict[str, str] = {
     "Settings.db_path": "storage.path",
     "ReportSettings.dir": "report.dir",
     "TraceSettings.token_file": "traces.token_file",
+    "ScopedTokenSettings.token_file": "traces.tokens[].token_file",
     "AgentSettings.ca_file": "agent.ca_file",
     "HubSettings.tls_cert": "hub.tls_cert",
     "HubSettings.tls_key": "hub.tls_key",
@@ -98,6 +99,11 @@ path = "~/kelpie/kelpie.db"
 dir = "~/kelpie/reports"
 [traces]
 token_file = "~/kelpie/traces.env"
+[[traces.tokens]]
+name = "dev-1"
+token_env = "KELPIE_TRACES_TOKEN_DEV_1"
+token_file = "~/kelpie/dev-1.env"
+owners = ["agent-dev-1"]
 [agent]
 name = "host-a"
 server = "https://hub.example.org"

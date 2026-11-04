@@ -282,6 +282,16 @@ commands = true           # keep the prefix of shell commands on tool spans ("ma
                           # (after cd … &&, env …, a pipe); names only. Agent hosts:
                           # KELPIE_KNOWN_RUNNERS=ios_sim.sh,xcodebuild,npm test for the hooks
 
+# Per-agent ingest tokens (#302): each may report spans only for its own owners, roles,
+# sessions (fnmatch patterns) or boards; out-of-scope spans are rejected and counted. The
+# shared token_env above keeps working for every session (kelpie doctor warns while a rule
+# acts). See docs/security.md, "Per-agent traces tokens".
+#
+# [[traces.tokens]]
+# name = "dev-1"
+# token_env = "KELPIE_TRACES_TOKEN_DEV_1"   # or token_file = "...": rotate-token --token dev-1
+# owners = ["agent-dev-1"]                   # and/or roles, sessions, boards
+
 # Forward accepted OTLP requests, unchanged, to other backends (off unless configured; one
 # table per destination; secret header values come from env vars). See docs/guide.md, "Traces".
 #
