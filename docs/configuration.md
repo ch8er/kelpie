@@ -2156,7 +2156,8 @@ model = "claude-sonnet-5-5"
 ### Report sections
 
 `[report.sections.tokens]` (token optimization, `kelpie.traces.tokens`),
-`[report.sections.tokens_fit]` (context and model fit, `kelpie.traces.fit`) and
+`[report.sections.tokens_fit]` (context and model fit, `kelpie.traces.fit`),
+`[report.sections.review_economy]` (review economy, `kelpie.report.review_economy`) and
 `[report.sections.instructions]` (instruction files) accept the fields of `TokenSettings`,
 `FitSettings` and the section's own settings. Durations are strings (`"5m"`), counts whole
 numbers >= 0, ratios, shares and tolerances numbers between 0 and 1, lists lists of names;
@@ -2173,6 +2174,11 @@ any other value fails that section (noted in the report).
 | `tokens_fit.routine_min_calls` / `routine_output_tokens` / `routine_max_tool_tokens` | `20` / `400` / `1000` | Routine work: at least this many calls a day, at most this median output and mean tool output per call. |
 | `tokens_fit.min_after` | `"12h"` | After a model switch, how long before its quality is judged. |
 | `tokens_fit.min_saving_tokens` | `50000` | A recommendation needs at least this many tokens a day. |
+| `review_economy.min_sample` | `20` | Reviews of a kind before it gets a recommendation; fewer: "direction only". |
+| `review_economy.max_findings_share` | `0.05` | A kind whose reviews found something in more than this share never gets one. |
+| `review_economy.light_share` | `0.3` | What the lighter path costs next to a full review (the saving is the rest). |
+| `review_economy.small_files` | `2` | At most this many changed files: a small change (the board gives no line counts). |
+| `review_economy.docs_globs` / `tests_globs` / `generated_globs` / `dependency_globs` / `dependency_labels` | see `ReviewEconomySettings` | The patterns (on the path or the file name) and labels that make a task of each kind: all its files must match. |
 | `instructions.top` | `10` | Instruction files listed, the costliest first (`0`: no section). |
 
 The other fields (`break_ratio`, `fragment_min_sessions`, `review_reads`, ...) are

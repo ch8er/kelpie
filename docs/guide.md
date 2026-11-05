@@ -358,6 +358,15 @@ board the report is unchanged.
   resuming it. Each comes with a recommendation and its estimated saving, which competes
   for the top 3. Traces keep no prompt text, so a break is located by step and preceding
   tool, not by the line of the prompt that changed.
+- **Review economy** (#298, `kelpie.report.review_economy`): per repository and kind of
+  change (docs only, tests only, generated files, a dependency bump, a small change of at
+  most two files, code; from the files a task changed and its labels), the reviews the
+  board shows (sessions of `review_roles`), rounds per task, review tokens and how many
+  reviews found something (the task was sent back after it, or another round followed). A
+  light kind (never code) whose reviews found something in at most 5% of at least 20 of
+  them gets a recommendation for a lighter path, with the evidence (n reviews, k with
+  findings) and the tokens a day it would save; under 20 it is "direction only"; above
+  the threshold, nothing. Kelpie only recommends: it never changes how tasks are reviewed.
 - **Instruction files** (with `[instructions]`, incident 21): the files each role loads that
   cost the most tokens a day, as measured when the report runs (the 24 hours before), with
   where the figure comes from (counted skill loads, or size times sessions: an *estimate*,
