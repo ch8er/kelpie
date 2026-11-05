@@ -34,6 +34,10 @@ SpanKey = tuple[str, str]
 # The scoped ingest token that sent a span (kelpie.traces.scope sets it; #302). A span
 # inherits its session and task only from a parent sent with the same one (or none).
 INGEST_MARK = "kelpie.ingest.token"
+# Set (True) by a platform adapter on a hook span when it could not confirm that the line
+# came from the run it names (Hermes: its writer is not the run's recorded worker, #302).
+# Rule 10 never stops a run on such evidence alone; it alerts instead.
+UNVERIFIED_ATTRIBUTE = "kelpie.writer_unverified"
 MAX_LINK_DEPTH = 32  # parent chains deeper than this are not followed
 # An attribution entry seen again is rewritten only when it changed or is this old, so a
 # tick does not write every session it sees.

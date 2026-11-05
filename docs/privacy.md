@@ -9,7 +9,7 @@ keep less. It describes the code as it is; the files named below are the referen
 | Data | Kept | Not kept | Where | How long |
 | --- | --- | --- | --- | --- |
 | OTLP spans | ids, timing, model, token counts, tool name, outcome, allowlisted attributes, a hash of tool arguments, output size, a command prefix, known runner names | message content, prompts, completions, reasoning, tool arguments and results, error messages, user identity | `kelpie.db`, table `spans` | `[traces] retention` (7 days), at most `max_rows` (1,000,000) |
-| Hermes hook records | tool name, ids, hash of arguments, a redacted command, known runner names, outcome, duration, output size | raw arguments and results | spool file on the Hermes host | until rotated: one backup file at 20 MiB |
+| Hermes hook records | tool name, ids, hash of arguments, a redacted command, known runner names, outcome, duration, output size, the writer's pid and start fingerprint | raw arguments and results | spool file on the Hermes host | until rotated: one backup file at 20 MiB |
 | Claude Code hook records | session ids, start source, model and agent type, prompt source, turn errors, end reasons; tool name, ids, hash of arguments, a redacted command, known runner names, outcome, duration, output size; task id, status and owner of `TaskUpdate` calls; skill name of `Skill` calls | prompts, tool arguments and results, messages, transcript path, working directory, task subjects and descriptions | spool file on the agent host | until rotated: one backup file at 20 MiB |
 | Claude Code task lists | task id, subject (200 characters), status, owner, `blockedBy` | descriptions | read in place, not copied | |
 | OpenClaw hook records | session id, session key (the part naming a chat peer or group replaced by a keyed hash), agent id, run id, session end reasons, the session id a session resumed or was replaced by; tool name, call id, hash of arguments, a redacted command, known runner names, failed or not, duration, output size; per run (with conversation access) provider, model, token counts, trigger, success | prompts, messages, tool arguments and results, error messages, assistant text | spool file on the Gateway host | until rotated: one backup file at 20 MiB |
@@ -138,8 +138,10 @@ per session end to the spool (`~/.hermes/kelpie/spool.jsonl`, or `KELPIE_HERMES_
 
 A tool-call line holds: the tool name, the Hermes task, run and session ids, the tool call
 id, `args_hash` (the same hash as above), a redacted `command`, the outcome (`ok` or
-`error`), the duration in milliseconds and `output_chars`, the size of the result. Raw
-arguments, results and error messages are never written.
+`error`), the duration in milliseconds and `output_chars`, the size of the result. Every
+line also holds its writer's `pid` and `pid_start` (the process's start fingerprint, with
+the host's boot id, as Hermes records a worker's), so Kelpie can tell the run's own worker
+wrote it (#302). Raw arguments, results and error messages are never written.
 
 The redacted `command` is a short prefix built from an allowlist (`redact_command`, one block
 kept byte-identical in `kelpie.traces.command`, the Hermes plugin, the Claude Code hook and

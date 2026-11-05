@@ -5,6 +5,7 @@ from typing import Any
 import pytest
 
 from kelpie.core.actions import Action, ActionKind, Severity
+from kelpie.core.alerts import ANNOUNCES
 from kelpie.core.config import EngineConfig, Mode
 from kelpie.core.engine import Engine
 from kelpie.core.ledger import Outcome, Suppression
@@ -21,6 +22,7 @@ from kelpie.core.model import (
     Status,
     Task,
 )
+from kelpie.core.spans import UNVERIFIED_ATTRIBUTE
 from kelpie.rules import REGISTRY
 from kelpie.rules.loop_breaker import LoopBreaker, Thresholds, build
 from tests.fakes import FakeAlerter, StoppingAdapter
@@ -622,3 +624,34 @@ def test_a_resolved_bill_that_is_a_credit_says_so() -> None:
     credit = Snapshot(now=NOW, reconciliations=(_rec("anthropic", 2, 5.0, -20.0, False),))
     text = LoopBreaker().resolved("loop_breaker:bill:anthropic", credit)
     assert text == "the anthropic bill for 2026-03-02 is a credit of $20.00."
+
+
+# --- unverified evidence (#302, audit M1) --------------------------------------------------
+
+
+def unverified(spans: list[Span]) -> list[Span]:
+    return [replace(s, attributes={**s.attributes, UNVERIFIED_ATTRIBUTE: True}) for s in spans]
+
+
+def test_unverified_calls_alone_alert_but_do_not_stop() -> None:
+    actions = evaluate(snap(unverified(run(10))))
+    assert stops(actions) == []
+    (alert,) = actions
+    assert alert.severity is Severity.CRITICAL and alert.params["unverified"] is True
+    assert "Not stopped" in alert.reason and ANNOUNCES not in alert.params
+
+
+def test_verified_calls_still_stop_whatever_unverified_lines_say() -> None:
+    real = run(10)
+    forged = unverified([call(100 + i, s.start + timedelta(seconds=5), args="x")
+                         for i, s in enumerate(real)])  # fmt: skip
+    actions = evaluate(snap(real + forged))  # the forged calls would break the streak
+    assert [a.params["session_id"] for a in stops(actions)] == ["S-1"]
+
+
+def test_a_loop_made_only_with_forged_calls_is_not_stopped() -> None:
+    real = run(5)
+    forged = unverified(run(5, args="a", sid="S-1"))
+    forged = [replace(s, span_id=f"f-{s.span_id}") for s in forged]
+    actions = evaluate(snap(real + forged))
+    assert stops(actions) == []

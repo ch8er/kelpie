@@ -25,6 +25,10 @@ terminal tool also its exit code (an int), whether it went to the background or 
 refused it, and whether the redacted prefix still ends where the command did
 (``command_whole``): booleans and a number, nothing of the output.
 
+Every line also carries the writer: this process's ``pid`` and ``pid_start``, its start
+fingerprint as Hermes records a worker's (Linux; null elsewhere). A stop on spool evidence
+needs lines whose writer is the run's recorded worker (#302).
+
 Hooks are fire-and-forget: nothing here raises, blocks on the network or returns a value.
 """
 
@@ -474,14 +478,51 @@ def _text(value: Any) -> str | None:
     return str(value) if value not in (None, "") else None
 
 
-def _ids(kwargs: dict[str, Any]) -> dict[str, str | None]:
+def _ids(kwargs: dict[str, Any]) -> dict[str, Any]:
     env = os.environ
     return {
         # The ``task_id`` keyword of Hermes hooks is its internal id, not a kanban task.
         "task_id": _text(env.get("HERMES_KANBAN_TASK")),
         "run_id": _text(env.get("HERMES_KANBAN_RUN_ID") or kwargs.get("run_id")),
         "session_id": _text(kwargs.get("session_id") or env.get("HERMES_SESSION_ID")),
+        **_writer(),
     }
+
+
+_PROC = Path("/proc")
+_WRITER: tuple[int, str | None] | None = None  # (pid, fingerprint), per process
+
+
+def _writer() -> dict[str, Any]:
+    """This process: its pid and its start fingerprint the way Hermes records a worker's
+    (``"<boot_id>:<pid 1 start>|<start>"`` on Linux, ``worker_started_at``), so Kelpie can
+    tell the run's own worker wrote a line (#302). None where ``/proc`` is missing (macOS):
+    such lines are kept but cannot stop a run."""
+    global _WRITER
+    pid = os.getpid()
+    if _WRITER is None or _WRITER[0] != pid:  # computed once per process (and after a fork)
+        _WRITER = (pid, _fingerprint(pid))
+    return {"pid": pid, "pid_start": _WRITER[1]}
+
+
+def _start(pid: int) -> str | None:
+    try:
+        text = (_PROC / str(pid) / "stat").read_text(encoding="utf-8", errors="replace")
+        return text.rsplit(")", 1)[1].split()[19]  # field 22: start time in clock ticks
+    except (OSError, IndexError):
+        return None
+
+
+def _fingerprint(pid: int) -> str | None:
+    start = _start(pid)
+    if start is None:
+        return None
+    boot = ""
+    with contextlib.suppress(OSError):
+        boot = (_PROC / "sys/kernel/random/boot_id").read_text(encoding="utf-8").strip()
+    first = _start(1) or ""
+    epoch = f"{boot}:{first}" if (boot or first) else ""
+    return f"{epoch}|{start}"
 
 
 def _rotate(path: Path, limit: int) -> None:

@@ -96,7 +96,7 @@ class DemoFarm:
         self._clock_file = self.root / "clock"
         self._write_clock()
         self.board = Board(hermes_home / "kanban.db")
-        self.spool = Spool(hermes_home / "spool.jsonl")
+        self.spool = Spool(hermes_home / "spool.jsonl", self.board.path)
         self.hermes_log = hermes_home / hermes_cli.CALLS
         self.cli = hermes_cli.install(self.root / "bin", self.hermes_log, self._clock_file)
         self.github = self._stack.enter_context(github.serve())

@@ -1,0 +1,65 @@
+id: "m1-unverified-spool-writer"
+incident: null
+title: "Spool lines from another process name a run: no stop on them"
+description: >
+  Security audit M1 (#275, #302), synthetic. Every agent on a host can append to the hooks
+  spool, and a line names its run itself. agent-dev-2 appends ten identical tool calls that
+  name agent-dev-1's live run; the adapter finds that their writer (pid and start
+  fingerprint) is not the run's recorded worker and marks them unverified. Rule 10 sees the
+  loop but does not stop the run on lines it cannot tie to the run: it raises the critical
+  alert and leaves the stop to a human. A second run loops on lines its own worker wrote,
+  and is stopped as before.
+rule: loop_breaker
+config: {}
+snapshot:
+  now: "2026-03-02T12:00:00+00:00"
+  owners:
+    - {id: agent-dev-1, role: developer}
+    - {id: agent-dev-2, role: developer}
+  tasks:
+    - {id: T-M101, title: "Victim task", status: in_progress, status_since: "2026-03-02T11:00:00+00:00", role: developer, owner_id: agent-dev-1}
+    - {id: T-M102, title: "Real loop", status: in_progress, status_since: "2026-03-02T11:00:00+00:00", role: developer, owner_id: agent-dev-2}
+  sessions:
+    - {id: hermes-run-11, task_id: T-M101, owner_id: agent-dev-1, started_at: "2026-03-02T11:00:00+00:00", last_heartbeat: "2026-03-02T11:59:30+00:00"}
+    - {id: hermes-run-12, task_id: T-M102, owner_id: agent-dev-2, started_at: "2026-03-02T11:00:00+00:00", last_heartbeat: "2026-03-02T11:59:30+00:00"}
+  spans:
+    # Forged: written by another process, marked unverified by the adapter.
+    - trace_id: hook-forged
+      span_id: F-1
+      name: "execute_tool terminal"
+      kind: tool
+      tool: terminal
+      args_hash: "0123456789abcdef"
+      start: "2026-03-02T11:55:00+00:00"
+      end: "2026-03-02T11:55:01+00:00"
+      task_id: T-M101
+      session_id: hermes-run-11
+      outcome: ok
+      attributes: {kelpie.source: hooks, kelpie.writer_unverified: true}
+      repeat: {count: 10, every: "20s"}
+    # A real loop: the run's own worker wrote these lines.
+    - trace_id: hook-real
+      span_id: R-1
+      name: "execute_tool terminal"
+      kind: tool
+      tool: terminal
+      args_hash: "fedcba9876543210"
+      start: "2026-03-02T11:55:00+00:00"
+      end: "2026-03-02T11:55:01+00:00"
+      task_id: T-M102
+      session_id: hermes-run-12
+      outcome: ok
+      attributes: {kelpie.source: hooks}
+      repeat: {count: 10, every: "20s"}
+expected_actions:
+  - kind: alert
+    task_id: T-M101
+    severity: critical
+    reason_contains: "Not stopped"
+    params: {session_id: hermes-run-11, unverified: true}
+  - kind: stop
+    task_id: T-M102
+    params: {session_id: hermes-run-12}
+not_expected_actions:
+  - kind: stop
+    task_id: T-M101

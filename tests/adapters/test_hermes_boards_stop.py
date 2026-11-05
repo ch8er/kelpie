@@ -86,6 +86,13 @@ def farm(
             board.close()
 
 
+def writer(pid: int) -> tuple[int, str]:
+    table = host_table()
+    p = table.read(pid)
+    assert p is not None
+    return pid, table.fingerprint(p, table.epoch()[0])
+
+
 def config(tmp_path: Path, spool: Path) -> Path:
     exe = tmp_path / "bin" / "hermes"
     exe.parent.mkdir()
@@ -104,9 +111,14 @@ def config(tmp_path: Path, spool: Path) -> Path:
     return path
 
 
-def spool_line(task: str, n: int, at: datetime, args_hash: str) -> str:
+def spool_line(
+    task: str, n: int, at: datetime, args_hash: str, writer: tuple[int, str] | None = None
+) -> str:
+    pid, start = writer if writer is not None else (None, None)
     return json.dumps(
         {
+            "pid": pid,
+            "pid_start": start,
             "type": "tool",
             "at": at.timestamp(),
             "task_id": task,
@@ -126,10 +138,12 @@ def test_rule_10_stops_only_the_run_on_the_board_in_the_prefix(
 ) -> None:
     now = datetime.now(UTC)
     spool = tmp_path / "spool.jsonl"
+    sign = writer(farm["sign"][1].pid)  # each line written by its run's own worker (#302)
+    qr = writer(farm["qr"][1].pid)
     lines = [  # sign's run 1 loops on one call; qr's run 1 does varied work
-        spool_line("t_s1", n, now - timedelta(seconds=60 - n), "0123456789abcdef")
+        spool_line("t_s1", n, now - timedelta(seconds=60 - n), "0123456789abcdef", sign)
         for n in range(12)
-    ] + [spool_line("t_q1", n, now - timedelta(seconds=60 - n), f"{n:016x}") for n in range(12)]
+    ] + [spool_line("t_q1", n, now - timedelta(seconds=60 - n), f"{n:016x}", qr) for n in range(12)]
     spool.write_text("\n".join(lines) + "\n")
     settings = load_settings(config(tmp_path, spool))
     (adapter,) = build_adapters(settings)

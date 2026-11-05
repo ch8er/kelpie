@@ -363,43 +363,49 @@ holding it):
 What 0.1.0a1 ships knowing, from the audit's open medium findings. Each has a follow-up;
 this section shrinks as they land.
 
-### Rule 10 in act trusts hook spool lines and the shared traces token (M1)
+### Rule 10 in act on a shared traces token or a Claude Code or OpenClaw spool (M1)
 
 `loop_breaker` (rule 10) stops a run that repeats identical tool calls, hits an error streak
-or exceeds a hard budget (`[[budgets]] hard`), and it reads all of that from spans. Two
-sources can name another agent's run:
+or exceeds a hard budget (`[[budgets]] hard`), and it reads all of that from spans. The
+audit found that an agent could make it stop another agent's run by naming that run in
+spans or spool lines (M1). Two fixes ([#302](https://github.com/ch8er/kelpie/issues/302))
+close that where they apply:
 
-- **OTLP spans under the shared token**, or with no token at all (loopback, or
-  `allow_unauthenticated`). A span's session id is whatever the sender writes in it. Fixed by
-  [per-agent tokens](#per-agent-traces-tokens): an agent's own token may report only for its
-  own sessions. Farms that keep one shared token keep this risk, and `kelpie doctor` warns
-  while a rule acts.
-- **Hook spool lines.** A line names its run (Hermes `run_id`, Claude Code and OpenClaw
-  `session_id`), and any agent that can write to the spool (the same user, or a container
-  with it mounted) can name another agent's run. The Hermes check that a line comes from the
-  run's own worker is the second half of
-  [#302](https://github.com/ch8er/kelpie/issues/302).
+- **OTLP spans:** with [per-agent tokens](#per-agent-traces-tokens) an agent's token may
+  report only for its own sessions.
+- **Hermes spool lines:** every line carries its writer (pid and start fingerprint), and a
+  line whose writer is not the run's recorded worker, or cannot be checked, is marked
+  unverified: rule 10 sends its critical alert but does not stop a run on such lines alone
+  (the plugin README's "Spool format"). A process that can read `kanban.db` could copy a
+  worker's pid and fingerprint, but one that can read the board can usually also write it
+  and block the run through Hermes itself.
 
-With rule 10 in `act`, either makes Kelpie stop the other agent's run, and on Hermes end
-its worker processes; forged spend can do the same through a hard budget (with
-`stop_on_shared_budgets`, through a shared one). In `observe` and `suggest` no run is
-stopped. Forged spans can also make rule 2 in `act` comment on another agent's task (its
-CI-polling note), hold back `checkpoints`' commit reminders, and skew alerts and the daily
-report; rule 10 is the only rule that stops a run.
+What is left:
+
+- **The shared traces token, or ingest without one** (loopback, or `allow_unauthenticated`),
+  still reports for every session, as before. `kelpie doctor` warns ("traces tokens per
+  agent") while a rule acts.
+- **Claude Code and OpenClaw spool lines** name their session themselves, and those
+  platforms record no worker process Kelpie could check them against; any agent that can
+  write the spool (the same user, or a container with it mounted) can name another agent's
+  session.
+- **Hermes spool lines from an older plugin**, or on macOS (no `/proc`), cannot be checked:
+  they never stop a run alone, so rule 10 stops such runs only from OTLP evidence.
 
 **Who is affected.** Farms that run rule 10 in `act` and whose agents are untrusted or
 sandboxed (in a container, as another user, on another machine reporting straight to
-`kelpie serve`) while sharing the one traces token or one spool. An unsandboxed agent
-running as the same user as its peers gains nothing new: it could already signal their
-processes or block their tasks. Across hosts the multi-host hub is not affected: it
-namespaces every span and run by the `kelpie agent` whose token sent it. Agents on one host
-share that host's OTLP relay, which takes spans without a token, so within a host the risk
-is the same as on a single-host farm.
+`kelpie serve`) while sharing the one traces token, or one Claude Code or OpenClaw spool. An
+unsandboxed agent running as the same user as its peers gains nothing new: it could already
+signal their processes or block their tasks. Across hosts the multi-host hub is not
+affected: it namespaces every span and run by the `kelpie agent` whose token sent it.
+Agents on one host share that host's OTLP relay, which takes spans without a token, so
+within a host the risk is the same as on a single-host farm.
 
 **What to do.** Give every agent its own `[[traces.tokens]]` entry and retire the shared
-token ([above](#per-agent-traces-tokens)). Until the spool check lands, on farms whose
-agents can write each other's spool keep `loop_breaker` in `observe` or `suggest`
-([act-checklist.md](act-checklist.md)), or give such agents separate farms.
+token ([above](#per-agent-traces-tokens)), and update the Hermes plugin on every agent host.
+Where agents that do not trust each other share a Claude Code or OpenClaw spool, keep
+`loop_breaker` in `observe` or `suggest` ([act-checklist.md](act-checklist.md)), or give
+them separate farms.
 
 ### `kelpie serve`'s HTTP server has no connection guards (M5)
 

@@ -195,6 +195,24 @@ def run_worker(conn: Any, run_id: int) -> RunWorker | None:
     return RunWorker(_pid(pid), _text(started), agent, agent_print, _text(lock))
 
 
+def writer_matches(writer: object, worker: RunWorker | None) -> bool | None:
+    """Whether a spool line's writer ``(pid, fingerprint)`` is the run's recorded worker
+    (its submitter or its agent, with the fingerprint Hermes recorded for it): True; False
+    when it is another process; None when it cannot be told (no writer on the line, an
+    older board, no recorded worker, or a fingerprint Hermes could not take)."""
+    if not (isinstance(writer, tuple) and len(writer) == 2) or worker is None:
+        return None
+    pid, start = writer
+    recorded = [
+        (p, f)
+        for p, f in ((worker.submitter, worker.submitter_print), (worker.agent, worker.agent_print))
+        if p is not None and f is not None and f != UNVERIFIED
+    ]
+    if not recorded:
+        return None
+    return (pid, start) in recorded
+
+
 def _pid(value: object) -> int | None:
     return value if type(value) is int else None  # not a bool
 
