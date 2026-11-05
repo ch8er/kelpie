@@ -56,7 +56,7 @@ LIGHTER_PATH = {
     SMALL: "a diff-only pass on a cheaper model",
 }
 NO_REPO = "(no repository)"
-CLOSED = frozenset({Status.DONE, Status.ACCEPTED, Status.CANCELLED})
+CLOSED = frozenset({Status.DONE, Status.ACCEPTED})  # not cancelled: a rejection may end it
 
 
 @dataclass(frozen=True, slots=True)
