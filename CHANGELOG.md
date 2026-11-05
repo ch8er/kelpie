@@ -148,6 +148,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
   The Claude Code stop reason also folds format characters (bidi overrides, zero width) into
   spaces and collapses runs of spaces, as OpenClaw's already did
   ([#160](https://github.com/ch8er/kelpie/issues/160)).
+- `kelpie selftest stop` no longer fails "no model calls after the stop" when the
+  agent's one request already sent when its worker was ended is answered just after the
+  stop; any other call (two or more, or one in the 5s quiet window after a 1s drain) still
+  fails it. A thread-scheduling race, seen on the macOS CI job.
 
 ## [0.1.0a1] - 2026-11-03
 
