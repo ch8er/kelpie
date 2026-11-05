@@ -360,7 +360,7 @@ holding it):
 
 ## Known residual risks
 
-What 0.1.0a1 ships knowing, from the audit's open medium findings. Each has a follow-up;
+What this release ships knowing, from the audit's open findings. Each has a follow-up;
 this section shrinks as they land.
 
 ### Rule 10 in act on a shared traces token or a Claude Code or OpenClaw spool (M1)
@@ -415,17 +415,14 @@ Where agents that do not trust each other share a Claude Code or OpenClaw spool,
 adapter's `spool_stops = false` with per-agent tokens, or keep `loop_breaker` in `observe`
 or `suggest` ([act-checklist.md](act-checklist.md)), or give them separate farms.
 
-### `kelpie serve`'s HTTP server has no connection guards (M5)
-
-The port of `kelpie serve` (OTLP ingest, `/metrics`, `/healthz`; 9464 by default) has no
-deadline before authentication and no cap on connections, so a slow client can hold its
-threads without a token. The hub's port (`[hub]`) has these guards. Keep serve on loopback
-(the default; docker compose publishes it on `127.0.0.1` only), or put a reverse proxy in
-front that limits connections and request time. Do not publish it with a bare
-`docker run -p 9464:9464`. Fix: [#304](https://github.com/ch8er/kelpie/issues/304).
-
-### Other open medium findings
+### Other open findings
 
 - **M7, what is left:** one acting instance per board is now enforced on one machine
   ([above](#one-acting-instance-per-board)), not across machines for a GitHub repository
   or Linear team, nor across users for those. Run one acting Kelpie per tracker.
+- **Lows L4, L13, L14** ([#336](https://github.com/ch8er/kelpie/issues/336)): stop-marker
+  writes in the Claude Code and OpenClaw adapters are not relative to a directory handle
+  (matters only if Kelpie runs with more privilege than the agents); outbound clients give
+  each resolved address the whole remaining connect time, so a host with several
+  blackholed addresses can exceed the deadline several times; the Dockerfile pins its base
+  images by tag, not digest.

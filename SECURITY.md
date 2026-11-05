@@ -7,7 +7,7 @@ maintained release branches.
 
 | Version | Supported |
 |---------|-----------|
-| the latest release (`0.1.0a1`) | Yes |
+| the latest release (`0.1.0a2`) | Yes |
 | `main`  | Yes       |
 | anything else | No  |
 
@@ -83,6 +83,7 @@ scope. Details and what to do meanwhile: [docs/security.md](docs/security.md#kno
   agents are untrusted or sandboxed, give each its own token, and if they share a Claude
   Code or OpenClaw spool set that adapter's `spool_stops = false` (its spool lines alone then
   only alert) or keep rule 10 in `observe` or `suggest`.
-- **`kelpie serve`'s HTTP port has no pre-auth deadline or connection cap (M5).** Keep it on
-  loopback (the default) or behind a reverse proxy that limits connections and request
-  time. Fix: [#304](https://github.com/ch8er/kelpie/issues/304).
+- **Low findings still open** ([#336](https://github.com/ch8er/kelpie/issues/336)): base
+  images pinned by tag, not digest (L14); one connect deadline shared by all of a host's
+  addresses, not per address (L13); stop-marker writes not relative to a directory handle,
+  which matters only if Kelpie runs with more privilege than its agents (L4).
