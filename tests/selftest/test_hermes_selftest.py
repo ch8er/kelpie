@@ -404,12 +404,17 @@ def killed_mid_write(db: Path, wal: bool) -> None:
     )
     conn.commit()
     conn.close()
-    writer = subprocess.Popen(
-        [sys.executable, "-c", KILLED_MID_WRITE, str(db)], stdout=subprocess.PIPE, text=True
-    )
-    assert writer.stdout is not None and writer.stdout.readline() == "writing\n"
-    writer.kill()
-    writer.wait()
+    with subprocess.Popen(
+        [sys.executable, "-c", KILLED_MID_WRITE, str(db)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    ) as writer:
+        assert writer.stdout is not None and writer.stderr is not None
+        line = writer.stdout.readline()
+        writer.kill()
+        writer.wait()
+        assert line == "writing\n", writer.stderr.read()
 
 
 def test_a_hot_journal_fails_the_step_with_its_cause(tmp_path: Path) -> None:
@@ -441,3 +446,28 @@ def test_the_fake_hermes_keeps_its_boards_in_wal_mode(fake: Path, tmp_path: Path
         assert conn.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
     finally:
         conn.close()
+
+
+def test_a_board_that_cannot_be_read_fails_the_step(tmp_path: Path) -> None:
+    with pytest.raises(selftest.Failed, match="cannot open the throwaway board"):
+        selftest._read(tmp_path / "missing" / "kanban.db", "SELECT 1")
+    junk = tmp_path / "kanban.db"
+    junk.write_bytes(b"not a database" * 100)
+    with pytest.raises(selftest.Failed, match=r"cannot read the throwaway board .*not a database"):
+        selftest._read(junk, "SELECT id FROM tasks")
+
+
+@pytest.mark.parametrize("wal", [True, False])
+def test_the_journal_mode_is_read(tmp_path: Path, wal: bool) -> None:
+    db = tmp_path / "kanban.db"
+    conn = sqlite3.connect(db)
+    if wal:
+        conn.execute("PRAGMA journal_mode=WAL")
+    conn.executescript(KANBAN_SCHEMA)
+    conn.close()
+    assert selftest._journal_mode(db) == ("wal" if wal else "delete")
+
+
+def test_the_fake_boards_draw_no_journal_note(fake: Path) -> None:
+    code, lines = run(fake)
+    assert code == 0 and not any("journal mode" in line for line in lines)

@@ -136,6 +136,8 @@ jobs:
           tests/adapters/test_hermes_boards_stop.py
           tests/selftest
       # Issue 320: the self-test's stop flaked here once; run it again and again to show it holds.
+      # About 2 minutes of macOS time per run: cut it to one pass once the act switch on the
+      # farm has shown a month of green macOS runs.
       - name: Self-test stop, 15 times in a row
         run: |
           for i in $(seq 1 15); do

@@ -367,6 +367,12 @@ def _steps(
     task = str(created.get("id") or "")
     if not task or not db.exists():
         raise Failed(f"no task or board after hermes kanban create (board {db})")
+    journal = _journal_mode(db)
+    if journal != "wal":  # a worker the stop kills mid-write would leave a hot journal
+        report.note(
+            f"the board's journal mode is {journal!r}, not 'wal': after a stop that ends a "
+            "worker mid-write, Kelpie (read-only) cannot read the board until Hermes writes it"
+        )
     dispatched = cli.json("kanban", "--board", BOARD, "dispatch", "--json")
     spawned = {str(s.get("task_id")) for s in dispatched.get("spawned") or ()}
     if task not in spawned:
@@ -474,6 +480,11 @@ def _unreadable(db: Path, exc: sqlite3.Error) -> str:
             "after a stop until Hermes writes them again)"
         )
     return f"cannot read the throwaway board {db}: {exc}"
+
+
+def _journal_mode(db: Path) -> str:
+    with _board(db) as conn:
+        return str(conn.execute("PRAGMA journal_mode").fetchone()[0]).lower()
 
 
 def _read(db: Path, sql: str, params: Sequence[object] = ()) -> list[sqlite3.Row]:

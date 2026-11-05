@@ -190,9 +190,9 @@ def main(argv: list[str]) -> int:
         db = db_of(argv[3])
         db.parent.mkdir(parents=True)
         conn = sqlite3.connect(db)
-        # As Hermes keeps its boards (and kelpie.sim's board): in rollback-journal mode, a
-        # worker the stop kills mid-write leaves a hot journal that Kelpie's read-only reads
-        # cannot roll back ("attempt to write a readonly database", issue 320).
+        # WAL, as Hermes and kelpie.sim keep their boards. In rollback-journal mode a worker
+        # the stop kills mid-write leaves a hot journal that Kelpie's read-only reads cannot
+        # roll back ("attempt to write a readonly database", issue 320).
         conn.execute("PRAGMA journal_mode=WAL")
         conn.executescript(KANBAN_SCHEMA)
         conn.close()
