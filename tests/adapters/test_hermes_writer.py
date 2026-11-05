@@ -7,6 +7,7 @@ from __future__ import annotations
 import json
 import os
 from collections.abc import Iterator
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -17,7 +18,7 @@ from kelpie.adapters.hermes import HermesAdapter, plugin
 from kelpie.adapters.hermes.proctable import fingerprint, instantiation_epoch, read_proc
 from kelpie.adapters.hermes.worker import UNVERIFIED, RunWorker, writer_matches
 from kelpie.core.actions import ActionKind
-from kelpie.core.model import Span, SpanKind
+from kelpie.core.model import Session, Snapshot, Span, SpanKind
 from kelpie.core.spans import UNVERIFIED_ATTRIBUTE
 from kelpie.rules import REGISTRY
 from tests.adapters.kanban import Board
@@ -266,3 +267,29 @@ def test_a_mismatched_writer_on_one_of_several_boards(tmp_path: Path) -> None:
     finally:
         for b in boards:
             b.close()
+
+
+def test_a_forged_line_with_the_same_call_id_does_not_double_a_call() -> None:
+    from kelpie.traces.hooks import merge_hook_spans
+
+    real = hook_and_otlp(5, False, "hermes-run-1")
+    forged = [
+        replace(s, span_id=f"f{s.span_id}", start=s.start - timedelta(milliseconds=1),
+                end=s.start - timedelta(milliseconds=1),
+                attributes={**s.attributes, UNVERIFIED_ATTRIBUTE: True})
+        for s in real
+        if s.span_id.startswith("h")
+    ]  # fmt: skip
+    folded = merge_hook_spans(forged + real).spans
+    verified = [
+        s for s in folded if s.kind is SpanKind.TOOL and UNVERIFIED_ATTRIBUTE not in s.attributes
+    ]
+    assert sorted(s.span_id for s in verified) == ["o0", "o1", "o2", "o3", "o4"]
+    snap = Snapshot(
+        now=NOW,
+        sessions=(Session("hermes-run-1", "T-1", "a", NOW - timedelta(hours=1),
+                          last_heartbeat=NOW),),
+        spans=folded,
+    )  # fmt: skip
+    actions = REGISTRY["loop_breaker"]({}).evaluate(snap)
+    assert not [a for a in actions if a.kind is ActionKind.STOP]
