@@ -26,7 +26,11 @@ These are the release notes for the tag, ahead of what changed.
   lines only when the run's own worker wrote them, so with an older plugin (or on macOS)
   it stops Hermes runs only from OTLP evidence and alerts otherwise. All hooks redact more
   of a command (`echo`/`printf` arguments, words after `auth` or `login`); `kelpie spool
-  scrub` cleans spools written before.
+  scrub` cleans spools written before, except a value an escaped blank already split off
+  (`FOO_TOKEN=a\ b make`): delete or rotate those spools.
+- **On a multi-host farm, upgrade `kelpie agent` on every agent host too.** The Hermes writer
+  check, the `spool_stops` marking and the per-board lock run where the adapter runs: a
+  0.1.0a2 hub with 0.1.0a1 agents still gets unchecked spool lines.
 - **Rule 10 evidence is scoped per agent where you configure it.** `[[traces.tokens]]` gives
   each agent's exporter its own token, limited to its own sessions; spans for another
   agent's session are rejected. The shared `[traces] token_env` keeps working unchanged,
@@ -40,16 +44,19 @@ These are the release notes for the tag, ahead of what changed.
 - **Multi-board Hermes configs:** `kelpie selftest stop` now works with
   `[[adapters.hermes.boards]]` (it failed before rule 10 could stop the run), so rule 10's
   act gate can be met on such a farm.
-- **The self-test needs Hermes boards in WAL mode** (Hermes' own default): a new step,
-  "board in WAL mode", fails `kelpie selftest stop` otherwise.
+- **The self-test needs Hermes to keep boards in WAL mode** (its own default): a new step,
+  "board in WAL mode", fails `kelpie selftest stop` when the board Hermes creates for the
+  test uses another journal mode.
 - **`~` is expanded in every path-valued config key**, including `[storage] path`, `[agent]
   ca_file`, `[hub] tls_cert`/`tls_key` and the Hermes and OpenClaw `cli`; `kelpie doctor`
   names paths that do not exist ("config paths exist", FAIL for a missing ledger
   directory).
-- **Two may refuse to start:** a second acting Kelpie on the same board (one acting instance
-  per board is now enforced with a lock), and `kelpie serve` with a weak traces token
+- **Three may refuse to start:** a second acting Kelpie on the same board (one acting
+  instance per board is now enforced with a lock); `kelpie serve` with a weak traces token
   (under 16 characters, spaces, or fewer than 6 different characters) while OTLP ingest
-  listens off loopback.
+  listens off loopback, unless `allow_unauthenticated` is set; and a config whose
+  `[engine] once_window`, `cooldown` or `retry_after` is longer than `[storage] retention`
+  (30 days by default): raise `retention` to match.
 
 **Rule 10 in `act` still trusts the shared traces token and Claude Code or OpenClaw spool
 lines** (audit M1, narrowed; this replaces 0.1.0a1's "trusts every holder of the traces
@@ -62,13 +69,13 @@ lines alone then only alert), or keep rule 10 in `observe` or `suggest`. Details
 [docs/security.md](docs/security.md#known-residual-risks).
 
 **Open findings** of the security audit
-([#336](https://github.com/ch8er/kelpie/issues/336)), all low:
+([#336](https://github.com/ch8er/kelpie/issues/336)), all low, and what is left of M7:
 
 - L4: stop-marker writes in the Claude Code and OpenClaw adapters are not relative to a
   directory handle; matters only if Kelpie runs with more privilege than the agents.
 - L13: outbound clients give each resolved address the whole remaining connect time, so a
   host with several blackholed addresses can exceed the deadline several times.
-- L14: the Dockerfile pins its base images by tag, not digest.
+- L14, what is left: the Dockerfile pins its base images by tag, not digest.
 - M7, what is left: one acting instance per board is enforced on one machine, not across
   machines or users for a GitHub repository or Linear team. Run one acting Kelpie per
   tracker.
@@ -212,7 +219,6 @@ Issues and Linear beyond the token check. The wheel and sdist were installed and
   `KELPIE_TRACES_TOKEN` published off loopback from starting. `kelpie doctor` warns about
   any weak token (audit L11). Workflow checkouts keep no token in `.git/config`, the release
   build's included (audit L14) ([#330](https://github.com/ch8er/kelpie/pull/330)).
-
 - Agent text is bounded: task titles, comments, block, return and exit reasons and
   progress notes keep their first 8000 characters, and the ledger stores at most 16,000 of
   an action's reason and cuts long params (audit L9); role and pre-work status labels on

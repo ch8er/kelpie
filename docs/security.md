@@ -424,5 +424,5 @@ or `suggest` ([act-checklist.md](act-checklist.md)), or give them separate farms
   writes in the Claude Code and OpenClaw adapters are not relative to a directory handle
   (matters only if Kelpie runs with more privilege than the agents); outbound clients give
   each resolved address the whole remaining connect time, so a host with several
-  blackholed addresses can exceed the deadline several times; the Dockerfile pins its base
-  images by tag, not digest.
+  blackholed addresses can exceed the deadline several times; what is left of L14: the
+  Dockerfile pins its base images by tag, not digest.
