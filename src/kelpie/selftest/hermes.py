@@ -582,7 +582,7 @@ def _not_stopped(spool: Path, rid: int, worker: RunWorker, thresholds: str) -> s
             writer_matches((e.get("pid"), e["pid_start"]), worker) is True for e in printed
         )
         return (
-            f"{text}; {verified} of them were written by the run's recorded worker, yet rule "
+            f"{text}; the run's recorded worker wrote {verified} of them, yet rule "
             "10 did not stop the run\ntell the Kelpie maintainers, with the output of kelpie "
             "selftest stop --keep"
         )
@@ -595,7 +595,8 @@ def _not_stopped(spool: Path, rid: int, worker: RunWorker, thresholds: str) -> s
         )
     if verdicts == {None}:
         hint = (
-            "on macOS Hermes records it through psutil: install psutil in Hermes' Python"
+            "on macOS Hermes records it through psutil: if this Hermes runs without psutil, "
+            "install it in Hermes' Python; otherwise tell the Kelpie maintainers"
             if sys.platform == "darwin"
             else "tell the Kelpie maintainers, with the output of kelpie selftest stop --keep"
         )

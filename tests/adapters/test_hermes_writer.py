@@ -116,8 +116,44 @@ def test_plugin_on_macos_without_libproc_writes_no_fingerprint(
     assert plugin._writer() == {"pid": os.getpid(), "pid_start": None}
 
 
+def test_plugin_loads_libproc_once_with_a_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    """libproc.dylib first, libSystem (``CDLL(None)``) when it has no ``proc_pidinfo``; loaded
+    once per process; nothing loadable: no fingerprint, no error."""
+    import ctypes
+    import ctypes.util
+
+    class NoSymbol:
+        def __getattr__(self, name: str) -> object:
+            raise AttributeError(name)
+
+    class System:
+        def __init__(self) -> None:
+            self.proc_pidinfo = lambda *a: 0
+
+    loads: list[object] = []
+
+    def cdll(path: object) -> object:
+        loads.append(path)
+        return System() if path is None else NoSymbol()
+
+    monkeypatch.setattr(ctypes.util, "find_library", lambda name: None)
+    monkeypatch.setattr(ctypes, "CDLL", cdll)
+    monkeypatch.setattr(plugin, "_PIDINFO", None)
+    first = plugin._proc_pidinfo()
+    assert plugin._proc_pidinfo() is first and loads == ["/usr/lib/libproc.dylib", None]
+    assert plugin.darwin_start(os.getpid()) is None  # a short read: no start
+
+    def broken(path: object) -> object:
+        raise OSError("no library")
+
+    monkeypatch.setattr(ctypes, "CDLL", broken)
+    monkeypatch.setattr(plugin, "_PIDINFO", None)
+    assert plugin.darwin_start(os.getpid()) is None
+
+
 def test_the_plugin_source_parses_on_python_3_8() -> None:
-    """Hermes loads the plugin in its own Python; the floor is 3.8, like the other hooks."""
+    """Hermes loads the plugin in its own Python; the floor is 3.8, like the other hooks.
+    (Syntax only: newer runtime APIs are kept out by review.)"""
     import ast
 
     ast.parse(Path(plugin.__file__).read_text(), feature_version=(3, 8))

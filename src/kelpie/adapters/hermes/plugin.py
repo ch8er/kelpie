@@ -53,8 +53,7 @@ except ImportError:  # pragma: no cover - not POSIX
 
 try:
     import ctypes
-    import ctypes.util
-except ImportError:  # pragma: no cover - a Python built without ctypes: no macOS fingerprint
+except Exception:  # pragma: no cover - a Python built without ctypes: no macOS fingerprint
     ctypes = None  # type: ignore[assignment]
 
 SPOOL_ENV = "KELPIE_HERMES_SPOOL"
@@ -590,6 +589,8 @@ _PIDINFO: Any = None  # libproc's proc_pidinfo, loaded once per process
 def _proc_pidinfo() -> Any:
     global _PIDINFO
     if _PIDINFO is None:
+        import ctypes.util  # macOS only: never loaded into Hermes on Linux
+
         try:
             path = ctypes.util.find_library("proc") or "/usr/lib/libproc.dylib"
             fn = ctypes.CDLL(path).proc_pidinfo

@@ -227,7 +227,7 @@ def test_a_plugin_whose_lines_cannot_stop_a_run_fails_and_says_why(
     broken = tmp_path / "plugin.py"
     broken.write_text(selftest.PLUGIN.read_text() + "\n\n" + patch)
     monkeypatch.setattr(selftest, "PLUGIN", broken)
-    monkeypatch.setattr(selftest, "STOP_TIMEOUT", 15.0)  # slow macOS runners
+    monkeypatch.setattr(selftest, "STOP_TIMEOUT", 30.0)  # the first line on a slow macOS runner
     code, lines = run(fake)
     assert code == 1
     fail = next(line for line in lines if line.startswith("FAIL  selftest:"))
@@ -249,7 +249,7 @@ WORKER = RunWorker(10, "|100", 11, "|111", "h:1")
     ("writers", "worker", "expected"),
     [
         ([], WORKER, "check that Kelpie's plugin loads"),
-        ([(11, "|111"), (11, None)], WORKER, "1 of them were written by the run's recorded"),
+        ([(11, "|111"), (11, None)], WORKER, "the run's recorded worker wrote 1 of them"),
         ([(11, None), (11, None)], WORKER, "2 of them carry no pid_start"),
         ([(11, "|111")], RunWorker(10, UNVERIFIED, None, None, "h:1"), "no usable start"),
         ([(11, "|999")], WORKER, "none was written by the run's recorded worker"),
