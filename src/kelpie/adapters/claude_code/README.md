@@ -26,6 +26,7 @@ tasks_dir = "~/.claude/tasks"             # Claude Code's config dir + /tasks
 spool = "~/.claude/kelpie/spool.jsonl"    # written by the hook below; false = do not read one
 lookback = "24h"                          # sessions and completed tasks older than this are left out
 stop_dir = "~/.claude/kelpie/stop"        # where stop markers go; false = refuse stop (alerts instead)
+spool_stops = true                         # false = spool lines alone never stop a run (rule 10 alerts)
 enabled = true                            # default when the section exists
 ```
 
@@ -156,6 +157,13 @@ Limits:
   and add the `PreToolUse` entry. A stop that is written but not enforced (tool calls go on
   more than 2 minutes after the marker, and the hook never refused one) is logged once per
   session and shows as `exit_reason = "stop not enforced"`.
+- **Spool lines name their own session.** Any process that can append to the spool can write
+  lines for another session, and Claude Code records no worker Kelpie could check the writer
+  against. Where agents that do not trust each other share a spool, set
+  `[adapters.claude_code] spool_stops = false`: spool tool lines are then marked unverified,
+  rule 10 alerts on them but never stops a session on them alone, and Claude Code's own OTLP
+  tool spans (under a per-agent `[[traces.tokens]]` entry) still stop it
+  ([security](../../../../docs/security.md#rule-10-in-act-on-a-shared-traces-token-or-a-claude-code-or-openclaw-spool-m1)).
 - **Routing.** Sessions carry their adapter (`Session.source`), so a stop of a session this
   adapter reports reaches it, also next to Hermes and also for a session whose task is not on
   a watched list. Task actions (comment, requeue) still go to the task's board.

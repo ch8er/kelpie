@@ -1,0 +1,65 @@
+id: "m1-spool-stops-off"
+incident: null
+title: "spool_stops = false: spool lines alone alert, the run's own OTLP spans still stop"
+description: >
+  Security audit M1 (#275, #302 option 2), synthetic. Claude Code and OpenClaw spool lines
+  name their session themselves, and neither platform records a worker Kelpie could check
+  the writer against. With `[adapters.claude_code] spool_stops = false` the adapter marks
+  every spool tool line unverified. Session cc-victim has only spool lines (ten identical
+  calls another process may have written): rule 10 raises the critical alert and does not
+  stop it. Session cc-loop loops in Claude Code's own OTLP tool spans, sent under its own
+  per-agent token: those are evidence of their own, and it is stopped as before.
+rule: loop_breaker
+config: {}
+snapshot:
+  now: "2026-03-02T12:00:00+00:00"
+  owners:
+    - {id: agent-cc-1, role: developer}
+    - {id: agent-cc-2, role: developer}
+  tasks:
+    - {id: T-M201, title: "Victim task", status: in_progress, status_since: "2026-03-02T11:00:00+00:00", role: developer, owner_id: agent-cc-1}
+    - {id: T-M202, title: "Real loop", status: in_progress, status_since: "2026-03-02T11:00:00+00:00", role: developer, owner_id: agent-cc-2}
+  sessions:
+    - {id: cc-victim, task_id: T-M201, owner_id: agent-cc-1, started_at: "2026-03-02T11:00:00+00:00", last_heartbeat: "2026-03-02T11:59:30+00:00"}
+    - {id: cc-loop, task_id: T-M202, owner_id: agent-cc-2, started_at: "2026-03-02T11:00:00+00:00", last_heartbeat: "2026-03-02T11:59:30+00:00"}
+  spans:
+    # Spool lines with spool_stops = false: marked unverified by the adapter.
+    - trace_id: hook-spool
+      span_id: H-1
+      name: "execute_tool Bash"
+      kind: tool
+      tool: Bash
+      args_hash: "0123456789abcdef"
+      start: "2026-03-02T11:55:00+00:00"
+      end: "2026-03-02T11:55:01+00:00"
+      task_id: T-M201
+      session_id: cc-victim
+      outcome: ok
+      attributes: {kelpie.source: hooks, kelpie.writer_unverified: true}
+      repeat: {count: 10, every: "20s"}
+    # Claude Code's own OTLP tool spans, under agent-cc-2's per-agent token.
+    - trace_id: otlp-loop
+      span_id: O-1
+      name: "claude_code.tool"
+      kind: tool
+      tool: Bash
+      args_hash: "fedcba9876543210"
+      start: "2026-03-02T11:55:00+00:00"
+      end: "2026-03-02T11:55:01+00:00"
+      task_id: T-M202
+      session_id: cc-loop
+      outcome: ok
+      attributes: {kelpie.ingest.token: agent-cc-2}
+      repeat: {count: 10, every: "20s"}
+expected_actions:
+  - kind: alert
+    task_id: T-M201
+    severity: critical
+    reason_contains: "Not stopped"
+    params: {session_id: cc-victim, unverified: true}
+  - kind: stop
+    task_id: T-M202
+    params: {session_id: cc-loop}
+not_expected_actions:
+  - kind: stop
+    task_id: T-M201

@@ -32,6 +32,7 @@ workboard = "~/.openclaw/plugins/workboard/workboard.sqlite"  # default: under s
 spool = "~/.openclaw/kelpie/spool.jsonl"   # written by the plugin below; false = do not read one
 lookback = "24h"                           # sessions and finished cards older than this are left out
 token_spans = true                         # LLM spans from the plugin; false if diagnostics-otel sends tokens too
+spool_stops = true                         # false = spool lines alone never stop a run (rule 10 alerts)
 stop_dir = "~/.openclaw/kelpie/stop"       # where stop markers go; false = refuse stop (alerts instead)
 stop_ttl = "24h"                           # the plugin's stopTtl
 cli = "openclaw"                           # aborts a stopped session's run; false = markers only
@@ -213,6 +214,13 @@ Limits:
 
 - **A guard against runaway agents, not hostile ones.** An agent that runs shell commands as
   the Gateway's user can delete its marker, forge spool lines or call `openclaw` itself.
+  Spool lines name their own session, and OpenClaw records no worker Kelpie could check the
+  writer against: where agents that do not trust each other share the spool, set
+  `[adapters.openclaw] spool_stops = false`. Spool tool lines are then marked unverified,
+  rule 10 alerts on them but never stops a session on them alone. OTLP tool spans of the
+  session would still stop it, but `diagnostics-otel` spans carry no session (see
+  [What Kelpie sees](#what-kelpie-sees)), so on OpenClaw this means alerts only
+  ([security](../../../../docs/security.md#rule-10-in-act-on-a-shared-traces-token-or-a-claude-code-or-openclaw-spool-m1)).
 - **Without conversation access** there is no `before_agent_run`: heartbeats and cron wakes
   still start runs on a stopped session (their tool calls are refused), and nothing but a
   reset, the marker's deletion or `stopTtl` lifts the stop. Grant access (see

@@ -80,8 +80,9 @@ scope. Details and what to do meanwhile: [docs/security.md](docs/security.md#kno
   stops a run only when the run's own worker wrote it
   ([#302](https://github.com/ch8er/kelpie/issues/302)). The shared token, ingest without a
   token, and Claude Code and OpenClaw spool lines can still name another agent's run: where
-  agents are untrusted or sandboxed, give each its own token, and keep rule 10 in `observe`
-  or `suggest` if they share a Claude Code or OpenClaw spool.
+  agents are untrusted or sandboxed, give each its own token, and if they share a Claude
+  Code or OpenClaw spool set that adapter's `spool_stops = false` (its spool lines alone then
+  only alert) or keep rule 10 in `observe` or `suggest`.
 - **`kelpie serve`'s HTTP port has no pre-auth deadline or connection cap (M5).** Keep it on
   loopback (the default) or behind a reverse proxy that limits connections and request
   time. Fix: [#304](https://github.com/ch8er/kelpie/issues/304).

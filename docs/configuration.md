@@ -1060,6 +1060,7 @@ stop markers the hook enforces. Absent: no Claude Code sessions. Details: the
 | `spool` | `"~/.claude/kelpie/spool.jsonl"` | path or `false` | Spool written by the hook. `false`: no sessions, no hook spans. |
 | `lookback` | `"24h"` | duration, > 0 | Sessions and completed tasks older than this are left out. |
 | `stop_dir` | `"~/.claude/kelpie/stop"` | path or `false` | Where `stop` writes markers; the hook must read the same directory as the same user. `false`: `stop` becomes an alert. |
+| `spool_stops` | `true` | bool | `false`: spool tool lines never stop a run on their own. They are marked unverified, so rule 10 alerts on them ("Not stopped: …") and stops a run only on Claude Code's OTLP tool spans. For agents that do not trust each other but share the spool; pair it with per-agent `[[traces.tokens]]` ([security](security.md#rule-10-in-act-on-a-shared-traces-token-or-a-claude-code-or-openclaw-spool-m1)). |
 | `enabled` | `true` | bool | `false` keeps the section but does not build the adapter. |
 
 ## [adapters.openclaw]
@@ -1080,6 +1081,7 @@ OpenClaw's Workboard plugin as tasks, and stop markers the plugin enforces. Abse
 | `stop_ttl` | `"24h"` | duration, > 0 | How long a stop marker holds; must match the plugin's `stopTtl`. |
 | `cli_timeout` | `"20s"` | duration, > 0 and <= 60s | Limit for the abort of one stop (up to two commands: by session key, then by run id), plus up to 2 seconds to reap a command that timed out; it runs inside the tick. |
 | `token_spans` | `true` | bool | LLM spans with each run's tokens from the plugin (it needs conversation access). Set `false` if OpenClaw's `diagnostics-otel` also sends its token spans to Kelpie: the daily report would count a run twice. |
+| `spool_stops` | `true` | bool | `false`: spool tool lines never stop a run on their own. They are marked unverified, so rule 10 alerts on them ("Not stopped: …") and stops a run only on its OTLP tool spans; `diagnostics-otel` spans carry no session yet, so on OpenClaw that means alerts only. For agents that do not trust each other but share the spool; pair it with per-agent `[[traces.tokens]]` ([security](security.md#rule-10-in-act-on-a-shared-traces-token-or-a-claude-code-or-openclaw-spool-m1)). |
 | `enabled` | `true` | bool | `false` keeps the section but does not build the adapter. |
 
 ## [adapters.github_issues]
