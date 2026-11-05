@@ -1,0 +1,27 @@
+# Review economy (#298): where full review almost never finds anything. Synthetic history of
+# one repository over five days. `classes` is fixture-only and compact: each entry makes
+# `tasks` tasks changing `files` (and `labels`), each reviewed once by reviewer-1 in a
+# session spending `tokens` model tokens; the first `sent_back` tasks come back from review.
+# tests/report/test_review_economy.py expands it and reads `expected` / `not_expected`.
+id: review-economy
+description: >
+  Docs-only changes went through 24 full reviews and none found anything: a lighter path
+  is recommended for them, with the evidence. Code changes were sent back in 9 of 24
+  reviews: no recommendation, ever. Tests-only changes found nothing in 6 reviews, too few
+  to recommend: direction only. A dependency bump that came back once in 3 reviews is above
+  the threshold: nothing.
+config: {}
+now: "2026-03-06T00:00:00+00:00"
+days: 5
+repo: example/repo
+classes:
+  - {kind: docs only, files: ["README.md", "docs/guide.md"], tasks: 24, sent_back: 0, tokens: 40000}
+  - {kind: code, files: ["src/app.py", "src/db.py", "src/api.py"], tasks: 24, sent_back: 9, tokens: 90000}
+  - {kind: tests only, files: ["tests/test_app.py"], tasks: 6, sent_back: 0, tokens: 30000}
+  - {kind: dependency bump, files: ["uv.lock"], tasks: 3, sent_back: 1, tokens: 20000}
+expected:
+  recommend: [{repo: example/repo, kind: docs only, n: 24, k: 0}]
+  direction: [{repo: example/repo, kind: tests only, n: 6, k: 0}]
+not_expected:
+  recommend: [{kind: code}, {kind: tests only}, {kind: dependency bump}]
+  direction: [{kind: code}, {kind: dependency bump}]

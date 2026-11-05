@@ -61,6 +61,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ### Added
 
+- Review economy in the daily report (#298): per repository and kind of change (docs only,
+  tests only, generated files, a dependency bump, a small change, code), review rounds,
+  review tokens and how often a review found something (a return, or another round). A
+  light kind whose full reviews almost never find anything (at most 5% of at least 20)
+  gets a recommendation for a lighter path, with the evidence and the tokens a day it
+  would save; fewer reviews are "direction only", and code or a kind above the threshold
+  never gets one. Kelpie only recommends; it never changes how tasks are reviewed
+  (`[report.sections.review_economy]`).
 - Tokens per return (#197 item 7): the "Farm throughput" section lists "Tokens on rework",
   the model calls on each task returned within the day after its first return, per role
   (who made the call) and per task, with tokens per return
