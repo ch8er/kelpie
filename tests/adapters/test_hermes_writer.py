@@ -6,6 +6,8 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
+import sys
 from collections.abc import Iterator
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -14,14 +16,21 @@ from typing import Any
 
 import pytest
 
-from kelpie.adapters.hermes import HermesAdapter, plugin
-from kelpie.adapters.hermes.proctable import fingerprint, instantiation_epoch, read_proc
+from kelpie.adapters.hermes import HermesAdapter, plugin, proctable
+from kelpie.adapters.hermes.proctable import (
+    Libproc,
+    fingerprint,
+    host_table,
+    instantiation_epoch,
+    read_proc,
+)
 from kelpie.adapters.hermes.worker import UNVERIFIED, RunWorker, writer_matches
 from kelpie.core.actions import ActionKind
 from kelpie.core.model import Session, Snapshot, Span, SpanKind
 from kelpie.core.spans import UNVERIFIED_ATTRIBUTE
 from kelpie.rules import REGISTRY
 from tests.adapters.kanban import Board
+from tests.adapters.libproc_fake import fake_farm, stamp
 
 NOW = datetime(2026, 3, 2, 12, tzinfo=UTC)
 PRINT = "boot-1:30|4242"
@@ -57,9 +66,151 @@ def test_plugin_writes_the_writer_on_every_line(
 def test_plugin_without_proc_writes_no_fingerprint(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setattr(plugin, "_DARWIN", False)
     monkeypatch.setattr(plugin, "_PROC", tmp_path / "no-proc")
     monkeypatch.setattr(plugin, "_WRITER", None)
     assert plugin._writer() == {"pid": os.getpid(), "pid_start": None}
+
+
+# --- macOS (#353): the plugin fingerprints its process through libproc ----------------------
+
+
+def test_the_plugin_and_the_process_table_share_one_definition() -> None:
+    """Hermes' macOS start time is defined once, in the plugin (it cannot import Kelpie);
+    the process table that verifies a worker before ending it uses that definition."""
+    assert proctable.ProcBsdInfo is plugin.ProcBsdInfo
+    assert proctable.birth is plugin.birth
+    assert proctable.PROC_PIDTBSDINFO == plugin.PROC_PIDTBSDINFO == 3
+
+
+def test_plugin_on_macos_writes_what_the_process_table_verifies(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With a fake libproc everywhere: the plugin's ``pid_start`` of a process is the
+    fingerprint Kelpie computes for it, the one a macOS Hermes records (``"|<start>"``)."""
+    lib = fake_farm()
+    monkeypatch.setattr(plugin, "_DARWIN", True)
+    monkeypatch.setattr(plugin, "_PIDINFO", lib.proc_pidinfo)
+    table = Libproc(lib)
+    epoch, why = table.epoch()
+    assert why is None
+    for pid in (30, 40):
+        p = table.read(pid)
+        assert p is not None
+        assert plugin._fingerprint(pid) == table.fingerprint(p, epoch) == stamp(lib, pid)
+    worker = RunWorker(30, stamp(lib, 30), 40, stamp(lib, 40), "h:1")
+    assert writer_matches((40, plugin._fingerprint(40)), worker) is True
+    assert plugin._fingerprint(99) is None  # no such process
+
+
+def test_plugin_on_macos_without_libproc_writes_no_fingerprint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def missing() -> object:
+        raise OSError("no libproc")
+
+    monkeypatch.setattr(plugin, "_DARWIN", True)
+    monkeypatch.setattr(plugin, "_PIDINFO", None)
+    monkeypatch.setattr(plugin, "_proc_pidinfo", missing)
+    monkeypatch.setattr(plugin, "_WRITER", None)
+    assert plugin._writer() == {"pid": os.getpid(), "pid_start": None}
+
+
+def test_plugin_loads_libproc_once_with_a_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    """libproc.dylib first, libSystem (``CDLL(None)``) when it has no ``proc_pidinfo``; loaded
+    once per process; nothing loadable: no fingerprint, no error."""
+    import ctypes
+    import ctypes.util
+
+    class NoSymbol:
+        def __getattr__(self, name: str) -> object:
+            raise AttributeError(name)
+
+    class System:
+        def __init__(self) -> None:
+            self.proc_pidinfo = lambda *a: 0
+
+    loads: list[object] = []
+
+    def cdll(path: object) -> object:
+        loads.append(path)
+        return System() if path is None else NoSymbol()
+
+    monkeypatch.setattr(ctypes.util, "find_library", lambda name: None)
+    monkeypatch.setattr(ctypes, "CDLL", cdll)
+    monkeypatch.setattr(plugin, "_PIDINFO", None)
+    first = plugin._proc_pidinfo()
+    assert plugin._proc_pidinfo() is first and loads == ["/usr/lib/libproc.dylib", None]
+    assert plugin.darwin_start(os.getpid()) is None  # a short read: no start
+
+    def broken(path: object) -> object:
+        raise OSError("no library")
+
+    monkeypatch.setattr(ctypes, "CDLL", broken)
+    monkeypatch.setattr(plugin, "_PIDINFO", None)
+    assert plugin.darwin_start(os.getpid()) is None
+
+
+def test_the_plugin_source_parses_on_python_3_8() -> None:
+    """Hermes loads the plugin in its own Python; the floor is 3.8, like the other hooks.
+    (Syntax only: newer runtime APIs are kept out by review.)"""
+    import ast
+
+    ast.parse(Path(plugin.__file__).read_text(), feature_version=(3, 8))
+
+
+WRITER_CHILD = """
+import importlib.util, json, sys, time
+spec = importlib.util.spec_from_file_location("hermes_plugins.kelpie", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+print(json.dumps(module._writer()), flush=True)
+time.sleep(60)
+"""
+
+
+@pytest.mark.skipif(host_table().unavailable() is not None, reason="needs /proc or libproc")
+def test_a_live_plugin_process_writes_the_fingerprint_kelpie_verifies(tmp_path: Path) -> None:
+    """The installed plugin file, alone in another Python process (as Hermes loads it): its
+    lines' writer is what Kelpie's process table reads for that process, on Linux and on
+    macOS (CI's macos job), so the run's worker passes the writer check (#353)."""
+    installed = tmp_path / "plugins" / "kelpie" / "__init__.py"
+    installed.parent.mkdir(parents=True)
+    installed.write_bytes(Path(plugin.__file__).read_bytes())
+    child = subprocess.Popen(
+        [sys.executable, "-I", "-c", WRITER_CHILD, str(installed)],
+        stdout=subprocess.PIPE,
+        cwd=tmp_path,
+    )
+    try:
+        assert child.stdout is not None
+        written = json.loads(child.stdout.readline())
+        table = host_table()
+        epoch, why = table.epoch()
+        assert why is None
+        p = table.read(child.pid)
+        assert p is not None
+        expected = table.fingerprint(p, epoch)
+        assert written == {"pid": child.pid, "pid_start": expected}
+        worker = RunWorker(None, None, child.pid, expected, "h:1")
+        assert writer_matches((written["pid"], written["pid_start"]), worker) is True
+        if sys.platform == "darwin":
+            assert expected.startswith("|") and expected[1:].isdigit()
+    finally:
+        child.kill()
+        child.wait(timeout=10)
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS libproc")
+def test_on_macos_the_plugin_writes_what_hermes_records() -> None:
+    """Hermes on macOS: ``round(process_birth(psutil.Process(pid)) * 100)``, no epoch."""
+    psutil = pytest.importorskip("psutil")
+    proc = psutil.Process(os.getpid())
+    try:
+        hermes = round(proc._proc.create_time(monotonic=True) * 100)
+    except TypeError:  # a psutil without the unadjusted read
+        hermes = round(proc.create_time() * 100)
+    assert plugin._fingerprint(os.getpid()) == f"|{hermes}"
 
 
 @pytest.mark.parametrize(

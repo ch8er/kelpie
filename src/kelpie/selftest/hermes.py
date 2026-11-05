@@ -38,6 +38,7 @@ import shutil
 import signal
 import sqlite3
 import subprocess
+import sys
 import tempfile
 import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
@@ -50,7 +51,15 @@ from kelpie.adapters.hermes import adapter as hermes_adapter
 from kelpie.adapters.hermes.adapter import HermesAdapter
 from kelpie.adapters.hermes.boards import HermesBoards
 from kelpie.adapters.hermes.stop import ENV_EXACT, ENV_PREFIXES
-from kelpie.adapters.hermes.worker import PROC, Proc, _same, host_table, run_worker
+from kelpie.adapters.hermes.worker import (
+    PROC,
+    Proc,
+    RunWorker,
+    _same,
+    host_table,
+    run_worker,
+    writer_matches,
+)
 from kelpie.adapters.hermes.worker import end as end_processes
 from kelpie.alerts.telegram import format_message
 from kelpie.app import ConfigError, HermesBoardSettings, HermesSettings, Settings, load_rules
@@ -419,12 +428,7 @@ def _steps(
     stop = None
     while stop is None:
         if time.monotonic() - started > STOP_TIMEOUT:
-            raise Failed(
-                f"rule 10 did not stop run {rid} within {STOP_TIMEOUT:g}s ({_calls(spool, rid)} "
-                f"tool calls of the run reached Kelpie; {thresholds})\n"
-                "check that Kelpie's plugin loads in this Hermes (kelpie selftest stop --keep, "
-                "then the profile's logs)"
-            )
+            raise Failed(_not_stopped(spool, rid, recorded, thresholds))
         results = engine.tick(lambda: _snapshot(adapter))
         stop = next((r for r in results if r.action.kind is ActionKind.STOP), None)
         if stop is None:
@@ -539,14 +543,73 @@ def _snapshot(adapter: HermesAdapter | HermesBoards) -> Snapshot:
     return adapter.snapshot(datetime.now(UTC))
 
 
-def _calls(spool: Path, rid: int) -> int:
-    n = 0
+def _lines(spool: Path, rid: int) -> list[dict[str, Any]]:
+    """The run's tool lines in the spool."""
+    out: list[dict[str, Any]] = []
     with contextlib.suppress(OSError):
         for line in spool.read_text(encoding="utf-8", errors="replace").splitlines():
             with contextlib.suppress(ValueError):
                 entry = json.loads(line)
-                n += entry.get("type") == "tool" and str(entry.get("run_id")) == str(rid)
-    return n
+                if (
+                    isinstance(entry, dict)
+                    and entry.get("type") == "tool"
+                    and str(entry.get("run_id")) == str(rid)
+                ):
+                    out.append(entry)
+    return out
+
+
+def _calls(spool: Path, rid: int) -> int:
+    return len(_lines(spool, rid))
+
+
+def _not_stopped(spool: Path, rid: int, worker: RunWorker, thresholds: str) -> str:
+    """Why rule 10 did not stop the run, as far as the spool tells (#353)."""
+    lines = _lines(spool, rid)
+    text = (
+        f"rule 10 did not stop run {rid} within {STOP_TIMEOUT:g}s ({len(lines)} tool calls of "
+        f"the run reached Kelpie; {thresholds})"
+    )
+    if not lines:
+        return (
+            f"{text}\ncheck that Kelpie's plugin loads in this Hermes (kelpie selftest stop "
+            "--keep, then the profile's logs)"
+        )
+    printed = [e for e in lines if isinstance(e.get("pid_start"), str)]
+    verdicts = {writer_matches((e.get("pid"), e["pid_start"]), worker) for e in printed}
+    if True in verdicts:
+        verified = sum(
+            writer_matches((e.get("pid"), e["pid_start"]), worker) is True for e in printed
+        )
+        return (
+            f"{text}; the run's recorded worker wrote {verified} of them, yet rule "
+            "10 did not stop the run\ntell the Kelpie maintainers, with the output of kelpie "
+            "selftest stop --keep"
+        )
+    if len(printed) < len(lines):
+        return (
+            f"{text}; {len(lines) - len(printed)} of them carry no pid_start, so Kelpie cannot "
+            "tell the run's worker wrote them and rule 10 does not stop a run on them\nthis "
+            f"Kelpie's plugin cannot read its own process start on this host ({sys.platform}): "
+            "tell the Kelpie maintainers"
+        )
+    if verdicts == {None}:
+        hint = (
+            "on macOS Hermes records it through psutil: if this Hermes runs without psutil, "
+            "install it in Hermes' Python; otherwise tell the Kelpie maintainers"
+            if sys.platform == "darwin"
+            else "tell the Kelpie maintainers, with the output of kelpie selftest stop --keep"
+        )
+        return (
+            f"{text}; Hermes recorded no usable start fingerprint for the run's worker, so "
+            f"Kelpie cannot tell the run's worker wrote them and rule 10 does not stop a run on "
+            f"them\n{hint}"
+        )
+    return (
+        f"{text}; none was written by the run's recorded worker (their pid and pid_start "
+        "differ from Hermes' record), so rule 10 does not stop a run on them\ntell the "
+        "Kelpie maintainers, with the output of kelpie selftest stop --keep"
+    )
 
 
 def _routed(params: Mapping[str, Any]) -> str:

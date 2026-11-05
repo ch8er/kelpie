@@ -8,6 +8,33 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ## [Unreleased]
 
+### Fixed
+
+- **macOS: rule 10 can stop a Hermes run from spool evidence** (#353). The Hermes plugin of
+  0.1.0a2 took its start fingerprint only from `/proc`, so on macOS every spool line carried
+  `"pid_start": null`, the writer check could never pass, rule 10 only alerted ("Not
+  stopped") and `kelpie selftest stop` failed ("rule 10 did not stop run 1 within 300s").
+  The plugin now reads its start through libproc (`proc_pidinfo(PROC_PIDTBSDINFO)`, ctypes,
+  standard library only) and writes `"|<start>"` in centiseconds, the form a macOS Hermes
+  records for the run's worker. The structure and the centiseconds are defined once, in the
+  plugin, and Kelpie's process table (which verifies a worker before ending it) uses that
+  definition. Linux lines are unchanged. **Update the plugin on every macOS agent host**
+  (`cp src/kelpie/adapters/hermes/plugin.py ~/.hermes/plugins/kelpie/__init__.py`, and to
+  every profile's `plugins/kelpie/__init__.py` that has a copy), then run
+  `kelpie selftest stop --adapter hermes` again.
+- `kelpie selftest stop`, when rule 10 does not stop the run, now says why when the spool
+  tells: lines without `pid_start`, lines whose writer is not the run's recorded worker, or
+  a Hermes that recorded no worker fingerprint (a macOS Hermes without psutil).
+
+### Internal
+
+- The self-test's fake Hermes no longer writes spool lines itself: it loads the plugin the
+  self-test installed and calls its `post_tool_call` hook in the agent process, as Hermes
+  does, so the self-test (run 15 times in a row in the macOS CI job) goes through the real
+  spool path and writer check. A plugin whose lines cannot stop a run fails it.
+- The macOS CI job also runs the writer tests: the plugin's fingerprint of a live process
+  equals the one Kelpie's process table computes and the one Hermes records through psutil.
+
 ## [0.1.0a2] - 2026-11-05
 
 Second alpha: the first live farm's fixes and the security audit's follow-ups. Like

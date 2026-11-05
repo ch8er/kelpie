@@ -20,7 +20,7 @@ from pathlib import Path
 import pytest
 
 from kelpie.adapters.hermes.adapter import HermesAdapter
-from kelpie.adapters.hermes.worker import host_table
+from kelpie.adapters.hermes.worker import UNVERIFIED, RunWorker, host_table
 from kelpie.app import HermesBoardSettings, HermesSettings, Settings
 from kelpie.cli import main
 from kelpie.core.config import EngineConfig
@@ -189,6 +189,87 @@ def test_a_run_that_ends_by_itself_fails(fake: Path) -> None:
     code, lines = run(fake)
     assert code == 1
     assert any("ended before it was stopped (crashed: boom)" in line for line in lines)
+
+
+def test_spool_lines_come_from_the_installed_plugin(fake: Path, tmp_path: Path) -> None:
+    """The fake agent writes nothing itself: every spool line is the real plugin's (#353),
+    with the writer the adapter checks."""
+    seen: list[dict[str, object]] = []
+    original = selftest._calls
+
+    def spy(spool: Path, rid: int) -> int:
+        seen.extend(selftest._lines(spool, rid))
+        return original(spool, rid)
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(selftest, "_calls", spy)
+        code, out = run(fake)
+    assert code == 0, "\n".join(out)
+    assert seen, "no spool lines"
+    assert all(isinstance(e["pid_start"], str) and e["pid_start"] for e in seen)
+    assert all(e.get("output_chars") and e.get("exit_code") == 0 for e in seen)  # plugin-only
+
+
+@pytest.mark.parametrize(
+    ("patch", "expected"),
+    [
+        # #353: the plugin of 0.1.0a2 on macOS
+        ("def _fingerprint(pid):\n    return None\n", "carry no pid_start"),
+        # a writer that is not the run's recorded worker
+        ("def _fingerprint(pid):\n    return '|1'\n", "none was written by the run's"),
+    ],
+)
+def test_a_plugin_whose_lines_cannot_stop_a_run_fails_and_says_why(
+    fake: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, patch: str, expected: str
+) -> None:
+    """The class of #353: the spool fills, but rule 10 may not stop the run on those lines.
+    The self-test fails, and says why, instead of passing through a shortcut."""
+    broken = tmp_path / "plugin.py"
+    broken.write_text(selftest.PLUGIN.read_text() + "\n\n" + patch)
+    monkeypatch.setattr(selftest, "PLUGIN", broken)
+    monkeypatch.setattr(selftest, "STOP_TIMEOUT", 30.0)  # the first line on a slow macOS runner
+    code, lines = run(fake)
+    assert code == 1
+    fail = next(line for line in lines if line.startswith("FAIL  selftest:"))
+    assert "rule 10 did not stop run 1" in fail and expected in fail, fail
+
+
+def write_spool(path: Path, writers: list[tuple[int, str | None]]) -> Path:
+    lines = [
+        {"type": "tool", "run_id": "1", "pid": pid, "pid_start": start} for pid, start in writers
+    ]
+    path.write_text("".join(json.dumps(x) + "\n" for x in lines))
+    return path
+
+
+WORKER = RunWorker(10, "|100", 11, "|111", "h:1")
+
+
+@pytest.mark.parametrize(
+    ("writers", "worker", "expected"),
+    [
+        ([], WORKER, "check that Kelpie's plugin loads"),
+        ([(11, "|111"), (11, None)], WORKER, "the run's recorded worker wrote 1 of them"),
+        ([(11, None), (11, None)], WORKER, "2 of them carry no pid_start"),
+        ([(11, "|111")], RunWorker(10, UNVERIFIED, None, None, "h:1"), "no usable start"),
+        ([(11, "|999")], WORKER, "none was written by the run's recorded worker"),
+    ],
+)
+def test_a_run_not_stopped_says_what_the_spool_shows(
+    tmp_path: Path, writers: list[tuple[int, str | None]], worker: RunWorker, expected: str
+) -> None:
+    spool = write_spool(tmp_path / "spool.jsonl", writers)
+    text = selftest._not_stopped(spool, 1, worker, "limit 8 within 10m")
+    assert text.startswith(f"rule 10 did not stop run 1 within {selftest.STOP_TIMEOUT:g}s")
+    assert f"({len(writers)} tool calls" in text and expected in text, text
+
+
+def test_the_psutil_hint_is_for_macos_only(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    spool = write_spool(tmp_path / "spool.jsonl", [(11, "|111")])
+    worker = RunWorker(10, None, 11, None, "h:1")
+    for platform, psutil in (("darwin", True), ("linux", False)):
+        monkeypatch.setattr(selftest.sys, "platform", platform)
+        assert ("psutil" in selftest._not_stopped(spool, 1, worker, "t")) is psutil
 
 
 def test_without_hermes_nothing_runs(tmp_path: Path) -> None:

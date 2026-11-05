@@ -131,6 +131,7 @@ jobs:
       - run: >-
           uv run --with psutil pytest -v
           tests/adapters/test_hermes_proctable.py
+          tests/adapters/test_hermes_writer.py
           tests/adapters/test_hermes_worker.py
           tests/adapters/test_hermes_stop.py
           tests/adapters/test_hermes_boards_stop.py

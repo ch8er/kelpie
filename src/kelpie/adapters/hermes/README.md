@@ -246,6 +246,15 @@ so Kelpie could not read that board after a stop until Hermes wrote it again. Su
 fails the self-test whether or not the kill happened to land mid-write; tell the Kelpie
 maintainers.
 
+Rule 10 sees the run only through the spool lines that this version's plugin writes inside
+Hermes, so the stop passes the same writer check as a farm run's (`pid` and `pid_start`
+against the run's recorded worker, above). When rule 10 does not stop the run, the failing
+line says what the spool shows: no lines (the plugin did not load), lines without
+`pid_start` (the plugin cannot read its process start on this host), lines whose writer is
+not the run's worker, or a Hermes that recorded no worker fingerprint (a macOS Hermes
+without psutil). The self-test installs the plugin of the Kelpie that runs it, not the copy in
+your profiles: after an upgrade, copy the plugin to every profile too.
+
 With `[[adapters.hermes.boards]]` the self-test keeps that shape: the throwaway board is the
 board of a boards adapter, so rule 10's stop is routed by the board prefix of the run's id
 (`kelpie-selftest:hermes-run-1`) and signed with that board's own key, as on your farm. Your
@@ -343,7 +352,7 @@ not tied to a run.
 {"type":"session_end","at":1772463100.1,"task_id":"t_1","run_id":"42","session_id":"...","completed":true,"interrupted":false}
 ```
 
-Every line also holds its writer (#302): `pid`, the process that wrote it, and `pid_start`, that process's start fingerprint the way Hermes records a worker's (`"<boot_id>:<pid 1 start>|<start>"`, Linux; `null` where `/proc` is missing, such as macOS). The adapter compares them with the run's recorded worker (`task_runs.worker_pid` and `worker_started_at`, or the run's `worker_bound` agent). A tool line whose writer is not that worker, or cannot be checked (an older plugin, macOS, a board without worker columns, a run without a recorded worker), is kept as evidence but marked unverified (`kelpie.writer_unverified`), and rule 10 does not stop a run on such lines alone: it sends its critical alert and leaves the stop to a person. Update the plugin on every agent host for rule 10 to stop runs from spool evidence. The fingerprint is not a secret: it comes from `/proc`, so a process in the same PID namespace that learns the worker's pid (from `ps`, or the board) can compute it and forge a matching line. The check keeps out agents in another PID namespace (a container, a sandbox) and lines written by mistake; it does not stop a process on the same host and namespace set on forging, which could already signal the worker or block the run itself.
+Every line also holds its writer (#302): `pid`, the process that wrote it, and `pid_start`, that process's start fingerprint the way Hermes records a worker's: `"<boot_id>:<pid 1 start>|<start>"` on Linux (from `/proc`), `"|<start>"` on macOS (the kernel's start in centiseconds, read with libproc, #353), `null` where neither can be read. The plugins of 0.1.0a2 and earlier wrote `null` on macOS, so there rule 10 could not stop a run from spool lines: update the plugin. The adapter compares them with the run's recorded worker (`task_runs.worker_pid` and `worker_started_at`, or the run's `worker_bound` agent). A tool line whose writer is not that worker, or cannot be checked (an older plugin, a plugin that could not read its process start, a board without worker columns, a run without a recorded worker, a macOS Hermes without psutil), is kept as evidence but marked unverified (`kelpie.writer_unverified`), and rule 10 does not stop a run on such lines alone: it sends its critical alert and leaves the stop to a person. Update the plugin on every agent host for rule 10 to stop runs from spool evidence. The fingerprint is not a secret: it comes from `/proc` (libproc on macOS), so a process in the same PID namespace that learns the worker's pid (from `ps`, or the board) can compute it and forge a matching line. The check keeps out agents in another PID namespace (a container, a sandbox) and lines written by mistake (macOS has no PID namespaces: there, mainly the latter); it does not stop a process on the same host and namespace set on forging, which could already signal the worker or block the run itself.
 
 A tool line may also hold `runners`: the known runners its command names anywhere, when `KELPIE_KNOWN_RUNNERS` is set in the hook's environment (comma-separated: `KELPIE_KNOWN_RUNNERS=ios_sim.sh,xcodebuild,npm test`). Only names from that list are written, never a word of the command, and none when commands are not recorded; see [known runners](../../../../docs/privacy.md#known-runners).
 

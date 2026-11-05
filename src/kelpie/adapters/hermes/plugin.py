@@ -26,8 +26,9 @@ refused it, and whether the redacted prefix still ends where the command did
 (``command_whole``): booleans and a number, nothing of the output.
 
 Every line also carries the writer: this process's ``pid`` and ``pid_start``, its start
-fingerprint as Hermes records a worker's (Linux; null elsewhere). A stop on spool evidence
-needs lines whose writer is the run's recorded worker (#302).
+fingerprint as Hermes records a worker's (Linux through ``/proc``, macOS through libproc;
+null elsewhere). A stop on spool evidence needs lines whose writer is the run's recorded
+worker (#302, #353).
 
 Hooks are fire-and-forget: nothing here raises, blocks on the network or returns a value.
 """
@@ -40,6 +41,7 @@ import json
 import os
 import re
 import stat
+import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -48,6 +50,11 @@ try:
     import fcntl
 except ImportError:  # pragma: no cover - not POSIX
     fcntl = None  # type: ignore[assignment]
+
+try:
+    import ctypes
+except Exception:  # pragma: no cover - a Python built without ctypes: no macOS fingerprint
+    ctypes = None  # type: ignore[assignment]
 
 SPOOL_ENV = "KELPIE_HERMES_SPOOL"
 MAX_BYTES_ENV = "KELPIE_HERMES_SPOOL_MAX_BYTES"
@@ -490,13 +497,15 @@ def _ids(kwargs: dict[str, Any]) -> dict[str, Any]:
 
 
 _PROC = Path("/proc")
+_DARWIN = sys.platform == "darwin"
 _WRITER: tuple[int, str | None] | None = None  # (pid, fingerprint), per process
 
 
 def _writer() -> dict[str, Any]:
     """This process: its pid and its start fingerprint the way Hermes records a worker's
-    (``"<boot_id>:<pid 1 start>|<start>"`` on Linux, ``worker_started_at``), so Kelpie can
-    tell the run's own worker wrote a line (#302). None where ``/proc`` is missing (macOS):
+    (``worker_started_at``, the ``worker_bound`` event's ``started_at``), so Kelpie can tell
+    the run's own worker wrote a line (#302): ``"<boot_id>:<pid 1 start>|<start>"`` on Linux,
+    ``"|<start>"`` on macOS (#353). None where neither ``/proc`` nor libproc can be read:
     such lines are kept but cannot stop a run."""
     global _WRITER
     pid = os.getpid()
@@ -514,6 +523,9 @@ def _start(pid: int) -> str | None:
 
 
 def _fingerprint(pid: int) -> str | None:
+    if _DARWIN:
+        birth_cs = darwin_start(pid)
+        return None if birth_cs is None else f"|{birth_cs}"  # no epoch: Hermes reads none
     start = _start(pid)
     if start is None:
         return None
@@ -523,6 +535,86 @@ def _fingerprint(pid: int) -> str | None:
     first = _start(1) or ""
     epoch = f"{boot}:{first}" if (boot or first) else ""
     return f"{epoch}|{start}"
+
+
+# --- macOS: the start time through libproc -----------------------------------------------
+# The one definition of Hermes' macOS start time: Kelpie's process table
+# (kelpie.adapters.hermes.proctable.Libproc, which ends a stopped run's worker) imports
+# ProcBsdInfo, PROC_PIDTBSDINFO and birth from here, so a spool line's writer and the
+# worker Kelpie verifies are fingerprinted the same way.
+
+PROC_PIDTBSDINFO = 3
+MAXCOMLEN = 16
+
+if ctypes is not None:
+
+    class ProcBsdInfo(ctypes.Structure):
+        """``struct proc_bsdinfo`` (``sys/proc_info.h``), 136 bytes."""
+
+        _fields_ = [  # noqa: RUF012 (ctypes reads the list once, at class creation)
+            ("pbi_flags", ctypes.c_uint32),
+            ("pbi_status", ctypes.c_uint32),
+            ("pbi_xstatus", ctypes.c_uint32),
+            ("pbi_pid", ctypes.c_uint32),
+            ("pbi_ppid", ctypes.c_uint32),
+            ("pbi_uid", ctypes.c_uint32),
+            ("pbi_gid", ctypes.c_uint32),
+            ("pbi_ruid", ctypes.c_uint32),
+            ("pbi_rgid", ctypes.c_uint32),
+            ("pbi_svuid", ctypes.c_uint32),
+            ("pbi_svgid", ctypes.c_uint32),
+            ("rfu_1", ctypes.c_uint32),
+            ("pbi_comm", ctypes.c_char * MAXCOMLEN),
+            ("pbi_name", ctypes.c_char * (2 * MAXCOMLEN)),
+            ("pbi_nfiles", ctypes.c_uint32),
+            ("pbi_pgid", ctypes.c_uint32),
+            ("pbi_pjobc", ctypes.c_uint32),
+            ("e_tdev", ctypes.c_uint32),
+            ("e_tpgid", ctypes.c_uint32),
+            ("pbi_nice", ctypes.c_int32),
+            ("pbi_start_tvsec", ctypes.c_uint64),
+            ("pbi_start_tvusec", ctypes.c_uint64),
+        ]
+
+
+def birth(tv_sec: int, tv_usec: int) -> int:
+    """Hermes' macOS start time: psutil's ``tv_sec + tv_usec / 1000000.0`` (the same doubles),
+    in centiseconds as Hermes rounds it (``round(create_time * 100)``)."""
+    return round((float(tv_sec) + tv_usec / 1000000.0) * 100)
+
+
+_PIDINFO: Any = None  # libproc's proc_pidinfo, loaded once per process
+
+
+def _proc_pidinfo() -> Any:
+    global _PIDINFO
+    if _PIDINFO is None:
+        import ctypes.util  # macOS only: never loaded into Hermes on Linux
+
+        try:
+            path = ctypes.util.find_library("proc") or "/usr/lib/libproc.dylib"
+            fn = ctypes.CDLL(path).proc_pidinfo
+        except (OSError, AttributeError):
+            fn = ctypes.CDLL(None).proc_pidinfo  # libSystem exports proc_* too
+        fn.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_uint64, ctypes.c_void_p, ctypes.c_int]
+        fn.restype = ctypes.c_int
+        _PIDINFO = fn
+    return _PIDINFO
+
+
+def darwin_start(pid: int) -> int | None:
+    """macOS: the process's start in Hermes' centiseconds since the epoch, read with
+    ``proc_pidinfo(PROC_PIDTBSDINFO)``; None when it cannot be read."""
+    if ctypes is None:
+        return None
+    try:
+        info = ProcBsdInfo()
+        size = ctypes.sizeof(info)
+        if _proc_pidinfo()(pid, PROC_PIDTBSDINFO, 0, ctypes.byref(info), size) != size:
+            return None
+        return birth(info.pbi_start_tvsec, info.pbi_start_tvusec)
+    except Exception:  # no libproc, a missing symbol: no fingerprint, never an error
+        return None
 
 
 def _rotate(path: Path, limit: int) -> None:

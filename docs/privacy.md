@@ -139,9 +139,10 @@ per session end to the spool (`~/.hermes/kelpie/spool.jsonl`, or `KELPIE_HERMES_
 A tool-call line holds: the tool name, the Hermes task, run and session ids, the tool call
 id, `args_hash` (the same hash as above), a redacted `command`, the outcome (`ok` or
 `error`), the duration in milliseconds and `output_chars`, the size of the result. Every
-line also holds its writer's `pid` and `pid_start` (the process's start fingerprint, with
-the host's boot id, as Hermes records a worker's), so Kelpie can tell the run's own worker
-wrote it (#302). Raw arguments, results and error messages are never written.
+line also holds its writer's `pid` and `pid_start` (the process's start fingerprint as
+Hermes records a worker's: with the host's boot id on Linux, the start time alone on macOS),
+so Kelpie can tell the run's own worker wrote it (#302, #353). Raw arguments, results and
+error messages are never written.
 
 The redacted `command` is a short prefix built from an allowlist (`redact_command`, one block
 kept byte-identical in `kelpie.traces.command`, the Hermes plugin, the Claude Code hook and
