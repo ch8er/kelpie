@@ -8,6 +8,91 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ## [Unreleased]
 
+## [0.1.0a2] - 2026-11-05
+
+Second alpha: the first live farm's fixes and the security audit's follow-ups. Like
+0.1.0a1 it starts in global dry-run (`dry_run = true`) with every rule in `observe` mode.
+
+### Before you install
+
+These are the release notes for the tag, ahead of what changed.
+
+**Upgrading from 0.1.0a1**
+
+- **Back up `kelpie.db` first if you may go back.** It migrates to schema 11 on the first
+  start, and 0.1.0a1 refuses a newer schema.
+- **Update the Hermes plugin, the Claude Code hook and the OpenClaw plugin on every agent
+  host.** Hermes spool lines now carry their writer: rule 10 stops a Hermes run on spool
+  lines only when the run's own worker wrote them, so with an older plugin (or on macOS)
+  it stops Hermes runs only from OTLP evidence and alerts otherwise. All hooks redact more
+  of a command (`echo`/`printf` arguments, words after `auth` or `login`); `kelpie spool
+  scrub` cleans spools written before, except a value an escaped blank already split off
+  (`FOO_TOKEN=a\ b make`): delete or rotate those spools.
+- **On a multi-host farm, upgrade `kelpie agent` on every agent host too.** The Hermes writer
+  check, the `spool_stops` marking and the per-board lock run where the adapter runs: a
+  0.1.0a2 hub with 0.1.0a1 agents still gets unchecked spool lines.
+- **Rule 10 evidence is scoped per agent where you configure it.** `[[traces.tokens]]` gives
+  each agent's exporter its own token, limited to its own sessions; spans for another
+  agent's session are rejected. The shared `[traces] token_env` keeps working unchanged,
+  and `kelpie doctor` warns while a rule acts on it ("traces tokens per agent").
+  Migration: [docs/security.md](docs/security.md#per-agent-traces-tokens).
+- **Ledger retention runs by default.** `kelpie serve` prunes raw action-ledger rows older
+  than `[storage] retention` (`"30d"`) or past `max_rows` (`1000000`), by whole UTC days,
+  after summing each day into daily aggregates kept for good (the report's before/after
+  reads those). To keep more, raise them (`retention` up to `"3650d"`); see
+  [configuration](docs/configuration.md#storage).
+- **Multi-board Hermes configs:** `kelpie selftest stop` now works with
+  `[[adapters.hermes.boards]]` (it failed before rule 10 could stop the run), so rule 10's
+  act gate can be met on such a farm.
+- **The self-test needs Hermes to keep boards in WAL mode** (its own default): a new step,
+  "board in WAL mode", fails `kelpie selftest stop` when the board Hermes creates for the
+  test uses another journal mode.
+- **`~` is expanded in every path-valued config key**, including `[storage] path`, `[agent]
+  ca_file`, `[hub] tls_cert`/`tls_key` and the Hermes and OpenClaw `cli`; `kelpie doctor`
+  names paths that do not exist ("config paths exist", FAIL for a missing ledger
+  directory).
+- **Three may refuse to start:** a second acting Kelpie on the same board (one acting
+  instance per board is now enforced with a lock); `kelpie serve` with a weak traces token
+  (under 16 characters, spaces, or fewer than 6 different characters) while OTLP ingest
+  listens off loopback, unless `allow_unauthenticated` is set; and a config whose
+  `[engine] once_window`, `cooldown` or `retry_after` is longer than `[storage] retention`
+  (30 days by default): raise `retention` to match.
+
+**Rule 10 in `act` still trusts the shared traces token and Claude Code or OpenClaw spool
+lines** (audit M1, narrowed; this replaces 0.1.0a1's "trusts every holder of the traces
+token"). Per-agent tokens and the Hermes writer check close it where they apply. What is
+left: spans under the shared token or a tokenless ingest still report for every session,
+and Claude Code and OpenClaw spool lines name their session themselves. Where agents that
+do not trust each other share a farm, give each its own `[[traces.tokens]]` entry and set
+`spool_stops = false` in `[adapters.claude_code]` / `[adapters.openclaw]` (their spool
+lines alone then only alert), or keep rule 10 in `observe` or `suggest`. Details:
+[docs/security.md](docs/security.md#known-residual-risks).
+
+**Open findings** of the security audit
+([#336](https://github.com/ch8er/kelpie/issues/336)), all low, and what is left of M7:
+
+- L4: stop-marker writes in the Claude Code and OpenClaw adapters are not relative to a
+  directory handle; matters only if Kelpie runs with more privilege than the agents.
+- L13: outbound clients give each resolved address the whole remaining connect time, so a
+  host with several blackholed addresses can exceed the deadline several times.
+- L14, what is left: the Dockerfile pins its base images by tag, not digest.
+- M7, what is left: one acting instance per board is enforced on one machine, not across
+  machines or users for a GitHub repository or Linear team. Run one acting Kelpie per
+  tracker.
+
+**Think before exposing `kelpie serve` off loopback**, as for 0.1.0a1: every listener has
+connection guards (`[server]`), but `/metrics` and `/healthz` are unauthenticated; firewall
+the port or put an authenticating proxy in front
+([docs/security.md](docs/security.md#listeners)).
+
+**Known limits.** Not verified before this release: live runs on real Hermes, Claude Code
+and OpenClaw platforms with this version (on a real Hermes, that its hooks run in the
+recorded worker process: `kelpie selftest stop` is the live check), the per-tick cost of
+per-agent token bindings on a busy farm (about 0.7 s with 700k bindings, measured
+offline), the Docker image (the release workflow builds and publishes it), and GitHub
+Issues and Linear beyond the token check. The wheel and sdist were installed and
+`kelpie demo --fast` run on Python 3.12 and 3.13.
+
 ### Added
 
 - Action-ledger retention (#318): `[storage] retention` (30 days) and `max_rows` (a
@@ -37,6 +122,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
   Never on the default branch, never merged by Kelpie, one open proposal per repository,
   and a change a human turned down is not proposed again
   ([#237](https://github.com/ch8er/kelpie/pull/237)).
+- Review economy in the daily report (#298): per repository and kind of change (docs only,
+  tests only, generated files, a dependency bump, a small change, code), review rounds,
+  review tokens and how often a review found something (a return, or another round). A
+  light kind whose full reviews almost never find anything (at most 5% of at least 20)
+  gets a recommendation for a lighter path, with the evidence and the tokens a day it
+  would save; fewer reviews are "direction only", and code or a kind above the threshold
+  never gets one. Kelpie only recommends; it never changes how tasks are reviewed
+  (`[report.sections.review_economy]`).
+- Tokens per return (#197 item 7): the "Farm throughput" section lists "Tokens on rework",
+  the model calls on each task returned within the day after its first return, per role
+  (who made the call) and per task, with tokens per return
+  ([#326](https://github.com/ch8er/kelpie/pull/326)).
 
 ### Changed
 
@@ -58,21 +155,6 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
   of each role's cost per completed task. A call without a task id finds its task through
   its session, now including the platform's usage records (`Snapshot.usage`, #271)
   ([#325](https://github.com/ch8er/kelpie/pull/325)).
-
-### Added
-
-- Review economy in the daily report (#298): per repository and kind of change (docs only,
-  tests only, generated files, a dependency bump, a small change, code), review rounds,
-  review tokens and how often a review found something (a return, or another round). A
-  light kind whose full reviews almost never find anything (at most 5% of at least 20)
-  gets a recommendation for a lighter path, with the evidence and the tokens a day it
-  would save; fewer reviews are "direction only", and code or a kind above the threshold
-  never gets one. Kelpie only recommends; it never changes how tasks are reviewed
-  (`[report.sections.review_economy]`).
-- Tokens per return (#197 item 7): the "Farm throughput" section lists "Tokens on rework",
-  the model calls on each task returned within the day after its first return, per role
-  (who made the call) and per task, with tokens per return
-  ([#326](https://github.com/ch8er/kelpie/pull/326)).
 
 ### Safety
 
@@ -137,8 +219,6 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
   `KELPIE_TRACES_TOKEN` published off loopback from starting. `kelpie doctor` warns about
   any weak token (audit L11). Workflow checkouts keep no token in `.git/config`, the release
   build's included (audit L14) ([#330](https://github.com/ch8er/kelpie/pull/330)).
-
-
 - Agent text is bounded: task titles, comments, block, return and exit reasons and
   progress notes keep their first 8000 characters, and the ledger stores at most 16,000 of
   an action's reason and cuts long params (audit L9); role and pre-work status labels on
@@ -732,5 +812,6 @@ control loop. Each rule runs in `observe`, `suggest` or `act` mode.
   mode and the daily report ([#62](https://github.com/ch8er/kelpie/pull/62), [#73](https://github.com/ch8er/kelpie/pull/73), [#74](https://github.com/ch8er/kelpie/pull/74), [#81](https://github.com/ch8er/kelpie/pull/81)).
 - A code health and security audit plan was written before the first release ([#92](https://github.com/ch8er/kelpie/pull/92)).
 
-[Unreleased]: https://github.com/ch8er/kelpie/compare/v0.1.0a1...HEAD
+[Unreleased]: https://github.com/ch8er/kelpie/compare/v0.1.0a2...HEAD
+[0.1.0a2]: https://github.com/ch8er/kelpie/releases/tag/v0.1.0a2
 [0.1.0a1]: https://github.com/ch8er/kelpie/releases/tag/v0.1.0a1

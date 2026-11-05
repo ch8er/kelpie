@@ -1,6 +1,6 @@
 [project]
 name = "kelpie-sre"
-version = "0.1.0a1"
+version = "0.1.0a2"
 description = "Open-source SRE and throughput optimization for AI agent farms"
 readme = "README.md"
 license = "Apache-2.0"
