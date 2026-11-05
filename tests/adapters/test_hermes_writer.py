@@ -30,7 +30,7 @@ from kelpie.core.model import Session, Snapshot, Span, SpanKind
 from kelpie.core.spans import UNVERIFIED_ATTRIBUTE
 from kelpie.rules import REGISTRY
 from tests.adapters.kanban import Board
-from tests.adapters.test_hermes_proctable import fake_farm, stamp
+from tests.adapters.libproc_fake import fake_farm, stamp
 
 NOW = datetime(2026, 3, 2, 12, tzinfo=UTC)
 PRINT = "boot-1:30|4242"
