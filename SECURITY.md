@@ -86,5 +86,5 @@ scope. Details and what to do meanwhile: [docs/security.md](docs/security.md#kno
 - **Low findings still open** ([#336](https://github.com/ch8er/kelpie/issues/336)): base
   images pinned by tag, not digest (L14); each of a host's resolved addresses gets the whole
   remaining connect time, so several blackholed addresses can exceed the deadline (L13);
-  stop-marker writes not relative to a directory handle,
-  which matters only if Kelpie runs with more privilege than its agents (L4).
+  stop-marker writes not relative to a directory handle, which matters only if Kelpie runs
+  with more privilege than its agents (L4).
