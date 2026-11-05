@@ -159,7 +159,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
   never writes them, so it cannot roll that journal back. The fake now keeps its boards in
   WAL mode, where a killed writer leaves nothing to roll back. If a board ever does have a
   hot journal, the self-test now fails with that cause and what to do, not "unexpected
-  OperationalError". The macOS CI job runs the self-test 15 times in a row
+  OperationalError". A new step, "board in WAL mode", fails the self-test (rule 10's act
+  gate) on a Hermes whose boards are not in WAL mode, where Kelpie could not read a board
+  after a stop until Hermes writes it again. The macOS CI job runs the self-test 15 times in
+  a row
   ([#320](https://github.com/ch8er/kelpie/issues/320)).
 
 ## [0.1.0a1] - 2026-11-03

@@ -72,6 +72,7 @@ def test_a_stop_passes_end_to_end(fake: Path, tmp_path: Path) -> None:
     assert steps == [
         "PASS  Hermes CLI",
         "PASS  throwaway Hermes home",
+        "PASS  board in WAL mode",
         "PASS  task dispatched",
         "PASS  worker running",
         "PASS  rule 10 stopped the run",
@@ -468,6 +469,14 @@ def test_the_journal_mode_is_read(tmp_path: Path, wal: bool) -> None:
     assert selftest._journal_mode(db) == ("wal" if wal else "delete")
 
 
-def test_the_fake_boards_draw_no_journal_note(fake: Path) -> None:
+def test_a_board_not_in_wal_mode_fails_the_gate(fake: Path) -> None:
+    """Even when the stop happens to land between two writes: on such a Hermes, Kelpie may be
+    unable to read a board after any stop, so the self-test never certifies it."""
+    (fake.parent / "mode").write_text("rollback")
     code, lines = run(fake)
-    assert code == 0 and not any("journal mode" in line for line in lines)
+    assert code == 1
+    assert "FAIL  board in WAL mode: journal mode 'delete': after a stop" in "\n".join(lines)
+    assert (
+        "      fix: rule 10 stays out of act on this Hermes; tell the Kelpie maintainers" in lines
+    )
+    assert lines[-1].startswith("selftest stop: FAILED")

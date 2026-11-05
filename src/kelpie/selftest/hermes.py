@@ -368,10 +368,14 @@ def _steps(
     if not task or not db.exists():
         raise Failed(f"no task or board after hermes kanban create (board {db})")
     journal = _journal_mode(db)
-    if journal != "wal":  # a worker the stop kills mid-write would leave a hot journal
-        report.note(
-            f"the board's journal mode is {journal!r}, not 'wal': after a stop that ends a "
-            "worker mid-write, Kelpie (read-only) cannot read the board until Hermes writes it"
+    if journal == "wal":
+        report.ok("board in WAL mode", f"{db.name}: journal mode wal")
+    else:  # a worker the stop kills mid-write would leave a hot journal Kelpie cannot read past
+        report.fail(
+            "board in WAL mode",
+            f"journal mode {journal!r}: after a stop that ends a worker mid-write, Kelpie "
+            "(read-only) cannot read the board until Hermes writes it again\n"
+            "rule 10 stays out of act on this Hermes; tell the Kelpie maintainers",
         )
     dispatched = cli.json("kanban", "--board", BOARD, "dispatch", "--json")
     spawned = {str(s.get("task_id")) for s in dispatched.get("spawned") or ()}
@@ -475,9 +479,8 @@ def _unreadable(db: Path, exc: sqlite3.Error) -> str:
         # writes the board. Hermes keeps its boards in WAL mode, where this cannot happen.
         return (
             f"the throwaway board {db} has a hot journal (a writer was killed mid-write) and "
-            "Kelpie reads boards read-only\nthis Hermes does not keep its boards in WAL mode; "
-            "tell the Kelpie maintainers (the farm's boards would be unreadable to Kelpie "
-            "after a stop until Hermes writes them again)"
+            "Kelpie reads boards read-only\nsee the 'board in WAL mode' step above; tell the "
+            "Kelpie maintainers"
         )
     return f"cannot read the throwaway board {db}: {exc}"
 

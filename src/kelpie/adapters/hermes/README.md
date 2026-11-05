@@ -231,7 +231,7 @@ the mock.
 Hermes' own loop guard is off in that profile, so the loop runs until something stops it. Then
 rule 10 runs in `act`, with your `[engine.rules.loop_breaker]` thresholds and your
 `[adapters.hermes]` (`cli`, `cli_timeout`, `end_worker`, `worker_grace`, `author`), and the
-self-test checks, one line each: the task was dispatched, its agent started, rule 10 stopped the
+self-test checks, one line each: the throwaway board is in WAL mode, the task was dispatched, its agent started, rule 10 stopped the
 run, the task is blocked for a human, the block is signed by Kelpie, the worker processes are
 gone and the model gets no further calls. It prints the alert as Telegram would show it (nothing
 is sent), ends every process still running with that `HERMES_HOME` or working in the
@@ -239,6 +239,12 @@ throwaway directory (the gateway Hermes
 started for it, a runaway left by a failed step; never `hermes gateway stop`, which a service
 manager could route to a real gateway), deletes the directory, and exits 0 only if every step
 passed. SIGTERM to the self-test cleans up the same way.
+
+The WAL check matters because Kelpie opens boards read-only. On a board in rollback-journal
+mode, a worker the stop kills mid-write leaves a hot journal that only a write can roll back,
+so Kelpie could not read that board after a stop until Hermes wrote it again. Such a Hermes
+fails the self-test whether or not the kill happened to land mid-write; tell the Kelpie
+maintainers.
 
 With `[[adapters.hermes.boards]]` the self-test keeps that shape: the throwaway board is the
 board of a boards adapter, so rule 10's stop is routed by the board prefix of the run's id
