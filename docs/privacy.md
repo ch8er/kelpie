@@ -141,7 +141,8 @@ id, `args_hash` (the same hash as above), a redacted `command`, the outcome (`ok
 `error`), the duration in milliseconds and `output_chars`, the size of the result. Every
 line also holds its writer's `pid` and `pid_start` (the process's start fingerprint as
 Hermes records a worker's: with the host's boot id on Linux, the start time alone on macOS),
-so Kelpie can tell the run's own worker wrote it (#302, #353). Raw arguments, results and error messages are never written.
+so Kelpie can tell the run's own worker wrote it (#302, #353). Raw arguments, results and
+error messages are never written.
 
 The redacted `command` is a short prefix built from an allowlist (`redact_command`, one block
 kept byte-identical in `kelpie.traces.command`, the Hermes plugin, the Claude Code hook and

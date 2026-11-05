@@ -19,7 +19,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
   records for the run's worker. The structure and the centiseconds are defined once, in the
   plugin, and Kelpie's process table (which verifies a worker before ending it) uses that
   definition. Linux lines are unchanged. **Update the plugin on every macOS agent host**
-  (`cp src/kelpie/adapters/hermes/plugin.py ~/.hermes/plugins/kelpie/__init__.py`), then run
+  (`cp src/kelpie/adapters/hermes/plugin.py ~/.hermes/plugins/kelpie/__init__.py`, and to
+  every profile's `plugins/kelpie/__init__.py` that has a copy), then run
   `kelpie selftest stop --adapter hermes` again.
 - `kelpie selftest stop`, when rule 10 does not stop the run, now says why when the spool
   tells: lines without `pid_start`, lines whose writer is not the run's recorded worker, or

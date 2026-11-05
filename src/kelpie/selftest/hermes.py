@@ -38,6 +38,7 @@ import shutil
 import signal
 import sqlite3
 import subprocess
+import sys
 import tempfile
 import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
@@ -574,30 +575,39 @@ def _not_stopped(spool: Path, rid: int, worker: RunWorker, thresholds: str) -> s
             f"{text}\ncheck that Kelpie's plugin loads in this Hermes (kelpie selftest stop "
             "--keep, then the profile's logs)"
         )
-    unprinted = sum(not isinstance(e.get("pid_start"), str) for e in lines)
-    if unprinted:
-        return (
-            f"{text}; {unprinted} of them carry no pid_start, so Kelpie cannot tell the run's "
-            "worker wrote them and rule 10 does not stop a run on them\nthe plugin cannot "
-            "read its own process start on this host: install the plugin of this Kelpie "
-            "version, and tell the Kelpie maintainers if it persists"
+    printed = [e for e in lines if isinstance(e.get("pid_start"), str)]
+    verdicts = {writer_matches((e.get("pid"), e["pid_start"]), worker) for e in printed}
+    if True in verdicts:
+        verified = sum(
+            writer_matches((e.get("pid"), e["pid_start"]), worker) is True for e in printed
         )
-    verdicts = {writer_matches((e.get("pid"), e.get("pid_start")), worker) for e in lines}
+        return (
+            f"{text}; {verified} of them were written by the run's recorded worker, yet rule "
+            "10 did not stop the run\ntell the Kelpie maintainers, with the output of kelpie "
+            "selftest stop --keep"
+        )
+    if len(printed) < len(lines):
+        return (
+            f"{text}; {len(lines) - len(printed)} of them carry no pid_start, so Kelpie cannot "
+            "tell the run's worker wrote them and rule 10 does not stop a run on them\nthis "
+            f"Kelpie's plugin cannot read its own process start on this host ({sys.platform}): "
+            "tell the Kelpie maintainers"
+        )
     if verdicts == {None}:
-        return (
-            f"{text}; Hermes recorded no start fingerprint for the run's worker, so Kelpie "
-            "cannot tell the run's worker wrote them and rule 10 does not stop a run on them"
-            "\non macOS Hermes records it through psutil: install psutil in Hermes' Python"
+        hint = (
+            "on macOS Hermes records it through psutil: install psutil in Hermes' Python"
+            if sys.platform == "darwin"
+            else "tell the Kelpie maintainers, with the output of kelpie selftest stop --keep"
         )
-    if True not in verdicts:
         return (
-            f"{text}; none was written by the run's recorded worker (their pid and pid_start "
-            "differ from Hermes' record), so rule 10 does not stop a run on them\ntell the "
-            "Kelpie maintainers, with the output of kelpie selftest stop --keep"
+            f"{text}; Hermes recorded no usable start fingerprint for the run's worker, so "
+            f"Kelpie cannot tell the run's worker wrote them and rule 10 does not stop a run on "
+            f"them\n{hint}"
         )
     return (
-        f"{text}\ncheck that Kelpie's plugin loads in this Hermes (kelpie selftest stop "
-        "--keep, then the profile's logs)"
+        f"{text}; none was written by the run's recorded worker (their pid and pid_start "
+        "differ from Hermes' record), so rule 10 does not stop a run on them\ntell the "
+        "Kelpie maintainers, with the output of kelpie selftest stop --keep"
     )
 
 
