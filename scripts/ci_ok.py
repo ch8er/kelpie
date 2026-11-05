@@ -3,7 +3,8 @@
 ``ci-ok`` is the only required check, and GitHub counts a *skipped* required check as
 passed. So it must never pass, or be skipped, for a head whose lint, test, e2e and macOS
 jobs did not run on that exact commit (issue 344): a draft run, or a run for a head the
-PR no longer has, fails instead, and a later run for the same commit replaces it.
+PR no longer has, fails instead, and a later run for the same commit replaces it. The
+PR's current head comes from the REST API: if GitHub cannot answer, ci-ok fails closed.
 Docs-only changes still pass without those jobs.
 
     CI_EVENT=pull_request CI_DRAFT=false CI_NEEDS='<toJSON(needs)>' \\
@@ -41,7 +42,8 @@ def decide(
         if head_sha != pr_head_sha:
             return (
                 f"this run built {head_sha[:12]}, but the PR's head is now "
-                f"{pr_head_sha[:12]}: push again to build the current head"
+                f"{pr_head_sha[:12]}: this run is for an old head; the current head's own run "
+                "decides (mark the PR ready if it is a draft)"
             )
     results = {name: str((needs.get(name) or {}).get("result", "missing")) for name in needs}
     bad = {n: r for n, r in results.items() if r in ("failure", "cancelled")}

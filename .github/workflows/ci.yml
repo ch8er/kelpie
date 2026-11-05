@@ -15,8 +15,8 @@ permissions:
   pull-requests: read
 
 # A newer run cancels the older one for the same PR branch. Workflow-level so runs are
-# ordered by event; drafts get their own group so a skipped draft run never cancels a
-# real build. Pushes to main are never cancelled.
+# ordered by event; drafts get their own group so a draft run (it runs only ci-ok, which
+# fails) never cancels a real build. Pushes to main are never cancelled.
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.ref_name }}${{ github.event.pull_request.draft && '-draft' || '' }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -154,6 +154,8 @@ jobs:
   # passes only for the head this run built (scripts/ci_ok.py, issue 344): a draft run, a
   # run for a head the PR no longer has, or a code change whose lint, test, e2e or macos
   # job did not pass, fails. A later run for the same commit replaces a failed ci-ok.
+  # Re-running a draft or stale run fails again (same event payload): mark the PR ready or
+  # push. If a draft run's ci-ok finished after the ready run's, re-run the ready run's ci-ok.
   ci-ok:
     needs: [changes, lint, test, e2e, macos]
     if: always()
@@ -170,7 +172,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           PR: ${{ github.event.pull_request.number }}
-        run: echo "sha=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR}" --jq .head.sha)" >> "$GITHUB_OUTPUT"
+        run: |
+          sha="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR}" --jq .head.sha)"
+          echo "sha=${sha}" >> "$GITHUB_OUTPUT"
       - name: Pass only for a built head
         env:
           CI_EVENT: ${{ github.event_name }}

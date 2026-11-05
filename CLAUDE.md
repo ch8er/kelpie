@@ -57,7 +57,8 @@ tests/fixtures/incidents/   synthetic incident fixtures (format: README.md there
   Docs-only changes (`docs/`, `*.md`) skip lint and test. `ci-ok` is the only required
   check, and it passes only for a head that run built (`scripts/ci_ok.py`): it fails for a
   draft, for a run whose head the PR no longer has, and for a code change whose lint,
-  test, e2e or macos job did not pass. If `ci-ok` says the PR's head moved, push again.
+  test, e2e or macos job did not pass. A stale-head failure lands on the old commit; the
+  current head's own run decides. Re-running a draft run fails again: mark ready or push.
 - Before marking a PR ready, run the `reviewer` subagent (`.claude/agents/reviewer.md`) on
   the diff against `main` and fix its findings.
 - Never wait for CI inside a session: push and move on.
