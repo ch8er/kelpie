@@ -2,8 +2,8 @@ name: CI
 
 # Draft PRs do not build. A PR builds when it is marked ready for review and on every
 # push to it afterwards; main builds on push. Docs-only changes skip lint and test.
-# `ci-ok` is the only required check: it always reports, and fails only if a needed
-# job failed or was cancelled.
+# `ci-ok` is the only required check: it always runs, and passes only when the head it
+# reports for was built (or the change is docs-only); a draft's ci-ok fails.
 on:
   push:
     branches: [main]
@@ -15,8 +15,8 @@ permissions:
   pull-requests: read
 
 # A newer run cancels the older one for the same PR branch. Workflow-level so runs are
-# ordered by event; drafts get their own group so a skipped draft run never cancels a
-# real build. Pushes to main are never cancelled.
+# ordered by event; drafts get their own group so a draft run (it runs only ci-ok, which
+# fails) never cancels a real build. Pushes to main are never cancelled.
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.ref_name }}${{ github.event.pull_request.draft && '-draft' || '' }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -150,14 +150,36 @@ jobs:
             echo "::endgroup::"
           done
 
+  # GitHub counts a skipped required check as passed, so ci-ok always runs, drafts too, and
+  # passes only for the head this run built (scripts/ci_ok.py, issue 344): a draft run, a
+  # run for a head the PR no longer has, or a code change whose lint, test, e2e or macos
+  # job did not pass, fails. A later run for the same commit replaces a failed ci-ok.
+  # Re-running a draft or stale run fails again (same event payload): mark the PR ready or
+  # push. If a draft run's ci-ok finished after the ready run's, re-run the ready run's ci-ok.
   ci-ok:
     needs: [changes, lint, test, e2e, macos]
-    if: always() && (github.event_name == 'push' || !github.event.pull_request.draft)
+    if: always()
     runs-on: ubuntu-24.04
     steps:
-      - name: Fail if a needed job failed or was cancelled
-        if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+          sparse-checkout: scripts/ci_ok.py
+          sparse-checkout-cone-mode: false
+      - name: The PR's head now
+        id: pr
+        if: github.event_name == 'pull_request' && !github.event.pull_request.draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
         run: |
-          echo "changes=${{ needs.changes.result }} lint=${{ needs.lint.result }} test=${{ needs.test.result }} e2e=${{ needs.e2e.result }} macos=${{ needs.macos.result }}"
-          exit 1
-      - run: echo "CI ok"
+          sha="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR}" --jq .head.sha)"
+          echo "sha=${sha}" >> "$GITHUB_OUTPUT"
+      - name: Pass only for a built head
+        env:
+          CI_EVENT: ${{ github.event_name }}
+          CI_DRAFT: ${{ github.event.pull_request.draft || false }}
+          CI_NEEDS: ${{ toJSON(needs) }}
+          CI_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          CI_PR_HEAD_SHA: ${{ steps.pr.outputs.sha }}
+        run: python3 scripts/ci_ok.py

@@ -50,11 +50,15 @@ tests/fixtures/incidents/   synthetic incident fixtures (format: README.md there
 
 - **One task — one branch, one PR.** Small PRs; commit after every meaningful step.
 - `main` is protected: changes land only through PRs, squash merge only.
-- Push work in progress to a **draft** PR after every completed step. Drafts do not run CI.
+- Push work in progress to a **draft** PR after every completed step. Drafts do not build;
+  their `ci-ok` fails on purpose ("draft PRs are not built").
 - Mark a PR ready for review only when the step is done and ruff and pytest pass locally.
   That starts CI; later pushes rebuild and cancel the previous run for the branch.
   Docs-only changes (`docs/`, `*.md`) skip lint and test. `ci-ok` is the only required
-  check: it fails if a needed job failed or was cancelled.
+  check, and it passes only for a head that run built (`scripts/ci_ok.py`): it fails for a
+  draft, for a run whose head the PR no longer has, and for a code change whose lint,
+  test, e2e or macos job did not pass. A stale-head failure lands on the old commit; the
+  current head's own run decides. Re-running a draft run fails again: mark ready or push.
 - Before marking a PR ready, run the `reviewer` subagent (`.claude/agents/reviewer.md`) on
   the diff against `main` and fix its findings.
 - Never wait for CI inside a session: push and move on.

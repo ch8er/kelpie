@@ -190,6 +190,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
   after a stop until Hermes writes it again. The macOS CI job runs the self-test 15 times in
   a row
   ([#320](https://github.com/ch8er/kelpie/issues/320)).
+- CI (contributors): the required `ci-ok` check no longer passes, or reports skipped, for a
+  PR head whose lint, test, e2e and macOS jobs did not run on that commit. A draft's
+  `ci-ok` now fails, as does a run for a head the PR no longer has, so auto-merge cannot
+  land an unbuilt head; docs-only changes still pass without the build
+  ([#344](https://github.com/ch8er/kelpie/issues/344)).
 
 ## [0.1.0a1] - 2026-11-03
 
