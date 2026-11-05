@@ -2177,7 +2177,8 @@ any other value fails that section (noted in the report).
 | `review_economy.min_sample` | `20` | Reviews of a kind before it gets a recommendation; fewer: "direction only". |
 | `review_economy.max_findings_share` | `0.05` | A kind whose reviews found something in more than this share never gets one. |
 | `review_economy.light_share` | `0.3` | What the lighter path costs next to a full review (the saving is the rest). |
-| `review_economy.small_files` | `2` | At most this many changed files: a small change (the board gives no line counts). |
+| `review_economy.small_files` | `2` | At most this many changed files, of any kind, code included: a small change (the board gives no line counts). Set `0` to leave small changes with code. |
+| `review_economy.settle` | `"1d"` | A task's latest review counts once the task is done or this long after the review ended. |
 | `review_economy.docs_globs` / `tests_globs` / `generated_globs` / `dependency_globs` / `dependency_labels` | see `ReviewEconomySettings` | The patterns (on the path or the file name) and labels that make a task of each kind: all its files must match. |
 | `instructions.top` | `10` | Instruction files listed, the costliest first (`0`: no section). |
 

@@ -136,7 +136,11 @@ def test_the_daily_report_shows_the_section_and_the_advice() -> None:
         (("tests/test_a.py", "src/pkg/tests/test_b.py", "web/a.spec.ts"), (), TESTS),
         (("api_pb2.py", "x/generated/y.go"), (), GENERATED),
         (("uv.lock", "requirements-dev.txt"), (), DEPENDENCY),
-        (("src/a.py",), ("Dependencies",), DEPENDENCY),
+        (("src/a.py",), ("Dependencies",), SMALL),  # the files decide, not the label
+        ((), ("Deps",), DEPENDENCY),
+        (("pyproject.toml", "uv.lock"), (), DEPENDENCY),
+        (("docs/conf.py", "docs/build.py", "x.py"), (), CODE),
+        (("CMakeLists.txt", "a.c", "b.c"), (), CODE),
         (("src/a.py", "README.md"), (), SMALL),
         (("src/a.py", "src/b.py", "src/c.py"), (), CODE),
         ((), (), UNKNOWN),
@@ -171,7 +175,9 @@ def test_a_review_finds_something_when_sent_back_or_followed_by_another_round() 
 
 def test_never_for_a_class_above_the_threshold_or_for_code() -> None:
     task = Task("T", "t", Status.DONE, at(0), repo="r", files=("README.md",))
-    many = [Session(f"s{i}", f"T{i}", "rev", at(0) + timedelta(minutes=i), None) for i in range(30)]
+    many = [
+        Session(f"s{i}", f"T{i}", "rev", at(0) + timedelta(minutes=i), at(1)) for i in range(30)
+    ]
     tasks = [Task(f"T{i}", "t", Status.DONE, at(0), repo="r", files=task.files) for i in range(30)]
     tasks[0] = Task("T0", "t", Status.DONE, at(0), repo="r", files=task.files,
                     returns=(Return(at(1), "x"), ))  # fmt: skip
@@ -217,3 +223,53 @@ def test_section_settings_and_nothing_without_reviews() -> None:
     text = render_markdown(report)
     assert "docs only in `example/repo`: direction only, 0 of 24" in text
     assert not [a for a in report.recommendations if "Lighter review" in a.title]
+
+
+def test_running_and_recent_reviews_do_not_count_as_clean() -> None:
+    open_task = Task("T-1", "t", Status.REVIEW, at(0), repo="r", files=("README.md",))
+    done = Task("T-2", "t", Status.DONE, at(20), repo="r", files=("README.md",))
+    sessions = (
+        Session("s-run", "T-1", "rev", at(22), None),  # still running
+        Session("s-old", "T-1", "rev", at(1), at(2)),  # followed by s-run: found
+        Session("s-done", "T-2", "rev", at(18), at(19)),  # last, but the task is done
+    )
+    roles = {s.id: "reviewer" for s in sessions}
+    found = reviews([open_task, done], sessions, [], roles, ("reviewer",), at(24), CFG)
+    assert [(r.session_id, r.found) for r in found] == [("s-old", True), ("s-done", False)]
+    recent = (Session("s-new", "T-1", "rev", at(20), at(21)),)  # last, 3h before the end
+    assert reviews([open_task], recent, [], {"s-new": "reviewer"}, ("reviewer",), at(24), CFG) == []
+    later = reviews([open_task], recent, [], {"s-new": "reviewer"}, ("reviewer",), at(48), CFG)
+    assert [r.found for r in later] == [False]
+
+
+def test_nothing_after_the_end_counts() -> None:
+    task = Task("T-1", "t", Status.DONE, at(2), repo="r", files=("README.md",),
+                returns=(Return(at(30), "late"),))  # fmt: skip
+    session = Session("s", "T-1", "rev", at(1), at(2))
+    late = Span("tr", "x", "chat", SpanKind.LLM, at(1.5), at(25), session_id="s",
+                model="model-large", input_tokens=1000)  # fmt: skip
+    (r,) = reviews([task], [session], [late], {"s": "reviewer"}, ("reviewer",), at(24), CFG)
+    assert not r.found and r.tokens == 0
+
+
+def test_a_subscription_is_never_dollars() -> None:
+    from kelpie.core.spend import ProviderSpend, SpendConfig, SpendSettings
+
+    fixture = yaml.safe_load(FIXTURE.read_text())
+    inputs = farm(fixture)
+    plan = ProviderSpend(
+        "plan", mode="subscription", models=("model-large",), limit_tokens=10_000_000,
+        limit_window=timedelta(days=7),
+    )  # fmt: skip
+    spend = SpendConfig(settings=SpendSettings(providers=(plan,)), prices=PRICES)
+    report = build_report(
+        ReportInputs(
+            **{
+                f: getattr(inputs, f) for f in ("day", "tz", "tasks", "owners", "sessions", "spans")
+            },
+            prices=PRICES,
+            spend=spend,
+        )
+    )
+    (docs,) = [a for a in report.recommendations if "Lighter review" in a.title]
+    assert docs.usd == 0 and "tokens a day" in docs.detail

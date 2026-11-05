@@ -360,10 +360,12 @@ board the report is unchanged.
   tool, not by the line of the prompt that changed.
 - **Review economy** (#298, `kelpie.report.review_economy`): per repository and kind of
   change (docs only, tests only, generated files, a dependency bump, a small change of at
-  most two files, code; from the files a task changed and its labels), the reviews the
-  board shows (sessions of `review_roles`), rounds per task, review tokens and how many
-  reviews found something (the task was sent back after it, or another round followed). A
-  light kind (never code) whose reviews found something in at most 5% of at least 20 of
+  most two files of any kind, code; from the files a task changed, a dependency label only
+  when the files are unknown), the reviews the board shows that ended (sessions of
+  `review_roles`), rounds per task, review tokens and how many reviews found something (the
+  task was sent back after it by anyone, or another round followed; a task's latest review
+  counts once the task is done or a day has passed). A light kind (never code) whose
+  reviews found something in at most 5% of at least 20 of
   them gets a recommendation for a lighter path, with the evidence (n reviews, k with
   findings) and the tokens a day it would save; under 20 it is "direction only"; above
   the threshold, nothing. Kelpie only recommends: it never changes how tasks are reviewed.

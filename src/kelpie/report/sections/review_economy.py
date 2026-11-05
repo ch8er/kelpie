@@ -62,8 +62,8 @@ def review_economy(
         elif v.direction:
             notes.append(
                 f"- {_name(v)}: direction only, {v.cls.k} of {v.cls.n} reviews found "
-                f"something; {cfg.min_sample} reviews are needed before Kelpie recommends a "
-                "lighter path."
+                f"something; {max(cfg.min_sample, 1)} reviews are needed before Kelpie "
+                "recommends a lighter path."
             )
     if notes:
         lines += ["", *notes]
