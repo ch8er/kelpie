@@ -397,8 +397,10 @@ What is left:
   The setting goes where the adapter runs (the agent host's config with `kelpie agent`).
   Budgets are not affected: they read spend from the span store, which spool lines do not
   enter.
-- **Hermes spool lines from an older plugin**, or on macOS (no `/proc`), cannot be checked:
-  they never stop a run alone, so rule 10 stops such runs only from OTLP evidence.
+- **Hermes spool lines from an older plugin** cannot be checked: they never stop a run
+  alone, so rule 10 stops such runs only from OTLP evidence. On macOS that includes every
+  plugin of 0.1.0a2 and earlier, which wrote no `pid_start` there (#353); a macOS Hermes without
+  psutil records no worker fingerprint, with the same effect.
 
 **Who is affected.** Farms that run rule 10 in `act` and whose agents are untrusted or
 sandboxed (in a container, as another user, on another machine reporting straight to

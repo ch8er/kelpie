@@ -12,7 +12,9 @@ computes fingerprints exactly as Hermes does on its system:
   the start being the kernel's process start in centiseconds since the epoch, as psutil's
   unadjusted ``create_time(monotonic=True)`` gives it: ``round((tv_sec + tv_usec / 1e6) *
   100)``, read here with ``proc_pidinfo(PROC_PIDTBSDINFO)`` from ``libproc``. A wall-clock
-  start never repeats across reboots, so it needs no epoch.
+  start never repeats across reboots, so it needs no epoch. The structure and the
+  centiseconds come from the Hermes plugin (:mod:`kelpie.adapters.hermes.plugin`), which
+  writes the same fingerprint on every spool line (#353): one definition for both.
 
 ``ps`` is no fallback: its one-second resolution cannot match Hermes' centiseconds. Without
 ``/proc`` and without libproc nothing is verified, and nothing is signalled.
@@ -30,6 +32,13 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, ClassVar, Protocol
+
+# One definition of Hermes' macOS start time, shared with the plugin that writes the spool
+# lines' writers (#353): a line's ``pid_start`` and the worker verified here must agree.
+from kelpie.adapters.hermes.plugin import MAXCOMLEN as MAXCOMLEN
+from kelpie.adapters.hermes.plugin import PROC_PIDTBSDINFO as PROC_PIDTBSDINFO
+from kelpie.adapters.hermes.plugin import ProcBsdInfo as ProcBsdInfo
+from kelpie.adapters.hermes.plugin import birth as birth
 
 PROC = Path("/proc")
 DEAD = frozenset({"Z", "X", "x"})  # zombie or dead: never signalled, counted as gone
@@ -236,45 +245,8 @@ class Procfs:
 
 # --- macOS ----------------------------------------------------------------------------------
 
-PROC_PIDTBSDINFO = 3
-MAXCOMLEN = 16
 PID_MAX = 2**31 - 1  # pid_t; macOS hands out pids up to 99999
 SZOMB = 5  # pbi_status of a zombie (sys/proc.h)
-
-
-class ProcBsdInfo(ctypes.Structure):
-    """``struct proc_bsdinfo`` (``sys/proc_info.h``), 136 bytes."""
-
-    _fields_ = [
-        ("pbi_flags", ctypes.c_uint32),
-        ("pbi_status", ctypes.c_uint32),
-        ("pbi_xstatus", ctypes.c_uint32),
-        ("pbi_pid", ctypes.c_uint32),
-        ("pbi_ppid", ctypes.c_uint32),
-        ("pbi_uid", ctypes.c_uint32),
-        ("pbi_gid", ctypes.c_uint32),
-        ("pbi_ruid", ctypes.c_uint32),
-        ("pbi_rgid", ctypes.c_uint32),
-        ("pbi_svuid", ctypes.c_uint32),
-        ("pbi_svgid", ctypes.c_uint32),
-        ("rfu_1", ctypes.c_uint32),
-        ("pbi_comm", ctypes.c_char * MAXCOMLEN),
-        ("pbi_name", ctypes.c_char * (2 * MAXCOMLEN)),
-        ("pbi_nfiles", ctypes.c_uint32),
-        ("pbi_pgid", ctypes.c_uint32),
-        ("pbi_pjobc", ctypes.c_uint32),
-        ("e_tdev", ctypes.c_uint32),
-        ("e_tpgid", ctypes.c_uint32),
-        ("pbi_nice", ctypes.c_int32),
-        ("pbi_start_tvsec", ctypes.c_uint64),
-        ("pbi_start_tvusec", ctypes.c_uint64),
-    ]
-
-
-def birth(tv_sec: int, tv_usec: int) -> int:
-    """Hermes' macOS start time: psutil's ``tv_sec + tv_usec / 1000000.0`` (the same doubles),
-    in centiseconds as Hermes rounds it."""
-    return round((float(tv_sec) + tv_usec / 1000000.0) * 100)
 
 
 class Libproc:

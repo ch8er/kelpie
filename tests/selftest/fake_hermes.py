@@ -4,8 +4,12 @@ worker to run the self-test without Hermes.
 ``dispatch`` starts what Hermes would: a submitter (recorded as ``task_runs.worker_pid`` with
 Hermes' fingerprint) and an agent (recorded in a ``worker_bound`` event) that asks the model
 in the profile's ``config.yaml`` for a tool call, starts it as a child of its own the first
-time (a tool command), writes each call to ``$KELPIE_HERMES_SPOOL`` as Kelpie's plugin would
-and heartbeats. ``kanban block`` is the simulator's (:mod:`kelpie.sim.hermes_cli`).
+time (a tool command) and heartbeats. Each call goes through Kelpie's real plugin, the copy
+the self-test installed in the profile, loaded and called the way Hermes does (``register``,
+then its ``post_tool_call`` hook in the agent process): the spool lines, their writer's
+``pid_start`` included, are the plugin's own, so the self-test checks the real spool path
+and the adapter's writer check (#353), never a line the fake made up. ``kanban block`` is
+the simulator's (:mod:`kelpie.sim.hermes_cli`).
 
 A file ``mode`` next to the executable (its directory is ``BIN_DIR``) changes the behaviour:
 ``nonspawnable`` (dispatch skips the task), ``crash`` (the run ends crashed before an agent
@@ -20,6 +24,7 @@ the ``HERMES_HOME``, ``HOME``, ``HERMES_PROFILE_NAME`` and ``HERMES_KANBAN_DB`` 
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import re
@@ -30,6 +35,7 @@ import sys
 import time
 import urllib.request
 from pathlib import Path
+from typing import Any
 
 from kelpie.adapters.hermes.worker import host_table
 from kelpie.sim import hermes_cli
@@ -63,11 +69,13 @@ def option(args: list[str], name: str) -> str | None:
     return args[args.index(name) + 1] if name in args else None
 
 
-def spawn(code: str, *, keep_env: bool = False) -> subprocess.Popen[bytes]:
+def spawn(
+    code: str, *, keep_env: bool = False, extra: dict[str, str] | None = None
+) -> subprocess.Popen[bytes]:
     """``noenv``: the process's environment shows no HERMES_HOME (as after Hermes'
     setproctitle without SPT_NOENV); it works in the throwaway HOME instead."""
     prefix = DEAF if "deaf" in mode() else ""
-    env = dict(os.environ)
+    env = {**os.environ, **(extra or {})}
     if "noenv" in mode() and not keep_env:
         env.pop("HERMES_HOME", None)
     return subprocess.Popen(
@@ -130,9 +138,12 @@ def dispatch(board: str) -> int:
     base_url = re.search(r"base_url: (\S+)", config)
     assert base_url is not None
     agent = spawn(
-        f"import sys; sys.argv = ['agent', {board!r}, {task!r}, '{rid}', {base_url[1]!r}]\n"
+        f"import sys; sys.argv = ['agent', {board!r}, {task!r}, '{rid}', {base_url[1]!r},"
+        f" {profile!r}]\n"
         f"import runpy; runpy.run_path({__file__!r}, {{'BIN_DIR': {BIN_DIR!r}}}, 'agent')",
         keep_env=True,
+        # What Hermes' dispatcher gives a kanban worker; the plugin reads them.
+        extra={"HERMES_KANBAN_TASK": task, "HERMES_KANBAN_RUN_ID": str(rid)},
     )
     payload = {"pid": agent.pid, "claim_lock": lock, "started_at": print_of(agent.pid)}
     conn.execute(
@@ -145,11 +156,31 @@ def dispatch(board: str) -> int:
     return 0
 
 
-def agent(board: str, task: str, rid: int, base_url: str) -> None:
+def load_hooks(profile: str) -> dict[str, Any]:
+    """Kelpie's plugin as Hermes loads it: the profile's ``plugins/kelpie/__init__.py`` (what
+    the self-test installed), its ``register(ctx)`` collecting the hooks. None installed (or
+    ``silent``, Kelpie's plugin not loaded): no hooks, no spool lines."""
+    hooks: dict[str, Any] = {}
+    path = HOME / "profiles" / profile / "plugins" / "kelpie" / "__init__.py"
+    if "silent" in mode() or not path.is_file():
+        return hooks
+    spec = importlib.util.spec_from_file_location("hermes_plugins.kelpie", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    class Context:
+        def register_hook(self, name: str, fn: Any) -> None:
+            hooks[name] = fn
+
+    module.register(Context())
+    return hooks
+
+
+def agent(board: str, task: str, rid: int, base_url: str, profile: str) -> None:
     conn = connect(board)
-    spool = Path(os.environ["KELPIE_HERMES_SPOOL"])
     tool: subprocess.Popen[bytes] | None = None
-    writer = {"pid": os.getpid(), "pid_start": print_of(os.getpid())}  # as the plugin (#302)
+    hooks = load_hooks(profile)
     for n in range(10_000):
         body = json.dumps({"model": "m", "messages": [], "tools": [{"type": "function"}]})
         request = urllib.request.Request(
@@ -159,24 +190,18 @@ def agent(board: str, task: str, rid: int, base_url: str) -> None:
             call = json.load(response)["choices"][0]["message"]["tool_calls"][0]
         if tool is None:
             tool = spawn("import time; time.sleep(600)")
+        if "post_tool_call" in hooks:  # as Hermes' model_tools._emit_post_tool_call_hook
+            hooks["post_tool_call"](
+                tool_name=call["function"]["name"],
+                args=json.loads(call["function"]["arguments"]),
+                result=json.dumps({"output": "kelpie-selftest", "exit_code": 0, "error": None}),
+                task_id="fake-internal-id",
+                session_id="fake-session",
+                tool_call_id=f"call_{n}",
+                duration_ms=10,
+                status="ok",
+            )
         now = time.time()
-        line = {
-            "type": "tool",
-            "at": now,
-            "task_id": task,
-            "run_id": str(rid),
-            "session_id": "fake-session",
-            "tool": call["function"]["name"],
-            "tool_call_id": f"call_{n}",
-            "args_hash": "0123456789abcdef",
-            "command": "sleep *** *** ***",
-            "outcome": "ok",
-            "duration_ms": 10,
-            **writer,
-        }
-        if "silent" not in mode():  # silent: Kelpie's plugin is not loaded
-            with spool.open("a") as fh:
-                fh.write(json.dumps(line) + "\n")
         conn.execute("UPDATE tasks SET last_heartbeat_at = ? WHERE id = ?", (int(now), task))
         conn.execute("UPDATE task_runs SET last_heartbeat_at = ? WHERE id = ?", (int(now), rid))
         time.sleep(0.1)
@@ -226,6 +251,6 @@ def main(argv: list[str]) -> int:
 
 
 if __name__ == "agent":
-    agent(sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4])
+    agent(sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4], sys.argv[5])
 elif __name__ == "__main__":
     raise SystemExit(main(sys.argv[1:]))
