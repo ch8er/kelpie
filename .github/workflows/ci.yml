@@ -2,8 +2,8 @@ name: CI
 
 # Draft PRs do not build. A PR builds when it is marked ready for review and on every
 # push to it afterwards; main builds on push. Docs-only changes skip lint and test.
-# `ci-ok` is the only required check: it always reports, and fails only if a needed
-# job failed or was cancelled.
+# `ci-ok` is the only required check: it always runs, and passes only when the head it
+# reports for was built (or the change is docs-only); a draft's ci-ok fails.
 on:
   push:
     branches: [main]
@@ -150,14 +150,32 @@ jobs:
             echo "::endgroup::"
           done
 
+  # GitHub counts a skipped required check as passed, so ci-ok always runs, drafts too, and
+  # passes only for the head this run built (scripts/ci_ok.py, issue 344): a draft run, a
+  # run for a head the PR no longer has, or a code change whose lint, test, e2e or macos
+  # job did not pass, fails. A later run for the same commit replaces a failed ci-ok.
   ci-ok:
     needs: [changes, lint, test, e2e, macos]
-    if: always() && (github.event_name == 'push' || !github.event.pull_request.draft)
+    if: always()
     runs-on: ubuntu-24.04
     steps:
-      - name: Fail if a needed job failed or was cancelled
-        if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')
-        run: |
-          echo "changes=${{ needs.changes.result }} lint=${{ needs.lint.result }} test=${{ needs.test.result }} e2e=${{ needs.e2e.result }} macos=${{ needs.macos.result }}"
-          exit 1
-      - run: echo "CI ok"
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+          sparse-checkout: scripts/ci_ok.py
+          sparse-checkout-cone-mode: false
+      - name: The PR's head now
+        id: pr
+        if: github.event_name == 'pull_request' && !github.event.pull_request.draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+        run: echo "sha=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR}" --jq .head.sha)" >> "$GITHUB_OUTPUT"
+      - name: Pass only for a built head
+        env:
+          CI_EVENT: ${{ github.event_name }}
+          CI_DRAFT: ${{ github.event.pull_request.draft || false }}
+          CI_NEEDS: ${{ toJSON(needs) }}
+          CI_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          CI_PR_HEAD_SHA: ${{ steps.pr.outputs.sha }}
+        run: python3 scripts/ci_ok.py
