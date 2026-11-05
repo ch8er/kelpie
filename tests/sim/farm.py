@@ -51,7 +51,7 @@ class Farm:
         hermes_home = root / "hermes"
         hermes_home.mkdir(parents=True)
         self.board = Board(hermes_home / "kanban.db")
-        self.spool = Spool(hermes_home / "kelpie" / "spool.jsonl")
+        self.spool = Spool(hermes_home / "kelpie" / "spool.jsonl", self.board.path)
         bin_dir = root / "bin"
         bin_dir.mkdir()
         self.hermes_log = hermes_home / hermes_cli.CALLS

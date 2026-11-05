@@ -68,6 +68,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ### Safety
 
+- Hermes spool lines carry their writer (audit M1, #302): the plugin writes its `pid` and
+  `pid_start` (its start fingerprint, as Hermes records a worker's), and the adapter checks
+  them against the run's recorded worker. A tool line from another process, or one it
+  cannot check (an older plugin, macOS, a run without a recorded worker), is kept but marked
+  unverified, and rule 10 does not stop a run on such lines alone: it sends its critical
+  alert ("Not stopped") and leaves the stop to a person. **Update the plugin on every agent
+  host**, or rule 10 stops Hermes runs only from OTLP evidence. With per-agent traces
+  tokens, the 0.1.0a1 release note "Rule 10 in `act` trusts every holder of the traces
+  token" narrows to the shared token and Claude Code or OpenClaw spools
+  ([docs/security.md](docs/security.md#known-residual-risks)).
 - Per-agent traces tokens (audit M1, #302): `[[traces.tokens]]` gives each agent's exporter
   a token of its own that may report spans only for its owners, roles, sessions (patterns)
   or boards. Who a session or task belongs to comes from the board: a span for another

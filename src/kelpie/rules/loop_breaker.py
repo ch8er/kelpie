@@ -71,6 +71,7 @@ from kelpie.core.model import (
     Span,
 )
 from kelpie.core.serde import parse_duration
+from kelpie.core.spans import UNVERIFIED_ATTRIBUTE
 from kelpie.core.spend import gap_causes
 from kelpie.rules import register
 from kelpie.rules._alerts import alert_params
@@ -147,19 +148,18 @@ class LoopBreaker:
             if not calls:
                 continue
             limits = self._thresholds(session, snapshot)
-            trips = [
-                trip
-                for trip in (
-                    self._loop(calls, limits, snapshot.now),
-                    self._errors(calls, limits, snapshot.now),
-                )
-                if trip is not None
-            ]
+            # The run's own calls first: lines another process wrote neither stop a run
+            # nor break its streak (#302).
+            confirmed = self._trips([c for c in calls if not _unverified(c)], limits, snapshot.now)
+            trips = confirmed or self._trips(calls, limits, snapshot.now)
             if not trips:
                 continue
             if index is None:
                 index = span_index(snapshot.spans)
-            actions.extend(self._stop_session(session, snapshot, trips, index))
+            # Only lines the platform could not tie to this run: alert, a human decides.
+            actions.extend(
+                self._stop_session(session, snapshot, trips, index, stop=bool(confirmed))
+            )
         if snapshot.budgets_ok:
             for status in snapshot.budgets:
                 actions.extend(self._budget(status, snapshot))
@@ -243,6 +243,12 @@ class LoopBreaker:
 
     # --- loops and error streaks --------------------------------------------------------
 
+    def _trips(self, calls: Sequence[Span], limits: Thresholds, now: datetime) -> list[_Trip]:
+        if not calls:
+            return []
+        found = (self._loop(calls, limits, now), self._errors(calls, limits, now))
+        return [trip for trip in found if trip is not None]
+
     def _loop(self, calls: Sequence[Span], limits: Thresholds, now: datetime) -> _Trip | None:
         streak = identical_streak(calls)
         n = limits.identical_calls
@@ -296,9 +302,22 @@ class LoopBreaker:
         )
 
     def _stop_session(
-        self, session: Session, snapshot: Snapshot, trips: list[_Trip], index: SpanIndex
+        self,
+        session: Session,
+        snapshot: Snapshot,
+        trips: list[_Trip],
+        index: SpanIndex,
+        stop: bool = True,
     ) -> Iterable[Action]:
+        """Alerts for ``trips`` and the stop; without ``stop`` (the evidence is spool lines
+        the platform could not tie to this run's worker, #302) alerts only."""
         subject = f"session {session.id} (agent {session.owner_id}, task {session.task_id})"
+        unverified = (
+            ""
+            if stop
+            else " Not stopped: these calls come from hook lines Kelpie could not tie to this "
+            "run's own worker, so another agent may have written them."
+        )
         tokens = tokens_since(
             snapshot.spans_for_session(session.id), min(t.since for t in trips), index
         )
@@ -308,24 +327,27 @@ class LoopBreaker:
                 ActionKind.ALERT,
                 NAME,
                 f"Runaway run: {subject} made {trip.what} {trip.detail}.{spent} "
-                "Check the task before resuming it.",
+                + ("Check the task before resuming it." if stop else "Check the run.")
+                + unverified,
                 task_id=session.task_id,
                 severity=Severity.CRITICAL,
-                key=f"{trip.kind}:{session.id}",
-                state=f"{NAME}:{trip.kind}:{session.id}",
+                key=f"{trip.kind}:{session.id}{'' if stop else ':unverified'}",
+                state=f"{NAME}:{trip.kind}:{session.id}{'' if stop else ':unverified'}",
                 since=trip.since,
                 params={
                     "session_id": session.id,
                     "owner_id": session.owner_id,
                     "trigger": trip.kind,
                     "tokens_since": tokens,
-                    ANNOUNCES: f"stop:{session.id}",
+                    **({ANNOUNCES: f"stop:{session.id}"} if stop else {"unverified": True}),
                     **alert_params(
                         f"Runaway run on {session.task_id}: {trip.what}",
                         "Stop the run if it is still going, then check the task",
                     ),
                 },
             )
+        if not stop:
+            return
         yield Action(
             ActionKind.STOP,
             NAME,
@@ -502,6 +524,10 @@ def _at(value: datetime) -> str:
 def _in(delta: timedelta) -> str:
     minutes = max(0, round(delta.total_seconds() / 60))
     return f"in {minutes} min" if minutes < 120 else f"in {minutes / 60:.1f} h"
+
+
+def _unverified(span: Span) -> bool:
+    return span.attributes.get(UNVERIFIED_ATTRIBUTE) is True
 
 
 def _minutes(d: timedelta) -> str:

@@ -10,6 +10,7 @@ else.
 from __future__ import annotations
 
 import os
+import sqlite3
 import threading
 import types
 from collections.abc import Iterator, Mapping
@@ -20,6 +21,7 @@ from typing import Any
 from unittest import mock
 
 from kelpie.adapters.hermes import plugin
+from kelpie.adapters.hermes.worker import run_worker
 
 # The plugin reads os.environ, so a hook call changes the process environment while it runs:
 # one writer at a time, and nothing else in the process may read HERMES_* meanwhile (the e2e
@@ -27,9 +29,38 @@ from kelpie.adapters.hermes import plugin
 _LOCK = threading.Lock()
 
 
+SIM_PID_BASE = 1 << 30  # above any pid a kernel hands out (Linux: at most 4194304)
+
+
+def sim_writer(run_id: int) -> tuple[int, str]:
+    """The writer a simulated run's worker puts on its spool lines, and the board records
+    as the run's worker (:meth:`kelpie.sim.board.Board.claim`): a pid and a fingerprint no
+    live process has, so stopping the run never signals a real process."""
+    return SIM_PID_BASE + run_id, f"sim:0|{run_id}"
+
+
 class Spool:
-    def __init__(self, path: Path) -> None:
+    """``board``: the simulated ``kanban.db``; a line's writer is then the run's recorded
+    worker (its agent, else its submitter), as on a farm where that worker runs the plugin.
+    Without it, or for a run without one, :func:`sim_writer`."""
+
+    def __init__(self, path: Path, board: Path | None = None) -> None:
         self.path = path
+        self.board = board
+
+    def _writer(self, run_id: int) -> tuple[int, str | None]:
+        if self.board is not None and self.board.exists():
+            conn = sqlite3.connect(self.board)
+            try:
+                worker = run_worker(conn, run_id)
+            finally:
+                conn.close()
+            if worker is not None:
+                for pid, start in ((worker.agent, worker.agent_print),
+                                   (worker.submitter, worker.submitter_print)):  # fmt: skip
+                    if pid is not None:
+                        return pid, start
+        return sim_writer(run_id)
 
     @contextmanager
     def _worker(self, task_id: str, run_id: int, at: datetime | None) -> Iterator[None]:
@@ -39,7 +70,9 @@ class Spool:
             "HERMES_KANBAN_RUN_ID": str(run_id),
         }
         clock = types.SimpleNamespace(time=lambda: at.timestamp()) if at is not None else None
-        with _LOCK, mock.patch.dict(os.environ, env):
+        pid, start = self._writer(run_id)
+        writer = lambda: {"pid": pid, "pid_start": start}  # noqa: E731
+        with _LOCK, mock.patch.dict(os.environ, env), mock.patch.object(plugin, "_writer", writer):
             # Only this worker's variables: none of this machine's own Hermes ones.
             for key in [k for k in os.environ if k.startswith("HERMES_") and k not in env]:
                 del os.environ[key]

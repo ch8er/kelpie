@@ -10,6 +10,7 @@ people's acceptance criteria from it). The rows are made up.
 from __future__ import annotations
 
 import json
+import socket
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -17,6 +18,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+
+from kelpie.sim.spool import sim_writer
 
 KANBAN_SCHEMA = """
 CREATE TABLE tasks (
@@ -248,9 +251,17 @@ class Board:
         heartbeat: datetime | None = None,
         claim_expires: datetime | None = None,
     ) -> int:
-        """A worker claims a task: a ``claimed`` event, an open run, the task ``running``."""
+        """A worker claims a task: a ``claimed`` event, an open run (with its worker, as
+        :func:`kelpie.sim.spool.sim_writer` writes it on spool lines), the task ``running``."""
         self.event(task_id, "claimed", started)
         rid = self.run(task_id, profile, started, heartbeat=heartbeat)
+        pid, print_ = sim_writer(rid)
+        with connect(self.path) as conn:  # on this host: a stop looks for it, finds it gone
+            conn.execute(
+                "UPDATE task_runs SET claim_lock = ?, worker_pid = ?, worker_started_at = ?"
+                " WHERE id = ?",
+                (f"{socket.gethostname()}:{pid}", pid, print_, rid),
+            )
         self.update(
             task_id,
             status="running",

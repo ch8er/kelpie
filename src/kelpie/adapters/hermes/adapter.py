@@ -163,7 +163,14 @@ from kelpie.adapters.hermes.stop import (
     stop_comment,
     verify_stop,
 )
-from kelpie.adapters.hermes.worker import DEFAULT_GRACE, OLD_BOARD, Ended, run_worker
+from kelpie.adapters.hermes.worker import (
+    DEFAULT_GRACE,
+    OLD_BOARD,
+    Ended,
+    run_worker,
+    run_workers,
+    writer_matches,
+)
 from kelpie.adapters.hermes.worker import end as end_workers
 from kelpie.adapters.hermes.worker import targets as worker_targets
 from kelpie.core import actlock
@@ -193,6 +200,7 @@ from kelpie.core.model import (
     Task,
 )
 from kelpie.core.ports import PlatformEvent, UnsupportedAction
+from kelpie.core.spans import UNVERIFIED_ATTRIBUTE
 from kelpie.core.tools import (
     COMMAND_COMPLETE_ATTRIBUTE,
     COMMAND_MULTILINE_ATTRIBUTE,
@@ -213,6 +221,7 @@ DEFAULT_DB = Path("~/.hermes/kanban.db")
 DEFAULT_SPOOL = Path("~/.hermes/kelpie/spool.jsonl")
 SPOOL_TAIL = 65536  # bytes read from the end of the spool to find its newest line
 MAX_SPOOL_READ = 64 * 1024 * 1024  # bytes read per spool file and snapshot
+WRITER_ATTRIBUTE = "_kelpie.writer"  # a line's (pid, pid_start) until it is checked
 MAX_SPOOL_LINE = 16 * 1024  # a longer spool line is skipped (the plugin writes under 2 KB)
 DEFAULT_LOOKBACK = timedelta(hours=24)
 DEFAULT_GIT_TIMEOUT = timedelta(seconds=DEFAULT_TIMEOUT)
@@ -655,6 +664,8 @@ class HermesAdapter:
     actions: ClassVar[frozenset[ActionKind]] = frozenset(
         {ActionKind.STOP, ActionKind.WAIT, ActionKind.REQUEUE, ActionKind.WAKE, ActionKind.COMMENT}
     )
+    # spool lines naming a run their writer is not the worker of: the count last warned about
+    _writer_warned: int = field(default=0, init=False, repr=False, compare=False)
     # workspace -> snapshot time until which it is not read (its git timed out)
     _git_backoff: dict[Path, datetime] = field(
         default_factory=dict, init=False, repr=False, compare=False
@@ -838,6 +849,7 @@ class HermesAdapter:
             with self._connect() as conn:  # one read transaction: a consistent view
                 if own_spans:
                     spans = _own_spans(conn, spans)
+                spans = self._check_writers(conn, spans)
                 beats: dict[str, datetime] = {}
                 for span in spans:
                     if span.kind is SpanKind.TOOL and span.session_id and span.end is not None:
@@ -1534,6 +1546,44 @@ class HermesAdapter:
         events = (_event_from_line(line, cutoff) for line in self._spool_lines(cutoff))
         return spans_from_hook_events((e for e in events if e is not None), prefix="hermes")
 
+    def _check_writers(self, conn: _Connection, spans: tuple[Span, ...]) -> tuple[Span, ...]:
+        """Each spool span's writer (the plugin's pid and Hermes-style process fingerprint)
+        against its run's recorded worker on this board (#302, audit M1): any agent that can
+        write the spool can name any run, but only the run's own worker writes its pid and
+        start. A span whose writer does not match, or cannot be checked (an older plugin,
+        macOS, a run without a recorded worker), is kept as evidence but marked unverified,
+        and rule 10 does not stop a run on it alone. The writer itself is dropped."""
+        runs = {rid for s in spans if s.session_id and (rid := run_id(s.session_id)) is not None}
+        try:
+            workers = run_workers(conn, runs)
+        except sqlite3.Error as exc:  # the lines stay unverified
+            log.debug("hermes: cannot read the workers of runs: %r", exc)
+            workers = {}
+        out: list[Span] = []
+        mismatched = 0
+        for span in spans:
+            attributes = dict(span.attributes)
+            writer = attributes.pop(WRITER_ATTRIBUTE, None)
+            if span.kind is not SpanKind.TOOL:  # only tool calls are rule 10's evidence
+                out.append(replace(span, attributes=attributes) if writer else span)
+                continue
+            rid = run_id(span.session_id) if span.session_id else None
+            verdict = writer_matches(writer, workers.get(rid)) if rid is not None else None
+            if verdict is not True and rid is not None:
+                attributes[UNVERIFIED_ATTRIBUTE] = True
+                mismatched += verdict is False
+            out.append(replace(span, attributes=attributes))
+        if mismatched > 2 * self._writer_warned:  # the first, then each doubling
+            log.warning(
+                "hermes: %d spool line(s) name a run whose recorded worker did not write them; "
+                "rule 10 will not stop a run on them",
+                mismatched,
+            )
+            self._writer_warned = mismatched
+        elif not mismatched:
+            self._writer_warned = 0
+        return tuple(out)
+
     # --- PlatformAdapter -----------------------------------------------------------------
 
     def list_tasks(self) -> Sequence[Task]:
@@ -1838,6 +1888,9 @@ def _event_from_line(line: str, cutoff: datetime) -> HookEvent | None:
         chars = rec.get("output_chars")
         if isinstance(chars, int) and not isinstance(chars, bool) and chars >= 0:
             attributes[OUTPUT_CHARS_ATTRIBUTE] = chars
+        pid, start = rec.get("pid"), rec.get("pid_start")
+        if type(pid) is int and pid > 0 and isinstance(start, str) and 0 < len(start) <= 200:
+            attributes[WRITER_ATTRIBUTE] = (pid, start)  # checked, then dropped
         outcome = str(rec["outcome"]) if rec.get("outcome") else None
         code = rec.get("exit_code")
         ok_code = isinstance(code, int) and not isinstance(code, bool) and abs(code) <= 2**31

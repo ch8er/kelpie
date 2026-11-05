@@ -82,6 +82,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from kelpie.core.model import Span, SpanKind
+from kelpie.core.spans import INGEST_MARK, UNVERIFIED_ATTRIBUTE
 from kelpie.traces.args import args_hash, args_hash_of_attribute
 from kelpie.traces.command import (
     command_of,
@@ -226,7 +227,8 @@ _KINDS = frozenset(k.value for k in SpanKind)
 
 
 # Set by Kelpie itself (hook spans carry ``kelpie.source = "hooks"``); never taken from OTLP.
-RESERVED_KEYS = frozenset({"kelpie.source", *TOOL_DETAILS})
+# Set by Kelpie only: a sender's value is never kept (#302).
+RESERVED_KEYS = frozenset({"kelpie.source", INGEST_MARK, UNVERIFIED_ATTRIBUTE, *TOOL_DETAILS})
 
 
 def is_kept(key: str, claude_code: bool = False) -> bool:
