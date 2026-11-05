@@ -11,7 +11,8 @@ A file ``mode`` next to the executable (its directory is ``BIN_DIR``) changes th
 ``nonspawnable`` (dispatch skips the task), ``crash`` (the run ends crashed before an agent
 takes it), ``author`` (blocks are signed ``default``, as a Hermes that ignores
 ``HERMES_PROFILE_NAME``), ``deaf`` (the worker and its tool command ignore SIGTERM),
-``silent`` (no tool call reaches the spool: rule 10 never fires), ``noenv`` (the submitter
+``silent`` (no tool call reaches the spool: rule 10 never fires), ``rollback`` (the board is
+in rollback-journal mode, not WAL), ``noenv`` (the submitter
 and the tool command show no ``HERMES_HOME``). Several words combine. ``kanban block`` writes
 the ``HERMES_HOME``, ``HOME``, ``HERMES_PROFILE_NAME`` and ``HERMES_KANBAN_DB`` it got to
 ``block-env.json``.
@@ -189,7 +190,14 @@ def main(argv: list[str]) -> int:
     if argv[:3] == ["kanban", "boards", "create"]:
         db = db_of(argv[3])
         db.parent.mkdir(parents=True)
-        sqlite3.connect(db).executescript(KANBAN_SCHEMA)
+        conn = sqlite3.connect(db)
+        # WAL, as Hermes and kelpie.sim keep their boards. In rollback-journal mode a worker
+        # the stop kills mid-write leaves a hot journal that Kelpie's read-only reads cannot
+        # roll back ("attempt to write a readonly database", issue 320).
+        if "rollback" not in mode():
+            conn.execute("PRAGMA journal_mode=WAL")
+        conn.executescript(KANBAN_SCHEMA)
+        conn.close()
         return 0
     if argv[:2] == ["kanban", "--board"]:
         board, verb, rest = argv[2], argv[3], argv[4:]

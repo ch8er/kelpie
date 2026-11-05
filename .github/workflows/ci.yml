@@ -121,7 +121,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.code == 'true'
     runs-on: macos-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -135,6 +135,20 @@ jobs:
           tests/adapters/test_hermes_stop.py
           tests/adapters/test_hermes_boards_stop.py
           tests/selftest
+      # Issue 320: the self-test's stop flaked here once; run it again and again to show it holds.
+      # About 2 minutes of macOS time per CI run (15 passes): cut it to one pass after a month
+      # of green macOS runs. With the fake's boards in WAL mode the loop cannot reproduce the
+      # old race; test_a_hot_journal_fails_the_step_with_its_cause guards against it.
+      - name: Self-test stop, 15 times in a row
+        run: |
+          for i in $(seq 1 15); do
+            echo "::group::run $i"
+            uv run --with psutil pytest -q \
+              "tests/selftest/test_hermes_selftest.py::test_a_stop_passes_end_to_end" \
+              "tests/selftest/test_hermes_selftest.py::test_a_multi_board_config_passes_through_the_boards_adapter" \
+              || exit 1
+            echo "::endgroup::"
+          done
 
   ci-ok:
     needs: [changes, lint, test, e2e, macos]
