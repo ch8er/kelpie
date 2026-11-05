@@ -337,3 +337,39 @@ def test_a_cli_that_does_not_use_the_throwaway_home_is_refused(fake: Path, tmp_p
     assert code == 1
     assert any("did not create" in line and "throwaway HERMES_HOME" in line for line in lines)
     assert not any(line.startswith("PASS  task dispatched") for line in lines)
+
+
+class _Mock:
+    """The mock's count; ``sleep`` (patched) adds ``arrive[seconds]`` calls, so the drain
+    and the quiet window must differ in length (DRAIN 1s, QUIET patched to 5s)."""
+
+    def __init__(self, calls: int, arrive: dict[float, int]) -> None:
+        self.calls, self.arrive = calls, arrive
+
+    def sleep(self, seconds: float) -> None:
+        self.calls += self.arrive.get(seconds, 0)
+
+
+@pytest.mark.parametrize(
+    ("in_drain", "in_quiet", "ok"),
+    [
+        (0, 0, True),  # nothing in flight
+        (1, 0, True),  # the request in flight at the stop, answered during the drain
+        (2, 0, False),  # more than the one in flight: the agent kept going
+        (0, 1, False),  # a call during the quiet window
+        (1, 1, False),
+    ],
+)
+def test_one_call_in_flight_at_the_stop_may_still_be_answered(
+    monkeypatch: pytest.MonkeyPatch, in_drain: int, in_quiet: int, ok: bool
+) -> None:
+    """macOS CI: the agent's last request, sent before SIGTERM, was answered just after
+    the stop; that one call is allowed, any other fails the step."""
+    monkeypatch.setattr(selftest, "QUIET", 5.0)
+    mock = _Mock(10, {selftest.DRAIN: in_drain, 5.0: in_quiet})
+    monkeypatch.setattr(selftest.time, "sleep", mock.sleep)
+    report = selftest.Report(lambda _: None)
+    selftest._check_quiet(report, mock, 10)  # type: ignore[arg-type]
+    assert report.failed is not ok
+    if not ok:
+        assert f"{in_drain + in_quiet} more in" in report.lines[0]

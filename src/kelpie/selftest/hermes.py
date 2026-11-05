@@ -73,6 +73,7 @@ CLI_TIMEOUT = 120.0  # one Hermes command (a first dispatch starts a gateway)
 WORKER_TIMEOUT = 120.0  # from dispatch until the agent is bound to the run
 STOP_TIMEOUT = 300.0  # from the agent's start until rule 10 stops the run
 QUIET = 5.0  # seconds without a model call after the stop
+DRAIN = 1.0  # time for the one call in flight when the worker ended to be answered
 CLEANUP_GRACE = 5.0  # SIGTERM to SIGKILL for leftovers
 TICK = 1.0
 
@@ -419,6 +420,7 @@ def _steps(
         if stop is None:
             time.sleep(TICK)
     stopped_at = time.monotonic()
+    at_stop = llm.calls  # the agent's request in flight, if any, may be answered after
     if stop.outcome is not Outcome.EXECUTED:
         raise Failed(f"rule 10's stop of run {rid} was {stop.outcome.value}: {stop.detail}")
     report.ok(
@@ -434,7 +436,7 @@ def _steps(
 
     _check_board(report, db, task, hermes.author)
     _check_processes(report, recorded, hermes.end_worker)
-    _check_quiet(report, llm, stopped_at)
+    _check_quiet(report, llm, at_stop)
 
 
 def _ids(value: object) -> list[object]:
@@ -554,13 +556,20 @@ def _check_processes(report: Report, recorded: Any, end_worker: bool) -> None:
         report.ok("worker ended", f"submitter and agent (pid {pids}) are gone")
 
 
-def _check_quiet(report: Report, llm: MockLLM, stopped_at: float) -> None:
+def _check_quiet(report: Report, llm: MockLLM, at_stop: int) -> None:
+    """No model call after the stop. ``at_stop`` is the count when rule 10's stop returned:
+    the agent's one request already sent when its worker ended may still be answered (the
+    mock counts it when it reads it), so ``DRAIN`` is left for it, and then nothing may
+    come in ``QUIET``."""
+    time.sleep(DRAIN)
     before = llm.calls
     time.sleep(QUIET)
     after = llm.calls
-    last = llm.last_call
-    if after > before or (last is not None and last > stopped_at):
-        report.fail("no model calls after the stop", f"{after - before} more in {QUIET:g}s")
+    if after > before or before - at_stop > 1:
+        report.fail(
+            "no model calls after the stop",
+            f"{after - at_stop} more in {DRAIN + QUIET:g}s (one in flight at the stop is allowed)",
+        )
     else:
         report.ok(
             "no model calls after the stop",
