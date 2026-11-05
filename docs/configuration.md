@@ -816,6 +816,29 @@ split. Kelpie never edits instruction files; the rule only alerts.
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `path` | `"kelpie.db"` | SQLite database: action ledger, alert states, snoozes, spans, recorded fixes. `":memory:"` keeps it in memory. `$KELPIE_DB` overrides it. |
+| `retention` | `"30d"` | Raw action-ledger rows, and alert states closed, older than this are pruned, hourly. At least the ledger's own windows: `[engine] once_window`, `cooldown`, `retry_after` and a day; at most `3650d`. |
+| `max_rows` | `1000000` | Raw action-ledger rows kept at most; past it the oldest whole days go first, but never a day within the ledger's own windows (above). In memory (`":memory:"`) the ledger keeps at most 100,000 entries, the newest, whatever their age: a farm that fills that within the ledger's windows may see an action repeat; use a database file. |
+
+What retention keeps and drops:
+
+- Raw ledger rows go by whole UTC days, so a row stays between `retention` and a day more.
+  Before a day's rows go, the day is summed into daily aggregates, kept for good: per rule,
+  action kind and mode, how many entries, executed, suppressed (with the repeats counted on
+  entries) and failed, and the first and last entry that showed the rule's mode. The
+  report's before/after reads a rule's mode change from them once the raw rows are gone (one
+  change a day at its exact time; a rule switched back and forth within a pruned day shows
+  fewer). The other report sections read raw rows only: a report for a day older than
+  `retention` shows less.
+- Alert states closed more than `retention` ago go with them. Open states and snoozes are
+  never pruned here (expired snoozes go 30 days after they end, see [snooze]).
+- `kelpie serve` prunes in a background thread right after a tick, at start and then at
+  most hourly, on a connection of its own and in short transactions (a day's sums, or 500
+  rows), so it never holds up dispatch. A database from an older Kelpie is upgraded at
+  start, and its first prune sums and prunes its backlog the same way.
+- `kelpie doctor` shows the database's size (with its WAL), the raw ledger rows, the oldest
+  one, and how many days are summed; it warns when the oldest row is two days past
+  `retention` (nothing is pruning it).
+- Spans have their own `[traces] retention` and `max_rows`.
 
 ## [snooze]
 

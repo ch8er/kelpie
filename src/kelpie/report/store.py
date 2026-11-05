@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import sqlite3
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from kelpie.core.incidents import is_outage_state
@@ -21,11 +21,13 @@ from kelpie.core.states import OpenState
 # The ledger's and state store's own row mappings, so the two cannot drift apart.
 from kelpie.core.storage import (
     SCHEMA_VERSION,
+    ActionDay,
     SchemaOutdated,
     SqliteSpanStore,
     TokenRow,
     _entry,
     _state,
+    read_action_days,
     read_host_sleeps,
     read_instruction_tokens,
     read_snoozes,
@@ -82,6 +84,12 @@ class ReportStore:
             (_ts(start), _ts(end)),
         ).fetchall()
         return [_entry(r) for r in rows]
+
+    def action_days(self, start: datetime, end: datetime) -> list[ActionDay]:
+        """The ledger's daily sums (#318) of the UTC days ``[start, end)`` touches: what
+        is left of days whose raw rows retention pruned."""
+        last = (end - timedelta(microseconds=1)).astimezone(UTC).date()
+        return read_action_days(self._db, start.astimezone(UTC).date(), last)
 
     def states(self, start: datetime, end: datetime) -> list[StateRow]:
         """States open at ``end`` or closed after ``start``, that began before ``end``. An

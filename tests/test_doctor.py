@@ -100,6 +100,7 @@ def test_healthy_farm_passes_everything_but_prometheus(farm: Farm) -> None:
         "hooks fire": "PASS",
         "OTLP spans arrive": "PASS",
         "data files private": "PASS",
+        "database size": "PASS",
         "traces token kept private": "SKIP",
         "traces tokens per agent": "SKIP",
         "models have prices": "PASS",

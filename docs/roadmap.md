@@ -123,10 +123,10 @@ SQLite by default; keep the schema DuckDB-compatible for analytics.
 
 **Acceptance criteria**
 - [ ] Tables for tasks (status history), sessions and conditions (the action ledger table and versioned migrations landed with engine item A; the `states` table with #12). Status history is the same work as #157 and the model-gaps criterion on status history
-- [ ] Retention for raw action-ledger rows: 30 days by default plus a size cap, both configurable; the in-memory ledger store is bounded too
-- [ ] Closed alert states (table `states`) pruned with the raw ledger rows
-- [ ] Daily aggregates kept indefinitely (per rule, action kind and mode; executed / suppressed / failed counts), because rule 8's before/after verification needs history; aggregates are written before raw rows are pruned
-- [ ] Pruning runs inside `kelpie serve` on a schedule and never blocks action dispatch (separate thread or short batched transactions; WAL)
+- [x] Retention for raw action-ledger rows: 30 days by default plus a size cap, both configurable; the in-memory ledger store is bounded too (`[storage] retention`, `max_rows`, #318)
+- [x] Closed alert states (table `states`) pruned with the raw ledger rows (#318; open states and snoozes never)
+- [x] Daily aggregates kept indefinitely (per rule, action kind and mode; executed / suppressed / failed counts), because rule 8's before/after verification needs history; aggregates are written before raw rows are pruned (`action_days`, #318; before/after reads mode changes from them)
+- [x] Pruning runs inside `kelpie serve` on a schedule and never blocks action dispatch (separate thread or short batched transactions; WAL) (#318: a background thread after a tick, its own connection, short transactions)
 - [ ] The trace store will follow the same policy shape (raw rows with age + size limits, aggregates kept); note only, not built here. Raw part done for spans (`[traces] retention`, `max_rows`, pruned in a background thread, #16); no aggregates
 - [x] Storage lives behind a protocol in `kelpie.core`; no adapter imports
 - [x] Tests run against a temporary database file

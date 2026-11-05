@@ -4,7 +4,8 @@ Pure and deterministic, like :mod:`kelpie.report.daily`, which calls it for the 
 the report's day and the day before. A fix (:class:`~kelpie.report.fixes.FixEvent`) comes
 from ``kelpie fix`` (manual), a config change seen by ``kelpie serve``, a rule whose mode
 changed (read from the action ledger: the mode of a rule's ledger entries switched, e.g.
-observe to act, or dry-run turned off), or an output filter that appeared in traces
+observe to act, or dry-run turned off; from its daily sums on days retention pruned,
+:func:`summed_entries`), or an output filter that appeared in traces
 (:func:`kelpie.traces.outputs.filter_introductions`).
 
 Each fix is measured over ``window`` before it and the same length after it (shorter when
@@ -59,13 +60,15 @@ from __future__ import annotations
 
 from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 
+from kelpie.core.actions import ActionKind
+from kelpie.core.config import Mode
 from kelpie.core.ledger import OBSERVE_ONLY, LedgerEntry, Outcome
 from kelpie.core.model import Owner, OwnerKind, Session, Span, Status, Task
 from kelpie.core.spans import SpanKey, last_at, span_key
 from kelpie.core.states import OpenState
-from kelpie.core.storage import TokenRow
+from kelpie.core.storage import ActionDay, TokenRow
 from kelpie.report import md
 from kelpie.report.fixes import CONFIG, FILTER, MODE, FixEvent
 from kelpie.report.store import StateRow
@@ -220,6 +223,40 @@ def mode_events(entries: Iterable[LedgerEntry]) -> list[FixEvent]:
         last[e.rule] = e.mode.value
         if before is not None and before != e.mode.value:
             out.append(FixEvent(e.at, MODE, f"{e.rule}: {before} -> {e.mode.value}", e.rule))
+    return out
+
+
+def summed_entries(
+    days: Iterable[ActionDay], entries: Iterable[LedgerEntry] = ()
+) -> list[LedgerEntry]:
+    """What :func:`mode_events` reads: the raw ``entries``, except on the UTC days the
+    ledger summed (#318; retention prunes a day's raw rows only after summing it, so any
+    left are a part) where the sums stand in: per rule and mode, the day's first and last
+    entry that showed it. One switch a day is found at its exact time; a rule switched
+    back and forth within one pruned day shows fewer."""
+    days = list(days)
+    summed = {d.day for d in days}
+    out = [e for e in entries if e.at.astimezone(UTC).date() not in summed]
+    for d in days:
+        if d.first_at is None or d.last_at is None:
+            continue
+        try:
+            kind, mode = ActionKind(d.kind), Mode(d.mode)
+        except ValueError:  # a kind or mode this version no longer has
+            continue
+        for at in dict.fromkeys((d.first_at, d.last_at)):
+            out.append(
+                LedgerEntry(
+                    at=at,
+                    fingerprint="",
+                    subject="",
+                    rule=d.rule,
+                    kind=kind,
+                    mode=mode,
+                    outcome=Outcome.OBSERVED,
+                    reason="",
+                )
+            )
     return out
 
 

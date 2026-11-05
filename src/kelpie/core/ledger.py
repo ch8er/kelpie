@@ -200,12 +200,32 @@ class LedgerStore(Protocol):
     def since(self, after: datetime) -> Sequence[LedgerEntry]: ...
 
 
+# Entries the in-memory store keeps (``[storage] path = ":memory:"``, #318): the oldest go
+# beyond it, a tenth at a time.
+MAX_MEMORY_ENTRIES = 100_000
+
+
 @dataclass(slots=True)
 class MemoryLedgerStore:
+    """The ledger in memory: bounded to ``max_entries`` (the oldest go first) and pruned by
+    age with :meth:`prune`."""
+
     entries: list[LedgerEntry] = field(default_factory=list)
+    max_entries: int = MAX_MEMORY_ENTRIES
 
     def append(self, entry: LedgerEntry) -> None:
         self.entries.append(entry)
+        if len(self.entries) > self.max_entries:
+            # a tenth at a time, so a full store does not copy the list on every append
+            del self.entries[: len(self.entries) - self.max_entries * 9 // 10]
+
+    def prune(self, before: datetime) -> int:
+        """Drop entries older than ``before`` (they are appended in time order); how many
+        went. Not thread-safe, like the rest of the store: call it from the thread that
+        appends (``kelpie serve`` runs it in the control loop's housekeeping)."""
+        gone = next((i for i, e in enumerate(self.entries) if e.at >= before), len(self.entries))
+        del self.entries[:gone]
+        return gone
 
     def by_fingerprint(self, fingerprint: str, after: datetime) -> Sequence[LedgerEntry]:
         return [e for e in self.entries if e.fingerprint == fingerprint and e.at > after]

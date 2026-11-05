@@ -8,7 +8,9 @@ would let an action repeat.
 Spans live in the same file but behind their own connection and lock
 (:class:`SqliteSpanStore`), so OTLP ingest on HTTP threads never waits for the ledger lock
 and the other way round. Span writes and deletes run in short batches, so the one SQLite
-writer slot is never held for long.
+writer slot is never held for long. The ledger's retention (:class:`SqliteLedgerPruner`,
+#318) works the same way on a connection of its own: raw rows go by whole UTC days, each
+summed into ``action_days`` first, and closed alert states go with them.
 """
 
 from __future__ import annotations
@@ -239,11 +241,40 @@ CREATE TABLE instruction_sizes (
     PRIMARY KEY (path, measured_at)
 );
 """
+# Action-ledger retention (#318): raw rows older than ``[storage] retention`` (or beyond
+# ``max_rows``) are pruned by whole UTC days, after the day is summed into ``action_days``,
+# kept for good: per rule, action kind and effective mode, how many entries, executed,
+# suppressed (stored as suppressed plus the repeats counted on entries) and failed, and the
+# first and last entry that shows the rule's mode (not suppressed, not observe-only; NULL
+# without one), from which before/after reads a mode change once raw rows are gone.
+# ``ledger_days`` marks the days summed: a day is summed once, and its raw rows are deleted
+# only after that, so a prune cut short never sums a day twice or from half its rows.
+_V11 = """
+CREATE TABLE action_days (
+    day        TEXT NOT NULL,
+    rule       TEXT NOT NULL,
+    kind       TEXT NOT NULL,
+    mode       TEXT NOT NULL,
+    entries    INTEGER NOT NULL,
+    executed   INTEGER NOT NULL,
+    suppressed INTEGER NOT NULL,
+    failed     INTEGER NOT NULL,
+    first_at   TEXT,
+    last_at    TEXT,
+    PRIMARY KEY (day, rule, kind, mode)
+);
+CREATE TABLE ledger_days (
+    day       TEXT PRIMARY KEY,
+    raw_rows  INTEGER NOT NULL,
+    summed_at TEXT NOT NULL
+);
+"""
 SNOOZES_SINCE = 8  # the first schema with snoozes: read-only readers accept it (no growth)
 
 # version -> script that upgrades from version - 1. Append, never edit a released one.
 MIGRATIONS: dict[int, str] = {
     1: _V1, 2: _V2, 3: _V3, 4: _V4, 5: _V5, 6: _V6, 7: _V7, 8: _V8, 9: _V9, 10: _V10,
+    11: _V11,
 }  # fmt: skip
 SCHEMA_VERSION = max(MIGRATIONS)
 # Characters of an action's reason, its executor's detail and an alert state's summary
@@ -1437,3 +1468,201 @@ def read_host_sleeps(db: sqlite3.Connection, start: datetime, end: datetime) -> 
         HostSleep(datetime.fromisoformat(r[1]), datetime.fromisoformat(r[2]), r[0] or None, r[3])
         for r in found
     ]
+
+
+# --- action-ledger retention (#318) ------------------------------------------------------
+
+# Rows per delete transaction: keeps the SQLite writer slot free for the ledger's inserts.
+LEDGER_BATCH = 500
+
+# When a ledger entry shows its rule's mode (verify.mode_events): not a suppressed repeat,
+# not an observe-only check's (its mode is not the rule's).
+_SHOWS_MODE = (
+    "outcome <> 'suppressed' AND NOT (json_valid(params)"
+    " AND COALESCE(json_extract(params, '$.observe_only'), 0) = 1)"
+)
+_SUM_DAY = f"""
+INSERT INTO action_days
+    (day, rule, kind, mode, entries, executed, suppressed, failed, first_at, last_at)
+SELECT ?, rule, kind, mode, COUNT(*),
+    SUM(outcome = 'executed'),
+    SUM(outcome = 'suppressed') + SUM(suppressed),
+    SUM(outcome = 'failed'),
+    MIN(CASE WHEN {_SHOWS_MODE} THEN at END),
+    MAX(CASE WHEN {_SHOWS_MODE} THEN at END)
+FROM actions WHERE at >= ? AND at < ? GROUP BY rule, kind, mode
+"""
+
+
+class ActionDay(NamedTuple):
+    """One UTC day of the action ledger summed per rule, action kind and effective mode;
+    kept for good once the day's raw rows are pruned (#318)."""
+
+    day: date
+    rule: str
+    kind: str
+    mode: str
+    entries: int
+    executed: int
+    suppressed: int  # stored as suppressed, plus the repeats counted on entries
+    failed: int
+    first_at: datetime | None  # first and last entry that shows the rule's mode
+    last_at: datetime | None
+
+
+class LedgerPruned(NamedTuple):
+    days: int  # days summed into action_days
+    actions: int  # raw ledger rows deleted
+    states: int  # closed alert states deleted
+
+
+def _day_start(day: date) -> str:
+    return _ts(datetime(day.year, day.month, day.day, tzinfo=UTC))
+
+
+def _day_of(at: str) -> date:
+    return datetime.fromisoformat(at).astimezone(UTC).date()
+
+
+class SqliteLedgerPruner:
+    """Retention of the raw action ledger and of closed alert states (#318), on a
+    connection of its own: the ledger store's lock is never taken, and every write is a
+    short transaction (a day's sums, or :data:`LEDGER_BATCH` deleted rows), so dispatch
+    waits for the SQLite writer slot at most that long. Raw rows go by whole UTC days, each
+    summed into ``action_days`` first (once: ``ledger_days`` marks it). Open alert states
+    and snoozes are never touched. :meth:`close` stops a running prune at its next batch."""
+
+    def __init__(
+        self,
+        path: Path | str,
+        busy_timeout_ms: int = 5000,
+        batch: int = LEDGER_BATCH,
+        on_batch: Callable[[], None] | None = None,
+    ) -> None:
+        self._lock = threading.Lock()
+        self._closing = threading.Event()
+        self._db = _open(path, busy_timeout_ms)
+        self._batch = max(1, batch)
+        self._on_batch = on_batch  # after each committed transaction (tests)
+
+    def close(self) -> None:
+        self._closing.set()
+        with self._lock:
+            self._db.close()
+
+    def prune(
+        self, now: datetime, retention: timedelta, max_rows: int, keep: timedelta
+    ) -> LedgerPruned:
+        """Delete raw ledger rows of the UTC days before the one ``retention`` before
+        ``now`` reaches, then, while more than ``max_rows`` are left, the oldest days that
+        ended at least ``keep`` before ``now`` (the ledger's own windows: cooldown, once
+        actions); and closed states closed more than ``retention`` before ``now``."""
+        days = actions = 0
+        cutoff = (now - retention).astimezone(UTC).date()
+        floor = (now - keep).astimezone(UTC).date()
+        while (day := self._oldest_day()) is not None and day < cutoff:
+            summed, deleted = self._prune_day(day, now)
+            days, actions = days + summed, actions + deleted
+            if self._closing.is_set():
+                return LedgerPruned(days, actions, 0)
+        excess = self._count() - max(0, max_rows)
+        while excess > 0 and (day := self._oldest_day()) is not None and day < floor:
+            summed, deleted = self._prune_day(day, now)
+            days, actions, excess = days + summed, actions + deleted, excess - deleted
+            if self._closing.is_set():
+                return LedgerPruned(days, actions, 0)
+        states = self._delete(
+            "DELETE FROM states WHERE rowid_ IN"
+            " (SELECT rowid_ FROM states WHERE closed_at < ? ORDER BY closed_at LIMIT ?)",
+            (_ts(now - retention),),
+        )
+        return LedgerPruned(days, actions, states)
+
+    def _prune_day(self, day: date, now: datetime) -> tuple[int, int]:
+        lo, hi = _day_start(day), _day_start(day + timedelta(days=1))
+        summed = self._sum_day(day, lo, hi, now)
+        if summed is None:  # closing
+            return 0, 0
+        deleted = self._delete(
+            "DELETE FROM actions WHERE id IN"
+            " (SELECT id FROM actions WHERE at >= ? AND at < ? LIMIT ?)",
+            (lo, hi),
+        )
+        return summed, deleted
+
+    def _sum_day(self, day: date, lo: str, hi: str, now: datetime) -> int | None:
+        """Sum the day into action_days unless it already is; 1 when summed now."""
+        with self._lock:
+            if self._closing.is_set():
+                return None
+            with self._db:
+                rows = self._db.execute(
+                    "SELECT COUNT(*) FROM actions WHERE at >= ? AND at < ?", (lo, hi)
+                ).fetchone()[0]
+                fresh = self._db.execute(
+                    "INSERT OR IGNORE INTO ledger_days (day, raw_rows, summed_at) VALUES (?, ?, ?)",
+                    (day.isoformat(), rows, _ts(now)),
+                ).rowcount
+                if fresh:
+                    self._db.execute(_SUM_DAY, (day.isoformat(), lo, hi))
+        if self._on_batch is not None:
+            self._on_batch()
+        return int(fresh > 0)
+
+    def _delete(self, sql: str, args: tuple[object, ...]) -> int:
+        deleted = 0
+        while True:
+            with self._lock:
+                if self._closing.is_set():
+                    return deleted
+                with self._db:
+                    n = self._db.execute(sql, (*args, self._batch)).rowcount
+            deleted += n
+            if self._on_batch is not None and n:
+                self._on_batch()
+            if n < self._batch:
+                return deleted
+
+    def _oldest_day(self) -> date | None:
+        with self._lock:
+            if self._closing.is_set():
+                return None
+            at = self._db.execute("SELECT MIN(at) FROM actions").fetchone()[0]
+        return None if at is None else _day_of(at)
+
+    def _count(self) -> int:
+        with self._lock:
+            if self._closing.is_set():
+                return 0
+            return int(self._db.execute("SELECT COUNT(*) FROM actions").fetchone()[0])
+
+
+def read_action_days(db: sqlite3.Connection, start: date, end: date) -> list[ActionDay]:
+    """The ledger's daily sums of the UTC days ``start`` to ``end`` (both included), by
+    day; works on a read-only connection."""
+    rows = db.execute(
+        "SELECT day, rule, kind, mode, entries, executed, suppressed, failed, first_at,"
+        " last_at FROM action_days WHERE day >= ? AND day <= ? ORDER BY day, rule, kind, mode",
+        (start.isoformat(), end.isoformat()),
+    ).fetchall()
+    return [
+        ActionDay(
+            date.fromisoformat(r[0]),
+            r[1],
+            r[2],
+            r[3],
+            r[4],
+            r[5],
+            r[6],
+            r[7],
+            None if r[8] is None else datetime.fromisoformat(r[8]),
+            None if r[9] is None else datetime.fromisoformat(r[9]),
+        )
+        for r in rows
+    ]
+
+
+def read_oldest_action(db: sqlite3.Connection) -> datetime | None:
+    """The oldest raw ledger row's time (None: no row)."""
+    at = db.execute("SELECT MIN(at) FROM actions").fetchone()[0]
+    return None if at is None else datetime.fromisoformat(at)

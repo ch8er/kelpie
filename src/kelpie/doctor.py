@@ -349,6 +349,61 @@ def _newest_span(path: Path) -> str | None:
         conn.close()
 
 
+DATABASE_CHECK = "database size"
+# Retention prunes hourly by whole UTC days: older than this past retention, it is not running.
+PRUNE_LATE = timedelta(days=2)
+
+
+def _size(n: int) -> str:
+    for unit, size in (("GB", 1 << 30), ("MB", 1 << 20), ("kB", 1 << 10)):
+        if n >= size:
+            return f"{n / size:.1f} {unit}"
+    return f"{n} B"
+
+
+def check_database(settings: Settings, now: datetime) -> Check:
+    """The database's size on disk (with its WAL) and the oldest raw action-ledger row, read
+    only (#318). Warns when that row is well past ``[storage] retention``: nothing prunes."""
+    path = settings.db_path
+    if path is None:
+        return _skip(DATABASE_CHECK, "the ledger is kept in memory ([storage] path)")
+    if not path.is_file():
+        return _skip(DATABASE_CHECK, f"no database yet at {path}")
+    size = sum(p.stat().st_size for p in db_files(path) if p.is_file())
+    try:
+        conn = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True, timeout=2)
+        try:
+            rows, oldest = conn.execute("SELECT COUNT(*), MIN(at) FROM actions").fetchone()
+            summed = 0
+            if conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'ledger_days'"
+            ).fetchone():
+                summed = conn.execute("SELECT COUNT(*) FROM ledger_days").fetchone()[0]
+        finally:
+            conn.close()
+    except sqlite3.Error as exc:
+        return _warn(
+            DATABASE_CHECK,
+            f"{_size(size)} at {path}; cannot read the ledger: {exc}",
+            "run kelpie serve once: it creates and upgrades the database",
+        )
+    kept = format_age(settings.storage.retention)
+    detail = f"{_size(size)} at {path} (with its WAL), {rows:,} raw ledger row(s)"
+    if oldest is None:
+        return _pass(DATABASE_CHECK, f"{detail}, none yet; retention {kept}")
+    first = datetime.fromisoformat(oldest)
+    detail += f", oldest {first:%Y-%m-%d %H:%M} UTC ({format_age(now - first)} ago)"
+    detail += f", {summed} day(s) summed; retention {kept}, max_rows {settings.storage.max_rows:,}"
+    if now - first > settings.storage.retention + PRUNE_LATE:
+        return _warn(
+            DATABASE_CHECK,
+            detail,
+            "raw rows older than [storage] retention are pruned by kelpie serve, hourly: "
+            "check that it runs on this database",
+        )
+    return _pass(DATABASE_CHECK, detail)
+
+
 PRIVATE_CHECK = "data files private"
 
 
@@ -1507,6 +1562,7 @@ def run_checks(
     checks.append(check_traces_token(settings, environ))
     checks.append(check_traces_scopes(settings, loaded, environ))
     checks.append(check_private_files(settings))
+    checks.append(check_database(settings, at))
     checks.append(check_prices(settings, at))
     checks.append(check_spend_modes(settings, at))
     checks += check_cost_reports(settings, at, environ)
