@@ -37,6 +37,7 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from kelpie.core.model import Span, SpanKind
+from kelpie.core.spans import UNVERIFIED_ATTRIBUTE
 from kelpie.traces.args import args_hash as hash_args
 from kelpie.traces.semconv import TOOL_CALL_ID
 
@@ -291,6 +292,16 @@ def _fold(otlp: Span, hook: Span) -> Span:
     extra = {k: v for k, v in hook.attributes.items() if k not in otlp.attributes}
     extra.pop(SOURCE, None)
     extra.pop("gen_ai.operation.name", None)
+    if extra.pop(UNVERIFIED_ATTRIBUTE, None) is True:
+        # A hook line the platform could not tie to its run (#302): it adds details, but
+        # never moves the OTLP span into the run it names, nor marks it unverified (the
+        # OTLP span is evidence of its own).
+        return replace(
+            otlp,
+            args_hash=otlp.args_hash or hook.args_hash,
+            tool=otlp.tool or hook.tool,
+            attributes={**otlp.attributes, **extra},
+        )
     return replace(
         otlp,
         args_hash=otlp.args_hash or hook.args_hash,

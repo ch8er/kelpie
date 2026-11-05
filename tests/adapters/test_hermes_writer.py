@@ -17,7 +17,7 @@ from kelpie.adapters.hermes import HermesAdapter, plugin
 from kelpie.adapters.hermes.proctable import fingerprint, instantiation_epoch, read_proc
 from kelpie.adapters.hermes.worker import UNVERIFIED, RunWorker, writer_matches
 from kelpie.core.actions import ActionKind
-from kelpie.core.model import SpanKind
+from kelpie.core.model import Span, SpanKind
 from kelpie.core.spans import UNVERIFIED_ATTRIBUTE
 from kelpie.rules import REGISTRY
 from tests.adapters.kanban import Board
@@ -158,3 +158,111 @@ def test_a_non_matching_pid_cannot_trigger_a_stop(board: Board, tmp_path: Path) 
         if a.kind is ActionKind.ALERT and a.params.get("session_id") == "hermes-run-1"
     ]
     assert alert.params["unverified"] is True and "Not stopped" in alert.reason
+
+
+# --- folds, boards, the wire ---------------------------------------------------------------
+
+
+def hook_and_otlp(n: int, unverified: bool, otlp_session: str | None) -> list[Span]:
+    from kelpie.traces.hooks import HOOKS, SOURCE
+
+    out = []
+    for i in range(n):
+        at = NOW - timedelta(seconds=120 - 10 * i)
+        attrs: dict[str, Any] = {SOURCE: HOOKS, "gen_ai.tool.call.id": f"c{i}"}
+        if unverified:
+            attrs[UNVERIFIED_ATTRIBUTE] = True
+        out.append(
+            Span(
+                "h",
+                f"h{i}",
+                "execute_tool terminal",
+                SpanKind.TOOL,
+                at,
+                at,
+                session_id="hermes-run-1",
+                tool="terminal",
+                args_hash="a" * 16,
+                outcome="ok",
+                attributes=attrs,
+            )
+        )
+        out.append(
+            Span(
+                "o",
+                f"o{i}",
+                "execute_tool terminal",
+                SpanKind.TOOL,
+                at,
+                at,
+                session_id=otlp_session,
+                tool="terminal",
+                args_hash="a" * 16,
+                outcome="ok",
+                attributes={"gen_ai.tool.call.id": f"c{i}"},
+            )
+        )
+    return out
+
+
+def test_an_unverified_hook_does_not_mark_or_move_an_otlp_span() -> None:
+    from kelpie.traces.hooks import merge_hook_spans
+
+    folded = merge_hook_spans(hook_and_otlp(3, True, "hermes-run-1")).spans
+    assert [s.span_id for s in folded] == ["o0", "o1", "o2"]
+    assert all(UNVERIFIED_ATTRIBUTE not in s.attributes for s in folded)
+    moved = merge_hook_spans(hook_and_otlp(3, True, "chat-9")).spans
+    assert {s.session_id for s in moved} == {"chat-9"}  # not into the run the line names
+    verified = merge_hook_spans(hook_and_otlp(3, False, "chat-9")).spans
+    assert {s.session_id for s in verified} == {"hermes-run-1"}
+
+
+def test_otlp_cannot_set_or_clear_the_mark() -> None:
+    from kelpie.traces.semconv import is_kept
+
+    assert not is_kept(UNVERIFIED_ATTRIBUTE) and not is_kept("kelpie.ingest.token")
+
+
+def test_the_mark_survives_the_agent_to_hub_wire() -> None:
+    from kelpie.core.model import Snapshot
+    from kelpie.remote.protocol import decode_snapshot, encode_snapshot
+
+    span = hook_and_otlp(1, True, None)[0]
+    back = decode_snapshot(encode_snapshot(Snapshot(now=NOW, spans=(span,))))
+    assert back.spans[0].attributes[UNVERIFIED_ATTRIBUTE] is True
+
+
+def test_a_mismatched_writer_on_one_of_several_boards(tmp_path: Path) -> None:
+    from kelpie.adapters.hermes.boards import HermesBoards
+
+    boards = []
+    for name in ("qr", "sign"):
+        (tmp_path / name).mkdir()
+        boards.append(Board(tmp_path / name / "kanban.db"))
+    try:
+        started = NOW - timedelta(minutes=20)
+        lines = []
+        for b, task, pid in ((boards[0], "t_q", 10), (boards[1], "t_s", 20)):
+            b.task(task, "running", NOW - timedelta(hours=1), assignee="dev-1", started=started)
+            rid = b.run(task, "dev-1", started, heartbeat=NOW)
+            b.update(task, current_run_id=rid)
+            b.conn.execute(
+                "UPDATE task_runs SET worker_pid = ?, worker_started_at = ? WHERE id = ?",
+                (pid, PRINT, rid),
+            )
+            b.conn.commit()
+        lines = [line(n, 1, "t_q", (10, PRINT)) for n in range(3)]  # qr's own worker
+        lines += [line(n, 1, "t_s", (10, PRINT)) for n in range(3)]  # qr's worker naming sign
+        spool = tmp_path / "spool.jsonl"
+        spool.write_text("\n".join(lines) + "\n")
+        adapters = [
+            HermesAdapter(db_path=b.path, spool=None, git_state=False, board=n)
+            for b, n in zip(boards, ("qr", "sign"), strict=True)
+        ]
+        snap = HermesBoards(boards=adapters, spool=spool).snapshot(NOW)
+        tools = [s for s in snap.spans if s.kind is SpanKind.TOOL]
+        marks = {s.session_id: s.attributes.get(UNVERIFIED_ATTRIBUTE) is True for s in tools}
+        assert marks == {"qr:hermes-run-1": False, "sign:hermes-run-1": True}
+    finally:
+        for b in boards:
+            b.close()

@@ -195,6 +195,46 @@ def run_worker(conn: Any, run_id: int) -> RunWorker | None:
     return RunWorker(_pid(pid), _text(started), agent, agent_print, _text(lock))
 
 
+RUNS_PER_QUERY = 400
+
+
+def run_workers(conn: Any, run_ids: Iterable[int]) -> dict[int, RunWorker | None]:
+    """:func:`run_worker` for many runs, in a few queries (#302: every spool line's run is
+    checked each tick). A board without these columns gives None for every run."""
+    ids = sorted(set(run_ids))
+    out: dict[int, RunWorker | None] = {}
+    for i in range(0, len(ids), RUNS_PER_QUERY):
+        chunk = ids[i : i + RUNS_PER_QUERY]
+        marks = ", ".join("?" * len(chunk))
+        try:
+            rows = conn.execute(
+                "SELECT id, worker_pid, worker_started_at, claim_lock FROM task_runs"
+                f" WHERE id IN ({marks})",
+                chunk,
+            ).fetchall()
+        except sqlite3.OperationalError as exc:
+            if "no such" in str(exc):
+                return dict.fromkeys(ids)
+            raise
+        bound: dict[int, dict[str, object]] = {}
+        for row in conn.execute(
+            f"SELECT run_id, payload FROM task_events WHERE kind = 'worker_bound'"
+            f" AND run_id IN ({marks}) ORDER BY id",
+            chunk,
+        ).fetchall():
+            bound[row[0]] = _json(row[1])  # the newest last
+        for rid in chunk:
+            out[rid] = RunWorker(None, None, None, None, None)
+        for row in rows:
+            rid, pid, started, lock = row[0], row[1], row[2], row[3]
+            payload = bound.get(rid, {})
+            agent = agent_print = None
+            if payload.get("claim_lock") == lock and _pid(payload.get("pid")) is not None:
+                agent, agent_print = payload["pid"], _text(payload.get("started_at"))
+            out[rid] = RunWorker(_pid(pid), _text(started), agent, agent_print, _text(lock))  # type: ignore[arg-type]
+    return out
+
+
 def writer_matches(writer: object, worker: RunWorker | None) -> bool | None:
     """Whether a spool line's writer ``(pid, fingerprint)`` is the run's recorded worker
     (its submitter or its agent, with the fingerprint Hermes recorded for it): True; False

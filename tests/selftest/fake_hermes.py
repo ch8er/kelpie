@@ -149,6 +149,7 @@ def agent(board: str, task: str, rid: int, base_url: str) -> None:
     conn = connect(board)
     spool = Path(os.environ["KELPIE_HERMES_SPOOL"])
     tool: subprocess.Popen[bytes] | None = None
+    writer = {"pid": os.getpid(), "pid_start": print_of(os.getpid())}  # as the plugin (#302)
     for n in range(10_000):
         body = json.dumps({"model": "m", "messages": [], "tools": [{"type": "function"}]})
         request = urllib.request.Request(
@@ -171,6 +172,7 @@ def agent(board: str, task: str, rid: int, base_url: str) -> None:
             "command": "sleep *** *** ***",
             "outcome": "ok",
             "duration_ms": 10,
+            **writer,
         }
         if "silent" not in mode():  # silent: Kelpie's plugin is not loaded
             with spool.open("a") as fh:

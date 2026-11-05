@@ -331,8 +331,8 @@ class LoopBreaker:
                 + unverified,
                 task_id=session.task_id,
                 severity=Severity.CRITICAL,
-                key=f"{trip.kind}:{session.id}",
-                state=f"{NAME}:{trip.kind}:{session.id}",
+                key=f"{trip.kind}:{session.id}{'' if stop else ':unverified'}",
+                state=f"{NAME}:{trip.kind}:{session.id}{'' if stop else ':unverified'}",
                 since=trip.since,
                 params={
                     "session_id": session.id,

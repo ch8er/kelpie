@@ -376,9 +376,9 @@ close that where they apply:
 - **Hermes spool lines:** every line carries its writer (pid and start fingerprint), and a
   line whose writer is not the run's recorded worker, or cannot be checked, is marked
   unverified: rule 10 sends its critical alert but does not stop a run on such lines alone
-  (the plugin README's "Spool format"). A process that can read `kanban.db` could copy a
-  worker's pid and fingerprint, but one that can read the board can usually also write it
-  and block the run through Hermes itself.
+  (the plugin README's "Spool format"). The fingerprint comes from `/proc`, so it keeps out
+  agents in another PID namespace (a container, a sandbox), not a process on the same host
+  and namespace set on forging, which could already signal the worker or block the run.
 
 What is left:
 

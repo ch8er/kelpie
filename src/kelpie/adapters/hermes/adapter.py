@@ -167,8 +167,8 @@ from kelpie.adapters.hermes.worker import (
     DEFAULT_GRACE,
     OLD_BOARD,
     Ended,
-    RunWorker,
     run_worker,
+    run_workers,
     writer_matches,
 )
 from kelpie.adapters.hermes.worker import end as end_workers
@@ -664,8 +664,9 @@ class HermesAdapter:
     actions: ClassVar[frozenset[ActionKind]] = frozenset(
         {ActionKind.STOP, ActionKind.WAIT, ActionKind.REQUEUE, ActionKind.WAKE, ActionKind.COMMENT}
     )
-    # workspace -> snapshot time until which it is not read (its git timed out)
+    # spool lines naming a run their writer is not the worker of: the count last warned about
     _writer_warned: int = field(default=0, init=False, repr=False, compare=False)
+    # workspace -> snapshot time until which it is not read (its git timed out)
     _git_backoff: dict[Path, datetime] = field(
         default_factory=dict, init=False, repr=False, compare=False
     )
@@ -1553,12 +1554,11 @@ class HermesAdapter:
         macOS, a run without a recorded worker), is kept as evidence but marked unverified,
         and rule 10 does not stop a run on it alone. The writer itself is dropped."""
         runs = {rid for s in spans if s.session_id and (rid := run_id(s.session_id)) is not None}
-        workers: dict[int, RunWorker | None] = {}
-        for rid in runs:
-            try:
-                workers[rid] = run_worker(conn, rid)
-            except sqlite3.Error as exc:  # this run's lines stay unverified
-                log.debug("hermes: cannot read the worker of run %s: %r", rid, exc)
+        try:
+            workers = run_workers(conn, runs)
+        except sqlite3.Error as exc:  # the lines stay unverified
+            log.debug("hermes: cannot read the workers of runs: %r", exc)
+            workers = {}
         out: list[Span] = []
         mismatched = 0
         for span in spans:
@@ -1573,13 +1573,15 @@ class HermesAdapter:
                 attributes[UNVERIFIED_ATTRIBUTE] = True
                 mismatched += verdict is False
             out.append(replace(span, attributes=attributes))
-        if mismatched and self._writer_warned != mismatched:
+        if mismatched > 2 * self._writer_warned:  # the first, then each doubling
             log.warning(
                 "hermes: %d spool line(s) name a run whose recorded worker did not write them; "
                 "rule 10 will not stop a run on them",
                 mismatched,
             )
-        self._writer_warned = mismatched
+            self._writer_warned = mismatched
+        elif not mismatched:
+            self._writer_warned = 0
         return tuple(out)
 
     # --- PlatformAdapter -----------------------------------------------------------------

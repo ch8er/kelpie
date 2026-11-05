@@ -500,8 +500,8 @@ def _writer() -> dict[str, Any]:
     such lines are kept but cannot stop a run."""
     global _WRITER
     pid = os.getpid()
-    if _WRITER is None or _WRITER[0] != pid:  # computed once per process (and after a fork)
-        _WRITER = (pid, _fingerprint(pid))
+    if _WRITER is None or _WRITER[0] != pid or _WRITER[1] is None:  # once per process
+        _WRITER = (pid, _fingerprint(pid))  # (and after a fork; again until a read works)
     return {"pid": pid, "pid_start": _WRITER[1]}
 
 
