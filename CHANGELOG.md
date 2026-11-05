@@ -76,6 +76,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ### Safety
 
+- `spool_stops` in `[adapters.claude_code]` and `[adapters.openclaw]` (audit M1, #302, opt
+  in; default `true`, unchanged): `false` marks that adapter's spool tool lines unverified,
+  so rule 10 never stops a run on them alone. It sends its critical alert ("Not stopped")
+  instead, and the platform's own OTLP tool spans of the run (under a per-agent token) still
+  stop it. On OpenClaw, whose OTLP spans carry no session yet, that means alerts only. For
+  agents that do not trust each other but share a spool
+  ([docs/security.md](docs/security.md#known-residual-risks)).
 - Hermes spool lines carry their writer (audit M1, #302): the plugin writes its `pid` and
   `pid_start` (its start fingerprint, as Hermes records a worker's), and the adapter checks
   them against the run's recorded worker. A tool line from another process, or one it

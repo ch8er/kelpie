@@ -18,7 +18,9 @@ from kelpie.adapters.claude_code.adapter import (
 from kelpie.core.serde import parse_duration
 
 SECTION = "[adapters.claude_code]"
-KEYS = frozenset({"enabled", "tasks_dir", "task_lists", "spool", "lookback", "stop_dir"})
+KEYS = frozenset(
+    {"enabled", "tasks_dir", "task_lists", "spool", "lookback", "stop_dir", "spool_stops"}
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -29,6 +31,7 @@ class ClaudeCodeSettings:
     lookback: timedelta = DEFAULT_LOOKBACK
     enabled: bool = True
     stop_dir: Path | None = DEFAULT_STOP_DIR  # None: stop is refused
+    spool_stops: bool = True  # False: spool tool lines alone never stop a run (#302)
 
     def build(self) -> ClaudeCodeAdapter:
         return ClaudeCodeAdapter(
@@ -37,6 +40,7 @@ class ClaudeCodeSettings:
             spool=self.spool,
             lookback=self.lookback,
             stop_dir=self.stop_dir,
+            spool_stops=self.spool_stops,
         )
 
 
@@ -47,8 +51,10 @@ def load_claude_code(section: Any) -> ClaudeCodeSettings:
     if extra := set(section) - KEYS:
         raise ValueError(f"unknown {SECTION} keys: {sorted(extra)}")
     enabled = section.get("enabled", True)
-    if not isinstance(enabled, bool):
-        raise ValueError(f"{SECTION} enabled must be true or false")
+    spool_stops = section.get("spool_stops", True)
+    for key, value in (("enabled", enabled), ("spool_stops", spool_stops)):
+        if not isinstance(value, bool):
+            raise ValueError(f"{SECTION} {key} must be true or false")
     tasks_dir = section.get("tasks_dir", str(DEFAULT_TASKS_DIR))
     if not isinstance(tasks_dir, str) or not tasks_dir.strip():
         raise ValueError(f"{SECTION} tasks_dir must be a non-empty string")
@@ -78,4 +84,5 @@ def load_claude_code(section: Any) -> ClaudeCodeSettings:
         lookback=lookback,
         enabled=enabled,
         stop_dir=None if stop_dir is False else Path(stop_dir),
+        spool_stops=spool_stops,
     )

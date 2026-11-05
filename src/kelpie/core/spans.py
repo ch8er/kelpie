@@ -35,7 +35,8 @@ SpanKey = tuple[str, str]
 # inherits its session and task only from a parent sent with the same one (or none).
 INGEST_MARK = "kelpie.ingest.token"
 # Set (True) by a platform adapter on a hook span when it could not confirm that the line
-# came from the run it names (Hermes: its writer is not the run's recorded worker, #302).
+# came from the run it names (Hermes: its writer is not the run's recorded worker; Claude
+# Code and OpenClaw: every spool tool line with ``spool_stops = false``; #302).
 # Rule 10 never stops a run on such evidence alone; it alerts instead.
 UNVERIFIED_ATTRIBUTE = "kelpie.writer_unverified"
 MAX_LINK_DEPTH = 32  # parent chains deeper than this are not followed

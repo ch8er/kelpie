@@ -99,6 +99,7 @@ from kelpie.core.model import (
     Task,
 )
 from kelpie.core.ports import PlatformEvent, UnsupportedAction
+from kelpie.core.spans import UNVERIFIED_ATTRIBUTE
 from kelpie.traces.command import spool_runners
 from kelpie.traces.hooks import SESSION_END, SESSION_START, TOOL, HookEvent, spans_from_hook_events
 from kelpie.traces.semconv import OUTPUT_CHARS_ATTRIBUTE, RUNNERS_ATTRIBUTE
@@ -313,6 +314,10 @@ class ClaudeCodeAdapter:
     spool: Path | None = DEFAULT_SPOOL  # None: no hook data, no sessions
     lookback: timedelta = DEFAULT_LOOKBACK
     stop_dir: Path | None = DEFAULT_STOP_DIR  # None: stop is refused (alerts instead)
+    # False: spool tool lines are marked unverified, so rule 10 never stops a run on them
+    # alone (it alerts); OTLP spans still can (#302 option 2: any process that can append
+    # to the spool can name another agent's session).
+    spool_stops: bool = True
     # (pid, what the hook recorded) -> process running, None: cannot tell. None: the real
     # check against this host's /proc (process_state); replaceable in tests.
     process_check: Callable[[int, Mapping[str, Any]], bool | None] | None = field(
@@ -747,6 +752,8 @@ class ClaudeCodeAdapter:
                 attributes[RUNNERS_ATTRIBUTE] = list(e.runners)
             if e.output_chars is not None:
                 attributes[OUTPUT_CHARS_ATTRIBUTE] = e.output_chars
+            if kind == TOOL and not self.spool_stops:
+                attributes[UNVERIFIED_ATTRIBUTE] = True
             hook_events.append(
                 HookEvent(
                     kind=kind,

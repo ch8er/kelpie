@@ -84,6 +84,7 @@ from kelpie.core.actions import ActionResult
 from kelpie.core.actlock import ActLock
 from kelpie.core.model import Owner, Session, Snapshot, Span, SpanKind, Status, Task
 from kelpie.core.ports import PlatformEvent, UnsupportedAction
+from kelpie.core.spans import UNVERIFIED_ATTRIBUTE
 from kelpie.traces.command import redact_command, spool_runners
 from kelpie.traces.hooks import (
     HOOKS,
@@ -261,6 +262,10 @@ class OpenClawAdapter:
     lookback: timedelta = DEFAULT_LOOKBACK
     token_spans: bool = True  # LLM spans from ``llm`` lines (off when OTLP reports tokens)
     stop_dir: Path | None = DEFAULT_STOP_DIR  # None: stop is refused (alerts instead)
+    # False: spool tool lines are marked unverified, so rule 10 never stops a run on them
+    # alone (it alerts); OTLP spans still can (#302 option 2: any process that can append
+    # to the spool can name another agent's session).
+    spool_stops: bool = True
     stop_ttl: timedelta = timedelta(seconds=DEFAULT_STOP_TTL)  # must match the plugin's stopTtl
     cli: str | None = DEFAULT_CLI  # runs ``sessions.abort``; None: markers only
     cli_timeout: float = CLI_TIMEOUT
@@ -502,6 +507,8 @@ class OpenClawAdapter:
                 attributes[RUNNERS_ATTRIBUTE] = list(e.runners)
             if e.output_chars is not None:
                 attributes[OUTPUT_CHARS_ATTRIBUTE] = e.output_chars
+            if kind == TOOL and not self.spool_stops:
+                attributes[UNVERIFIED_ATTRIBUTE] = True
             hook_events.append(
                 HookEvent(
                     kind=kind,

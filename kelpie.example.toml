@@ -592,6 +592,7 @@ commands = true           # keep the prefix of shell commands on tool spans ("ma
 # spool = "~/.claude/kelpie/spool.jsonl"  # written by the hook; false = off
 # lookback = "24h"                  # sessions and completed tasks older than this are left out
 # stop_dir = "~/.claude/kelpie/stop"  # stop markers the hook enforces; false = alert instead
+# spool_stops = true               # false = spool lines alone only alert, OTLP still stops
 # enabled = true
 
 # GitHub connector (read-only): evaluates pr_merged and ci_status conditions for these

@@ -27,6 +27,7 @@ SECTION = "[adapters.openclaw]"
 KEYS = frozenset(
     {
         *("enabled", "state_dir", "workboard", "spool", "lookback", "token_spans"),
+        "spool_stops",
         *("stop_dir", "stop_ttl", "cli", "cli_timeout"),
     }
 )
@@ -42,6 +43,7 @@ class OpenClawSettings:
     lookback: timedelta = DEFAULT_LOOKBACK
     enabled: bool = True
     token_spans: bool = True
+    spool_stops: bool = True  # False: spool tool lines alone never stop a run (#302)
     stop_dir: Path | None = DEFAULT_STOP_DIR  # None: stop is refused
     stop_ttl: timedelta = timedelta(seconds=DEFAULT_STOP_TTL)  # the plugin's stopTtl
     cli: str | None = DEFAULT_CLI  # None: no abort of the run in flight
@@ -54,6 +56,7 @@ class OpenClawSettings:
             spool=self.spool,
             lookback=self.lookback,
             token_spans=self.token_spans,
+            spool_stops=self.spool_stops,
             stop_dir=self.stop_dir,
             stop_ttl=self.stop_ttl,
             cli=self.cli,
@@ -78,7 +81,12 @@ def load_openclaw(section: Any) -> OpenClawSettings:
         raise ValueError(f"unknown {SECTION} keys: {sorted(extra)}")
     enabled = section.get("enabled", True)
     token_spans = section.get("token_spans", True)
-    for key, value in (("enabled", enabled), ("token_spans", token_spans)):
+    spool_stops = section.get("spool_stops", True)
+    for key, value in (
+        ("enabled", enabled),
+        ("token_spans", token_spans),
+        ("spool_stops", spool_stops),
+    ):
         if not isinstance(value, bool):
             raise ValueError(f"{SECTION} {key} must be true or false")
     state_dir = section.get("state_dir", str(DEFAULT_STATE_DIR))
@@ -115,6 +123,7 @@ def load_openclaw(section: Any) -> OpenClawSettings:
         lookback=lookback,
         enabled=enabled,
         token_spans=token_spans,
+        spool_stops=spool_stops,
         stop_dir=stop_dir,
         stop_ttl=stop_ttl,
         cli=None if cli is False else cli.strip(),

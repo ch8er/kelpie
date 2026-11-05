@@ -388,7 +388,15 @@ What is left:
 - **Claude Code and OpenClaw spool lines** name their session themselves, and those
   platforms record no worker process Kelpie could check them against; any agent that can
   write the spool (the same user, or a container with it mounted) can name another agent's
-  session.
+  session. Opt in to `spool_stops = false` in `[adapters.claude_code]` or
+  `[adapters.openclaw]` (default `true`, unchanged) and that adapter marks every spool tool
+  line unverified: rule 10 sends its critical alert ("Not stopped: …") but never stops a run
+  on those lines alone. The platform's own OTLP tool spans still stop it, so pair it with
+  per-agent tokens: under the shared token any holder could still send such spans.
+  OpenClaw's own OTLP spans carry no session yet, so on OpenClaw rule 10 then only alerts.
+  The setting goes where the adapter runs (the agent host's config with `kelpie agent`).
+  Budgets are not affected: they read spend from the span store, which spool lines do not
+  enter.
 - **Hermes spool lines from an older plugin**, or on macOS (no `/proc`), cannot be checked:
   they never stop a run alone, so rule 10 stops such runs only from OTLP evidence.
 
@@ -403,9 +411,9 @@ within a host the risk is the same as on a single-host farm.
 
 **What to do.** Give every agent its own `[[traces.tokens]]` entry and retire the shared
 token ([above](#per-agent-traces-tokens)), and update the Hermes plugin on every agent host.
-Where agents that do not trust each other share a Claude Code or OpenClaw spool, keep
-`loop_breaker` in `observe` or `suggest` ([act-checklist.md](act-checklist.md)), or give
-them separate farms.
+Where agents that do not trust each other share a Claude Code or OpenClaw spool, set that
+adapter's `spool_stops = false` with per-agent tokens, or keep `loop_breaker` in `observe`
+or `suggest` ([act-checklist.md](act-checklist.md)), or give them separate farms.
 
 ### `kelpie serve`'s HTTP server has no connection guards (M5)
 
