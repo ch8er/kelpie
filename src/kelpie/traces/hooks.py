@@ -201,10 +201,10 @@ def merge_hook_spans(spans: Sequence[Span]) -> Merged:
             by_tool[(spans[o].session_id, spans[o].tool)].add(o, spans[o])
     for times in by_tool.values():
         times.sort()
-    # Verified hooks pair first: a line another process wrote (#302) takes an OTLP span only
-    # when no verified line of the same call does, so it cannot leave the run's own line
-    # standing next to the OTLP span and count the call twice.
-    pairs: list[tuple[float, bool, int, int]] = []
+    # Verified hooks pair first, whatever the distance: a line another process wrote
+    # (#302) takes an OTLP span only when no verified line matches it, so it cannot leave
+    # the run's own line standing next to the OTLP span and count the call twice.
+    pairs: list[tuple[bool, float, int, int]] = []
     for h in hooks:
         hook = spans[h]
         call = _call_id(hook)
@@ -216,7 +216,7 @@ def merge_hook_spans(spans: Sequence[Span]) -> Merged:
         for o in candidates:
             distance = _distance(hook, spans[o])
             if distance is not None:
-                pairs.append((distance, hook.attributes.get(UNVERIFIED_ATTRIBUTE) is True, h, o))
+                pairs.append((hook.attributes.get(UNVERIFIED_ATTRIBUTE) is True, distance, h, o))
     pairs.sort()
     taken: dict[int, int] = {}  # otlp index -> hook index
     used: set[int] = set()

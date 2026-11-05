@@ -293,3 +293,29 @@ def test_a_forged_line_with_the_same_call_id_does_not_double_a_call() -> None:
     )  # fmt: skip
     actions = REGISTRY["loop_breaker"]({}).evaluate(snap)
     assert not [a for a in actions if a.kind is ActionKind.STOP]
+
+
+def test_a_forged_line_closer_in_time_does_not_double_a_call() -> None:
+    from kelpie.traces.hooks import merge_hook_spans
+
+    spans = hook_and_otlp(5, False, "hermes-run-1")
+    otlp = [replace(s, attributes={}) for s in spans if s.span_id.startswith("o")]  # no call id
+    call_id = "gen_ai.tool.call.id"
+    real = [
+        replace(s, start=s.start + timedelta(milliseconds=40),
+                end=s.end + timedelta(milliseconds=40),
+                attributes={k: v for k, v in s.attributes.items() if k != call_id})
+        for s in spans
+        if s.span_id.startswith("h")
+    ]  # fmt: skip
+    forged = [
+        replace(s, span_id=f"f{s.span_id}", start=s.start - timedelta(milliseconds=40),
+                end=s.end - timedelta(milliseconds=40),
+                attributes={**s.attributes, UNVERIFIED_ATTRIBUTE: True})
+        for s in real
+    ]  # fmt: skip
+    folded = merge_hook_spans(forged + real + otlp).spans
+    verified = [
+        s for s in folded if s.kind is SpanKind.TOOL and UNVERIFIED_ATTRIBUTE not in s.attributes
+    ]
+    assert sorted(s.span_id for s in verified) == ["o0", "o1", "o2", "o3", "o4"]
