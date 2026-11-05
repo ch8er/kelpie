@@ -17,6 +17,7 @@ from kelpie.adapters.openclaw.config import load_openclaw
 from kelpie.core.actions import Action, ActionKind
 from kelpie.core.model import Snapshot, Span, SpanKind
 from kelpie.core.spans import UNVERIFIED_ATTRIBUTE
+from kelpie.remote.protocol import decode_snapshot, encode_snapshot, namespace_snapshot
 from kelpie.rules.loop_breaker import LoopBreaker
 from kelpie.traces.hooks import merge_hook_spans
 from tests.adapters.test_openclaw_adapter import Spool
@@ -182,3 +183,44 @@ def test_openclaw_spool_lines_alone_only_alert_with_spool_stops_off(
     actions = evaluate(snapshot)
     assert stops(actions) == []
     assert any(a.params.get("unverified") is True for a in actions if a.kind is ActionKind.ALERT)
+
+
+def test_openclaw_sessionless_otlp_spans_do_not_turn_spool_lines_into_a_stop(
+    tmp_path: Path, spool: Spool
+) -> None:
+    """``diagnostics-otel`` spans carry no session: a marked line with the same call id folds
+    into them but never moves them into the session it names."""
+    for i in range(10):
+        spool.tool("oc-session-1", _at(300 - 20 * i), "exec", {"command": "make"}, call=f"c{i}")
+    snapshot = openclaw_adapter(tmp_path, spool, spool_stops=False).snapshot(NOW)
+    otlp = [
+        Span(
+            trace_id="otlp",
+            span_id=f"o{i}",
+            name="execute_tool exec",
+            kind=SpanKind.TOOL,
+            start=_at(300 - 20 * i) - timedelta(seconds=1),
+            end=_at(300 - 20 * i),
+            tool="exec",
+            outcome="ok",
+            attributes={"gen_ai.tool.call.id": f"c{i}"},
+        )
+        for i in range(10)
+    ]
+    result = merge_hook_spans((*otlp, *snapshot.spans))
+    assert result.merged == 10
+    merged = result.spans
+    assert all(s.session_id is None for s in merged if s.kind is SpanKind.TOOL)
+    actions = list(LoopBreaker().evaluate(replace(snapshot, spans=merged)))
+    assert stops(actions) == []
+
+
+def test_the_mark_survives_the_agent_to_hub_wire(tmp_path: Path) -> None:
+    """With ``kelpie agent`` the adapter runs on the agent host; the hub's rule 10 must see
+    the mark."""
+    claude_spool(tmp_path / "spool.jsonl", calls=2)
+    snapshot = claude(tmp_path, spool_stops=False).snapshot(NOW)
+    wire = json.loads(json.dumps(encode_snapshot(snapshot)))
+    hub = namespace_snapshot("host-a", "claude-code", decode_snapshot(wire))
+    found = tools(hub)
+    assert len(found) == 2 and all(s.attributes[UNVERIFIED_ATTRIBUTE] is True for s in found)

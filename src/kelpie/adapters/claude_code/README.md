@@ -26,7 +26,7 @@ tasks_dir = "~/.claude/tasks"             # Claude Code's config dir + /tasks
 spool = "~/.claude/kelpie/spool.jsonl"    # written by the hook below; false = do not read one
 lookback = "24h"                          # sessions and completed tasks older than this are left out
 stop_dir = "~/.claude/kelpie/stop"        # where stop markers go; false = refuse stop (alerts instead)
-spool_stops = true                         # false = spool lines alone never stop a run (rule 10 alerts)
+spool_stops = true                        # false = spool lines alone never stop a run (rule 10 alerts)
 enabled = true                            # default when the section exists
 ```
 
