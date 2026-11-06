@@ -25,7 +25,8 @@ These are the release notes for the tag, ahead of what changed.
   user plugin directory and in every profile that has a copy, then restart the Hermes
   gateway(s). The first line finds the Python kelpie-sre is installed in (also with pipx or
   `uv tool install`, whose environments a plain `python` does not see); adjust `~/.hermes`
-  if your Hermes home is elsewhere:
+  if your Hermes home is elsewhere (with `pip install --user` or a system-wide install, set
+  `PY` to the Python you installed kelpie-sre with):
 
   ```sh
   PY="$(dirname "$(readlink -f "$(command -v kelpie)")")/python"
@@ -86,7 +87,8 @@ version, a macOS Hermes without psutil (it records no worker fingerprint, so its
 lines stay unverified), the per-tick cost of per-agent token bindings on a busy farm
 (about 0.7 s with 700k bindings, measured offline), the Docker image (the release
 workflow builds and publishes it), and GitHub Issues and Linear beyond the token check. The
-wheel and sdist were installed and `kelpie demo --fast` run on Python 3.12 and 3.13. Upgrading from 0.1.0a1: read 0.1.0a2's notes below first.
+wheel and sdist were installed and `kelpie demo --fast` run on Python 3.12 and 3.13.
+Upgrading from 0.1.0a1: read 0.1.0a2's notes below first.
 
 ### Fixed
 
