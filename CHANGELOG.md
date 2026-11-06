@@ -23,12 +23,19 @@ These are the release notes for the tag, ahead of what changed.
 
 - **Update the Hermes plugin on every agent host**, from the installed package, in the
   user plugin directory and in every profile that has a copy, then restart the Hermes
-  gateway(s):
+  gateway(s). The first line finds the Python kelpie-sre is installed in (also with pipx or
+  `uv tool install`, whose environments a plain `python` does not see); adjust `~/.hermes`
+  if your Hermes home is elsewhere:
 
   ```sh
-  PLUGIN="$(python -c 'import kelpie.adapters.hermes.plugin as p; print(p.__file__)')"
-  cp "$PLUGIN" ~/.hermes/plugins/kelpie/__init__.py
-  for d in ~/.hermes/profiles/*/plugins/kelpie; do [ -d "$d" ] && cp "$PLUGIN" "$d/__init__.py"; done
+  PY="$(dirname "$(readlink -f "$(command -v kelpie)")")/python"
+  PLUGIN="$("$PY" -c 'import kelpie.adapters.hermes.plugin as p; print(p.__file__)')"
+  if [ -f "$PLUGIN" ]; then
+    cp "$PLUGIN" ~/.hermes/plugins/kelpie/__init__.py
+    for d in ~/.hermes/profiles/*/plugins/kelpie; do [ -d "$d" ] && cp "$PLUGIN" "$d/__init__.py"; done
+  else
+    echo "kelpie-sre is not importable from $PY: nothing copied"
+  fi
   ```
 
   On a multi-host farm, upgrade `kelpie-sre` on each agent host (where `kelpie agent` runs)
@@ -38,10 +45,12 @@ These are the release notes for the tag, ahead of what changed.
   stopped") on such runs. Once the plugin is updated, a rule 10 in `act` stops a looping
   Hermes run on macOS from spool lines alone. If you keep rule 10 in `observe` or `suggest`,
   nothing changes. Linux spool lines are unchanged.
-- **Workers started before the plugin update keep writing `pid_start: null` until they
-  restart**: a worker loads the plugin once, so its lines stay unverified (rule 10 alerts,
-  does not stop) until that worker ends. Then run `kelpie selftest stop --adapter hermes`:
-  every step should PASS.
+- **On macOS, workers started before the plugin update keep writing `pid_start: null`
+  until they restart**: a worker loads the plugin once, so its lines stay unverified (rule
+  10 alerts, does not stop) until that worker ends. Then run `kelpie selftest stop
+  --adapter hermes`: every step should PASS. The self-test installs the installed
+  package's plugin, not your copies, so also check that a fresh worker's spool lines carry
+  a `pid_start` of the form `"|<digits>"`, not `null`.
 
 **Rule 10 in `act` still trusts the shared traces token and Claude Code or OpenClaw spool
 lines** (audit M1, narrowed; unchanged from 0.1.0a2). Per-agent tokens and the Hermes writer
@@ -72,11 +81,12 @@ are unauthenticated; firewall the port or put an authenticating proxy in front
 
 **Known limits.** Verified live before this release: the macOS fix, on one macOS farm
 (Hermes Agent v0.22.5), with `kelpie selftest stop --adapter hermes`. Not verified: live
-runs on real Claude Code and OpenClaw platforms with this version, a macOS Hermes without
-psutil (it records no worker fingerprint, so its spool lines stay unverified), the Docker
-image (the release workflow builds and publishes it), and GitHub Issues and Linear beyond
-the token check. The wheel and sdist were installed and `kelpie demo --fast` run on Python
-3.12 and 3.13. Upgrading from 0.1.0a1: read 0.1.0a2's notes below first.
+runs on a real Linux Hermes and on real Claude Code and OpenClaw platforms with this
+version, a macOS Hermes without psutil (it records no worker fingerprint, so its spool
+lines stay unverified), the per-tick cost of per-agent token bindings on a busy farm
+(about 0.7 s with 700k bindings, measured offline), the Docker image (the release
+workflow builds and publishes it), and GitHub Issues and Linear beyond the token check. The
+wheel and sdist were installed and `kelpie demo --fast` run on Python 3.12 and 3.13. Upgrading from 0.1.0a1: read 0.1.0a2's notes below first.
 
 ### Fixed
 
