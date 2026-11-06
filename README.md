@@ -10,7 +10,7 @@ no LLM in the loop, and every rule starts observe-only until you let it act.
 pip install kelpie-sre && kelpie demo
 ```
 
-`pip install kelpie-sre` installs the latest alpha, 0.1.0a2: read
+`pip install kelpie-sre` installs the latest alpha, 0.1.0a3: read
 [its release notes](https://github.com/ch8er/kelpie/blob/main/CHANGELOG.md#before-you-install)
 before you run it on a farm. For the latest `main`:
 `pip install git+https://github.com/ch8er/kelpie`.
@@ -22,7 +22,7 @@ of real farm incidents on a simulated Hermes board, offline, then prints that da
 
 ![Recording of kelpie demo --fast: on a simulated Hermes farm Kelpie flags a block that outlived its cause, stops a runaway heartbeat loop after 10 identical calls, flags a forgotten merge hold and a human task gating five agent tasks, then prints the day's cost-of-chaos report](https://raw.githubusercontent.com/ch8er/kelpie/main/docs/assets/demo.svg)
 
-> **Alpha (0.1.0a2).** Config and storage formats may still change. Kelpie starts safe:
+> **Alpha (0.1.0a3).** Config and storage formats may still change. Kelpie starts safe:
 > global dry-run on and every rule in `observe` mode, so it changes nothing until you let
 > it.
 

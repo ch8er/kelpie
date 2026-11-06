@@ -8,6 +8,76 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ## [Unreleased]
 
+## [0.1.0a3] - 2026-11-06
+
+Third alpha: 0.1.0a2 plus the macOS fix for the Hermes plugin (#353), verified on a live
+macOS farm with `kelpie selftest stop --adapter hermes`. Nothing else changed. Like the
+earlier alphas it starts in global dry-run (`dry_run = true`) with every rule in `observe`
+mode.
+
+### Before you install
+
+These are the release notes for the tag, ahead of what changed.
+
+**Upgrading from 0.1.0a2**
+
+- **Update the Hermes plugin on every agent host**, from the installed package, in the
+  user plugin directory and in every profile that has a copy, then restart the Hermes
+  gateway(s):
+
+  ```sh
+  PLUGIN="$(python -c 'import kelpie.adapters.hermes.plugin as p; print(p.__file__)')"
+  cp "$PLUGIN" ~/.hermes/plugins/kelpie/__init__.py
+  for d in ~/.hermes/profiles/*/plugins/kelpie; do [ -d "$d" ] && cp "$PLUGIN" "$d/__init__.py"; done
+  ```
+
+  On a multi-host farm, upgrade `kelpie-sre` on each agent host (where `kelpie agent` runs)
+  and copy the plugin from there.
+- **On macOS, rule 10 can now stop Hermes runs from spool evidence.** With the 0.1.0a2
+  plugin every macOS spool line carried `"pid_start": null`, so rule 10 only alerted ("Not
+  stopped") on such runs. Once the plugin is updated, a rule 10 in `act` stops a looping
+  Hermes run on macOS from spool lines alone. If you keep rule 10 in `observe` or `suggest`,
+  nothing changes. Linux spool lines are unchanged.
+- **Workers started before the plugin update keep writing `pid_start: null` until they
+  restart**: a worker loads the plugin once, so its lines stay unverified (rule 10 alerts,
+  does not stop) until that worker ends. Then run `kelpie selftest stop --adapter hermes`:
+  every step should PASS.
+
+**Rule 10 in `act` still trusts the shared traces token and Claude Code or OpenClaw spool
+lines** (audit M1, narrowed; unchanged from 0.1.0a2). Per-agent tokens and the Hermes writer
+check close it where they apply. What is left: spans under the shared token or a tokenless
+ingest still report for every session, and Claude Code and OpenClaw spool lines name their
+session themselves. Where agents that do not trust each other share a farm, give each its
+own `[[traces.tokens]]` entry and set `spool_stops = false` in `[adapters.claude_code]` /
+`[adapters.openclaw]` (their spool lines alone then only alert), or keep rule 10 in
+`observe` or `suggest`. Details:
+[docs/security.md](docs/security.md#known-residual-risks).
+
+**Open findings** of the security audit
+([#336](https://github.com/ch8er/kelpie/issues/336)), unchanged from 0.1.0a2, all low, and
+what is left of M7:
+
+- L4: stop-marker writes in the Claude Code and OpenClaw adapters are not relative to a
+  directory handle; matters only if Kelpie runs with more privilege than the agents.
+- L13: outbound clients give each resolved address the whole remaining connect time, so a
+  host with several blackholed addresses can exceed the deadline several times.
+- L14, what is left: the Dockerfile pins its base images by tag, not digest.
+- M7, what is left: one acting instance per board is enforced on one machine, not across
+  machines or users for a GitHub repository or Linear team. Run one acting Kelpie per
+  tracker.
+
+**Think before exposing `kelpie serve` off loopback**, as before: `/metrics` and `/healthz`
+are unauthenticated; firewall the port or put an authenticating proxy in front
+([docs/security.md](docs/security.md#listeners)).
+
+**Known limits.** Verified live before this release: the macOS fix, on one macOS farm
+(Hermes Agent v0.22.5), with `kelpie selftest stop --adapter hermes`. Not verified: live
+runs on real Claude Code and OpenClaw platforms with this version, a macOS Hermes without
+psutil (it records no worker fingerprint, so its spool lines stay unverified), the Docker
+image (the release workflow builds and publishes it), and GitHub Issues and Linear beyond
+the token check. The wheel and sdist were installed and `kelpie demo --fast` run on Python
+3.12 and 3.13. Upgrading from 0.1.0a1: read 0.1.0a2's notes below first.
+
 ### Fixed
 
 - **macOS: rule 10 can stop a Hermes run from spool evidence** (#353). The Hermes plugin of
@@ -839,6 +909,7 @@ control loop. Each rule runs in `observe`, `suggest` or `act` mode.
   mode and the daily report ([#62](https://github.com/ch8er/kelpie/pull/62), [#73](https://github.com/ch8er/kelpie/pull/73), [#74](https://github.com/ch8er/kelpie/pull/74), [#81](https://github.com/ch8er/kelpie/pull/81)).
 - A code health and security audit plan was written before the first release ([#92](https://github.com/ch8er/kelpie/pull/92)).
 
-[Unreleased]: https://github.com/ch8er/kelpie/compare/v0.1.0a2...HEAD
+[Unreleased]: https://github.com/ch8er/kelpie/compare/v0.1.0a3...HEAD
+[0.1.0a3]: https://github.com/ch8er/kelpie/releases/tag/v0.1.0a3
 [0.1.0a2]: https://github.com/ch8er/kelpie/releases/tag/v0.1.0a2
 [0.1.0a1]: https://github.com/ch8er/kelpie/releases/tag/v0.1.0a1
