@@ -242,8 +242,8 @@ def open_asks(snapshot: Snapshot) -> list[Ask]:
             agents.setdefault(_local(o.id), []).append(o)
     if not agents:
         return []
-    # Comments by (machine, author) with the names they mention: an answer to the asker
-    # anywhere on the same machine (agents of two hosts may share a name).
+    # When each agent last mentioned each name, per machine: an answer to the asker anywhere
+    # on the same machine (agents of two hosts may share a name).
     replies: Replies = {}
     for t in snapshot.tasks:
         for c in t.comments:

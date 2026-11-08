@@ -256,3 +256,11 @@ def test_wall_clock_stop_when_the_host_slept() -> None:
     asked = NOW - timedelta(days=6, hours=1)
     sleep = HostSleep(asked + H, NOW - 2 * H)  # awake age: 3h
     assert run(task(ask(at=asked)), host_sleeps=(sleep,)) == []
+
+
+def test_an_older_mention_elsewhere_does_not_hide_a_newer_answer() -> None:
+    """The recipient answered on T-3 after the ask; an older mention of the asker on T-2,
+    read later, must not make the ask look unanswered."""
+    newer = task(Comment("arch-1", "@dev-1 v4.", NOW - H), tid="T-3")
+    older = task(Comment("arch-1", "@dev-1 earlier note", NOW - 3 * H), tid="T-2")
+    assert run(task(ask()), newer, older) == []
