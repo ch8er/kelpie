@@ -125,6 +125,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 - Outbound clients (`kelpie.net`, the GitHub client, trace forwarding, the doctor's
   Prometheus check) share one connect deadline across every resolved address, instead of
   giving each address the whole remaining time (audit L13, #336).
+- Per-agent traces tokens: a `kelpie agent` report can no longer carry the ingest token mark
+  on its spans (the hub drops it), and spans marked with a token no longer configured share
+  one log line a minute, however many names they hold. An unplaced id not used for more than
+  a day counts toward the token's 10,000 again when it is used again (#374).
 - The Hermes adapter drops spool lines dated more than 5 minutes ahead, as the Claude Code
   and OpenClaw adapters do: a forged or mis-clocked line no longer keeps a dead run live
   until the spool rotates (#368).

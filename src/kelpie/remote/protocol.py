@@ -34,6 +34,7 @@ from kelpie.core.ports import (
     declared_actions,
 )
 from kelpie.core.serde import from_dict, parse_datetime
+from kelpie.core.spans import INGEST_MARK
 
 VERSION = 1
 REPORT_PATH = "/v1/agent/report"
@@ -880,9 +881,11 @@ def namespace_snapshot(agent: str, adapter: str, part: Snapshot) -> Snapshot:
 
 def namespace_span(agent: str, span: Span) -> Span:
     """A span in the agent's namespace: its trace and span ids too, so links are only
-    inherited, and hook and OTLP tool calls only merged, within one host."""
+    inherited, and hook and OTLP tool calls only merged, within one host. The ingest
+    token mark is the hub's own (set by its ingest, never by an agent's report): dropped."""
     ns = partial(namespaced, agent)
     attributes = dict(span.attributes)
+    attributes.pop(INGEST_MARK, None)
     for key in _SPAN_ID_ATTRIBUTES:
         if isinstance(attributes.get(key), str) and attributes[key]:
             attributes[key] = ns(attributes[key])

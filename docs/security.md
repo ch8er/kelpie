@@ -309,7 +309,8 @@ way the multi-host hub limits each `kelpie agent` to its own host:
   the span retention after its last use; bindings are rebuilt from the store after a restart
   (for the tokens still configured). Spans carry
   their token's name (`kelpie.ingest.token`, set by Kelpie; whatever a sender put there is
-  replaced or removed), and a span takes a missing session or task from its parent only
+  replaced or removed, and the hub drops it from the spans of a `kelpie agent` report), and a
+  span takes a missing session or task from its parent only
   when both came with the same scoped token. Hook spans are folded into OTLP spans before
   the snapshot check, so a fold that moves a span into another session is caught too.
 - **What a forger can still do.** Claim a session id before its agent starts (Hermes run ids

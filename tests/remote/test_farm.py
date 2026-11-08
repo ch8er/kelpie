@@ -888,3 +888,22 @@ def test_an_agents_sleeps_cannot_grow_the_hub() -> None:
         snap = rig.tick()
     assert all(s.end <= rig.clock.now for s in snap.host_sleeps)
     assert len(snap.host_sleeps) <= 64
+
+
+def test_a_report_cannot_set_the_ingest_token_mark() -> None:
+    """The mark is set by the hub's own ingest; an agent's report carrying one has it
+    dropped, so it cannot pose as a traces token or make up many names (#374)."""
+    from kelpie.core.spans import INGEST_MARK, UNVERIFIED_ATTRIBUTE
+
+    span = Span(
+        "tr",
+        "sp",
+        "x",
+        SpanKind.TOOL,
+        NOW,
+        session_id="s1",
+        attributes={INGEST_MARK: "made-up", UNVERIFIED_ATTRIBUTE: True},
+    )
+    (out,) = namespace_snapshot("laptop", "hermes", replace(board(), spans=(span,))).spans
+    assert INGEST_MARK not in out.attributes
+    assert out.attributes[UNVERIFIED_ATTRIBUTE] is True  # the agent's writer check stands
