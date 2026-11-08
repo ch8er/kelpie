@@ -143,7 +143,11 @@ SECRET_COMMANDS = [
 @pytest.mark.parametrize(("command", "secret"), SECRET_COMMANDS + LEAKS)
 def test_secrets_never_reach_the_spool(spool: Path, command: str, secret: str) -> None:
     plugin.post_tool_call(tool_name="terminal", args={"command": command})
-    assert secret not in spool.read_text()
+    # The writer's fingerprint (boot id, start time) is random hex and may hold a short
+    # secret by chance (e.g. "abc"): only what the command could have put there counts.
+    (record,) = lines(spool)
+    record.pop("pid_start", None)
+    assert secret not in json.dumps(record) and secret not in json.dumps(record, ensure_ascii=False)
 
 
 @pytest.mark.parametrize(

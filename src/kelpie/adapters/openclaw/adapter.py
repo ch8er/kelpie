@@ -205,7 +205,7 @@ def parse_line(line: str, cutoff: datetime, until: datetime | None = None) -> Sp
     ``until`` (a forged or mis-clocked line would keep a session alive) give ``None``."""
     try:
         rec = json.loads(line)
-    except ValueError:
+    except (ValueError, RecursionError):  # agents can write the spool
         return None
     if not isinstance(rec, dict) or rec.get("type") not in _EVENT_TYPES:
         return None
