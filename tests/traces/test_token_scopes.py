@@ -790,8 +790,8 @@ def test_use_refreshes_a_binding_and_requests_stay_fast() -> None:
 def test_old_unplaced_bindings_count_toward_the_cap_again(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Ids bound more than a day ago and still unplaced count again when used again, so a
-    token cannot hold several days' worth of ids at once (#374)."""
+    """Unplaced ids not used for more than a day count again when used again, so a token
+    cannot hold several days' worth of ids at once (#374)."""
     import kelpie.traces.scope as scope
 
     monkeypatch.setattr(scope, "MAX_UNPLACED", 3)
@@ -807,8 +807,8 @@ def test_old_unplaced_bindings_count_toward_the_cap_again(
 
 
 def test_unconfigured_token_names_share_one_log_slot(caplog: pytest.LogCaptureFixture) -> None:
-    """Spans whose mark names a token that is not configured (removed, or forged in a hub
-    report) are deleted once the board places them, logged once a minute in all (#374)."""
+    """Stored spans whose mark names a token no longer configured are deleted once the
+    board places them, logged once a minute in all, with the token's name (#374)."""
     guard = ScopeGuard(SCOPES, store=MemorySpanStore())
     spans = tuple(
         Span(
@@ -826,4 +826,5 @@ def test_unconfigured_token_names_share_one_log_slot(caplog: pytest.LogCaptureFi
         snap, _ = guard.check(replace(board(), spans=spans))
     assert snap.spans == ()
     assert len(guard._logged) == 1
-    assert len([r for r in caplog.records if "outside its scope" in r.message]) == 1
+    (line,) = [r.message for r in caplog.records if "outside its scope" in r.message]
+    assert "made-up-0" in line

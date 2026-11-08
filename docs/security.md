@@ -92,9 +92,7 @@ names (first seen first, until the hub restarts) get alerts and series; a later 
 still keeps its tasks out of the rules but is only counted, once per report
 (`kind="board"`), with no alert of its own. A fixed list was chosen over "the first names an agent reports": it holds
 across hub restarts and gives an agent no first report to abuse. Host sleeps an agent
-reports are kept only when they ended before its report, and at most 64 per agent. Spans in a
-report never carry a traces token's mark (`kelpie.ingest.token`): the hub drops it, so a
-report can neither pose as a token nor make up names to log. Role
+reports are kept only when they ended before its report, and at most 64 per agent. Role
 names on `/metrics` come from the agents' boards too; they are bounded too ([Text from agents](#text-from-agents), audit L10).
 
 ## Text from agents
@@ -309,7 +307,8 @@ way the multi-host hub limits each `kelpie agent` to its own host:
   the span retention after its last use; bindings are rebuilt from the store after a restart
   (for the tokens still configured). Spans carry
   their token's name (`kelpie.ingest.token`, set by Kelpie; whatever a sender put there is
-  replaced or removed), and a span takes a missing session or task from its parent only
+  replaced or removed, and the hub drops it from the spans of a `kelpie agent` report), and a
+  span takes a missing session or task from its parent only
   when both came with the same scoped token. Hook spans are folded into OTLP spans before
   the snapshot check, so a fold that moves a span into another session is caught too.
 - **What a forger can still do.** Claim a session id before its agent starts (Hermes run ids

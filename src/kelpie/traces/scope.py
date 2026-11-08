@@ -502,9 +502,7 @@ class ScopeGuard:
             elif self.judge(token, span)[0] is not Verdict.OUT:
                 continue
             out.add(span_key(span))
-            # names no longer configured share one log slot: a sender could make up many
-            name = token if token in self.scopes else REMOVED_TOKEN
-            self._log(name, f"session {_short(span.session_id)!r}", now)
+            self._log(token, f"session {_short(span.session_id)!r}", now)
         if out and self.store is not None:
             try:
                 deleted += self.store.discard(out)
@@ -543,7 +541,8 @@ class ScopeGuard:
         return Verdict.IN if self._task_in_scope(scope, task) else Verdict.OUT
 
     def _log(self, token: str, what: str, now: datetime) -> None:
-        if self._due(token, now):
+        # names no longer configured share one log slot: stored marks could hold many
+        if self._due(token if token in self.scopes else REMOVED_TOKEN, now):
             log.warning(
                 "deleted spans of traces token %r for %s: outside its scope", token[:64], what
             )
