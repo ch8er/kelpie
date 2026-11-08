@@ -483,9 +483,9 @@ Block storms (#252) and CI jobs that never start (#254) are observe-only checks.
 recommending `storm_mode = "rule"` or `not_started_mode = "rule"`:
 
 **Acceptance criteria**
-- [ ] Rule 13 folds its "needs you" items for a block storm's tasks under the storm (today the person gets both once the storm is switched on, and for the incident-20 shape, "waiting for CEO", rule 4 hands those blocks to rule 13, so the storm folds nothing there)
+- [x] Rule 13 folds its "needs you" items for a block storm's tasks under the storm (today the person gets both once the storm is switched on, and for the incident-20 shape, "waiting for CEO", rule 4 hands those blocks to rule 13, so the storm folds nothing there) — #361: one digest item per storm (`kind: block_storm`) once `storm_mode = "rule"`; fixture `20-block-storm-inbox.yaml`
 - [x] The report attributes a storm's, a not-started outage's and a tool outage's waits by `Outage.kind` (track C, #228, #264, #270): a switched-on storm's or tool outage's folded tasks count under the outage
-- [ ] A storm-specific "resolved" text ("N of M tasks unblocked")
+- [x] A storm-specific "resolved" text ("N of M tasks unblocked") — #361
 - [x] Correlated tool failures (signal 2), on the farm's sample of what Hermes records for a failing command (observe-only, `tool_outage_mode`; before `"rule"`, check its outages on the live farm)
 
 ### rules: needs_you and bottlenecks — planned waits are not waiting (incident 20)

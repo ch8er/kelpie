@@ -2703,7 +2703,13 @@ def _inbox(
     for e in latest.values():
         items = e.params.get("items")
         ids = (
-            tuple(str(i["task"]) for i in items if isinstance(i, dict) and "task" in i)
+            tuple(
+                str(t)
+                for i in items
+                if isinstance(i, dict) and "task" in i
+                # a block storm's item (rule 13 folds its tasks into one) names them all
+                for t in (i["tasks"] if isinstance(i.get("tasks"), list) else [i["task"]])
+            )
             if isinstance(items, list)
             else ()
         )

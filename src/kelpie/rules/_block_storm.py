@@ -30,12 +30,15 @@ their host and board prefixes (``Task.local_id``), as the agents wrote them.
 **Resolves.** Once open (its state id in ``Snapshot.open_states``) it stays open while
 :func:`keep_open` tasks (half of ``min_tasks``, at least two) are still blocked on the
 reason, whenever they blocked: a storm half answered is still one cause, and a storm at the
-threshold does not flap. It resolves when fewer are left.
+threshold does not flap. It resolves when fewer are left, with its own notice
+(:func:`resolved_text`): "Block storm over: 5 of 7 tasks unblocked", and the tasks still
+blocked on the reason.
 
-**Rule 13.** Its "needs you" inbox lists the person's blocks one by one; a storm does not
-fold them (they are not per-task alerts), so with the storm switched on the person also
-gets the storm. The per-task alerts this rule folds are its own no-condition and overdue
-ones, and only once the storm is switched on (``storm_mode = "rule"``).
+**Rule 13.** Once the storm is switched on (``storm_mode = "rule"``), rule 13's "needs you"
+digest folds the person's items whose tasks are in a storm into one item for the storm
+(:mod:`kelpie.rules.needs_you`), so the person reads one cause, not each block again. The
+per-task alerts this rule folds are its own no-condition and overdue ones, and only once
+the storm is switched on.
 """
 
 from __future__ import annotations
@@ -47,7 +50,7 @@ from datetime import datetime, timedelta
 
 from kelpie.core.actions import Action, ActionKind, Severity
 from kelpie.core.conditions import linked_conditions
-from kelpie.core.incidents import BLOCK_STORM, Outage, incident_state_id
+from kelpie.core.incidents import BLOCK_STORM, Outage, incident_state_id, is_outage_state
 from kelpie.core.model import KelpieMark, OwnerKind, Snapshot, Status, Task
 from kelpie.rules._alerts import alert_params, count
 from kelpie.rules._snoozes import SnoozeCheck
@@ -152,23 +155,7 @@ def storms(
     rule's mode. ``snoozed`` tells a task's snooze (none: no task is snoozed)."""
     if min_tasks <= 0:
         return []
-    groups: dict[tuple[str, tuple[str, ...]], list[_Blocked]] = {}
-    for task in snapshot.tasks:
-        block = task.block
-        if task.status is not Status.BLOCKED or block is None or block.kelpie is KelpieMark.STOP:
-            continue
-        conditions, missing = linked_conditions(task, snapshot)
-        if conditions or missing is not None:
-            continue  # a wait Kelpie can check, or one it is told about but cannot see
-        if snoozed is not None and (snooze := snoozed(task.id)) is not None and snooze.holds:
-            continue  # a person decided to wait
-        text = normalise(block.reason, task.id, task.local_id)
-        if informative(text):
-            refs = _refs(block.reason, task.id, task.local_id)
-            # what a reason names ("t_5", "#12") is its own machine's and board's
-            where = f"{task.host or ''}:{task.board or ''}"
-            key = (text, (where, *refs) if refs and where != ":" else refs)
-            groups.setdefault(key, []).append(_Blocked(task, block.since))
+    groups = _groups(snapshot, snoozed)
     open_states = set(snapshot.open_states)
     actions = []
     for (text, refs), blocked in sorted(groups.items()):
@@ -186,6 +173,76 @@ def storms(
             )
             actions.append(replace(alert, observe_only=observe))
     return actions
+
+
+def _groups(
+    snapshot: Snapshot, snoozed: Callable[[str], SnoozeCheck | None] | None
+) -> dict[tuple[str, tuple[str, ...]], list[_Blocked]]:
+    """The blocks that may storm, by shared reason (normalised text and references)."""
+    groups: dict[tuple[str, tuple[str, ...]], list[_Blocked]] = {}
+    for task in snapshot.tasks:
+        block = task.block
+        if task.status is not Status.BLOCKED or block is None or block.kelpie is KelpieMark.STOP:
+            continue
+        conditions, missing = linked_conditions(task, snapshot)
+        if conditions or missing is not None:
+            continue  # a wait Kelpie can check, or one it is told about but cannot see
+        if snoozed is not None and (snooze := snoozed(task.id)) is not None and snooze.holds:
+            continue  # a person decided to wait
+        text = normalise(block.reason, task.id, task.local_id)
+        if informative(text):
+            refs = _refs(block.reason, task.id, task.local_id)
+            # what a reason names ("t_5", "#12") is its own machine's and board's
+            where = f"{task.host or ''}:{task.board or ''}"
+            key = (text, (where, *refs) if refs and where != ":" else refs)
+            groups.setdefault(key, []).append(_Blocked(task, block.since))
+    return groups
+
+
+_SCOPE = re.compile(r": (\d+) tasks blocked within ")
+_LISTED = re.compile(r"separate waits: (.+?)(?: \(\+\d+ more\))?\.(?: |$)")
+
+
+def resolved_text(
+    snapshot: Snapshot,
+    rule: str,
+    state_id: str,
+    summary: str | None,
+    snoozed: Callable[[str], SnoozeCheck | None] | None = None,
+) -> str | None:
+    """The "Resolved" notice of a block storm: how many of the tasks its last announcement
+    (``summary``, the storm's own reason) named are unblocked now, and which tasks are still
+    blocked on its reason, snoozed ones apart. When that announcement listed only some of
+    its tasks, the unblocked are counted as its size less the tasks still blocked. None when
+    ``state_id`` is no storm of ``rule`` or the summary gives no size (the general notice)."""
+    found = _SCOPE.search(summary or "")
+    if found is None or not is_outage_state(state_id) or not state_id.startswith(f"{rule}:"):
+        return None
+    still: list[Task] = []  # blocked on its reason now, snoozed or not
+    for (text, refs), blocked in _groups(snapshot, None).items():
+        if incident_state_id(rule, text, *refs) == state_id:
+            still = sorted((b.task for b in blocked), key=lambda t: t.id)
+    held = {t.id for t in still if snoozed is not None and (c := snoozed(t.id)) and c.holds}
+    size = int(found.group(1))
+    listed = _LISTED.search(summary or "")
+    named = listed.group(1).split(", ") if listed else []
+    if len(named) == size:  # it named every task: count exactly those
+        done = len(set(named) - {t.id for t in still})
+    else:
+        size = max(size, len(still))
+        done = size - len(still)
+    text = f"Block storm over: {done} of {count(size, 'task')} unblocked."
+    waiting = [t.id for t in still if t.id not in held]
+    if waiting:
+        text += f" Still blocked on its reason: {_listed(waiting)}."
+    if held:
+        text += f" Snoozed: {_listed(sorted(held))}."
+    return text
+
+
+def _listed(ids: list[str]) -> str:
+    more = f" (+{len(ids) - MAX_LISTED} more)" if len(ids) > MAX_LISTED else ""
+    return ", ".join(ids[:MAX_LISTED]) + more
 
 
 def _since(blocked: list[_Blocked], min_tasks: int, window: timedelta) -> datetime | None:

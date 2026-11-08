@@ -663,3 +663,23 @@ def test_a_refused_token_file_or_tls_cert_opens_no_database(
         build_app(load_settings(path))
     assert not db.exists()
     assert token not in str(refused.value) and token not in caplog.text
+
+
+def test_needs_you_gets_rule_4_s_storms_once_switched_on() -> None:
+    from datetime import timedelta
+
+    from kelpie.app import _rule_config
+    from kelpie.core.config import EngineConfig
+
+    off = EngineConfig.from_mapping({"rules": {"stale_blocks": {}, "needs_you": {}}})
+    assert "block_storms" not in _rule_config("needs_you", off)
+    on = EngineConfig.from_mapping(
+        {"rules": {"stale_blocks": {"storm_mode": "rule", "storm_min_tasks": 4}, "needs_you": {}}}
+    )
+    assert _rule_config("needs_you", on)["block_storms"] == {
+        "min_tasks": 4,
+        "window": timedelta(hours=2),
+    }
+    own = EngineConfig.from_mapping({"rules": {"needs_you": {"block_storms": {}}}})
+    with pytest.raises(ValueError, match="block_storms is set automatically"):
+        _rule_config("needs_you", own)

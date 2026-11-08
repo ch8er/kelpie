@@ -346,7 +346,7 @@ that came due during the outage is sent when it ends.
 | `storm_min_tasks` | `5` | count, 0 (off) or 2–1000 | A block storm (#229): this many tasks blocked on the same reason (the task's own id, dates, times and hashes stripped; the PRs, URLs and other tasks it names kept apart; more than a kind of wait; blocks without a condition Kelpie can check, not snoozed)... |
 | `storm_window` | `"2h"` | duration, > 0 | ...within this of each other are one outage: one alert with the shared reason, the person it names and the tasks. Once open it stays open while half of `storm_min_tasks` (at least 2) are still blocked on the reason. |
 | `toolchain_window` | `"6h"` | duration, > 0 | A toolchain change on a host (`[resources.prometheus] toolchain_metric`) is named in an outage's alert as its likely cause (incident 20) when it happened at most this long before the outage began, or up to 15 minutes after. A change spans from the old version's last sighting to the new one's first, and the alert gives that span ("between … and … UTC") when it is longer than 15 minutes. Text only: it changes no action. |
-| `storm_mode` | `"observe"` | `"observe"` or `"rule"` | A new check: its alert (and its "resolved" notice) is only logged until set to `"rule"`, which follows the rule's mode and folds this rule's no-condition and overdue alerts of its tasks under it (not rule 13's inbox items). |
+| `storm_mode` | `"observe"` | `"observe"` or `"rule"` | A new check: its alert (and its "resolved" notice) is only logged until set to `"rule"`, which follows the rule's mode and folds this rule's no-condition and overdue alerts of its tasks under it, and rule 13's digest folds the person's items of its tasks into one line for the storm. A storm's "resolved" notice says how many of its tasks were unblocked ("Block storm over: 5 of 7 tasks unblocked") and which are still blocked on its reason. |
 
 A condition that can never be met (a PR closed without merging, a human task cancelled)
 alerts at once.
@@ -754,7 +754,15 @@ counts the rest): per item its `task_id`, `title`, `needed` (an approval's block
 why a human task is blocked: for one that can never clear on its own, the dead end or the
 condition Kelpie cannot see, which `stale_blocks` then does not alert on; none when the
 title says it), `since` and `blocking` (the
-tasks waiting behind it). The daily report heads "Needs a human" with each open inbox, and
+tasks waiting behind it). While `stale_blocks` has `storm_mode = "rule"`, this rule gets its
+storm settings (set automatically as `block_storms`, never in this section) and the
+person's items whose tasks are in an open block storm are one item (`kind: block_storm`,
+`needed` the shared reason, `tasks` all of them; `storms` lists each storm's state and
+tasks): one answer ends it. The digest says "changed" once when a storm forms (its tasks
+become one item), and a task joining the storm later does not re-announce it. A storm's
+tasks are those blocked since it began; one blocked on the same reason earlier stays an
+item of its own. Its headline then counts tasks ("Waiting for you: 6 tasks, 5 of them in
+1 block storm"). The counts, cost and `approvals` still include every task. The daily report heads "Needs a human" with each open inbox, and
 counts the agent-hours of the agent tasks waiting on each person in its cost of chaos
 ("agents waiting on people"), from the count every alert reports (`waiting_agent_tasks`,
 re-sampled about hourly while the inbox stays open). Planned work behind the listed human

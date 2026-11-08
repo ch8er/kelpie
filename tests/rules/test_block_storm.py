@@ -377,3 +377,72 @@ def test_the_storm_s_hours_are_never_counted_twice_in_the_cost_of_chaos() -> Non
     inbox = NeedsYou(default_approver="ceo")
     handed = chaos(StaleBlocks(inbox=inbox), inbox)  # rule 13 takes the blocks
     assert set(handed) == {"needs_you"}  # once, not again under the storm
+
+
+# --- the storm's own "resolved" notice and rule 13's digest ----------------------------
+
+
+def test_the_resolved_notice_says_how_many_were_unblocked() -> None:
+    [storm] = storms(*FIVE, rule=StaleBlocks(storm_mode="rule"))
+    assert storm.state is not None
+    rule = StaleBlocks()
+    left = Snapshot(now=NOW, tasks=FIVE[:1], owners=(CEO,))
+    text = rule.resolved(storm.state, left, summary=storm.reason)
+    assert text == "Block storm over: 4 of 5 tasks unblocked. Still blocked on its reason: T-0."
+    gone = Snapshot(now=NOW, owners=(CEO,))
+    assert rule.resolved(storm.state, gone, summary=storm.reason) == (
+        "Block storm over: 5 of 5 tasks unblocked."
+    )
+    # Tasks that joined since its last announcement count in its size.
+    assert rule.resolved(storm.state, left, summary="Block storm: 0 tasks blocked within ")
+    # No size in the summary (an older Kelpie's state), or no storm: the general notice.
+    assert rule.resolved(storm.state, left, summary="something else") is None
+    assert rule.resolved(storm.state, left) is None
+
+
+def test_the_engine_gives_the_storm_its_summary_when_it_resolves() -> None:
+    from kelpie.core.config import EngineConfig, Mode
+    from kelpie.core.engine import Engine
+    from tests.fakes import FakeAdapter, FakeAlerter
+
+    config = EngineConfig(dry_run=False, default_mode=Mode.SUGGEST)
+    rule = StaleBlocks(storm_mode="rule")
+    alerter = FakeAlerter()
+    engine = Engine([rule], adapters=[FakeAdapter()], alerter=alerter, config=config)  # type: ignore[list-item]
+    engine.tick(lambda: Snapshot(now=NOW, tasks=FIVE, owners=(CEO,)))
+    later = Snapshot(now=NOW + 10 * M, tasks=FIVE[:1], owners=(CEO,))
+    done = engine.tick(lambda: later)
+    notices = [d.action.reason for d in done if d.action.key and "resolved:" in d.action.key]
+    assert any("4 of 5 tasks unblocked" in n for n in notices), notices
+
+
+def test_the_resolved_notice_counts_what_the_storm_named_and_snoozes_apart() -> None:
+    rule = StaleBlocks(storm_mode="rule")
+    # It grew to seven since it opened: its last announcement named all seven.
+    seven = tuple(blocked(n, 60 - 5 * n) for n in range(7))
+    [storm] = storms(*seven, rule=rule)
+    assert storm.state is not None
+    left = Snapshot(now=NOW, tasks=seven[:1], owners=(CEO,))
+    assert rule.resolved(storm.state, left, summary=storm.reason) == (
+        "Block storm over: 6 of 7 tasks unblocked. Still blocked on its reason: T-0."
+    )
+    # A task that joined after the announcement is still blocked, not unblocked.
+    late = blocked(8, 1)
+    joined = Snapshot(now=NOW, tasks=(seven[0], late), owners=(CEO,))
+    assert rule.resolved(storm.state, joined, summary=storm.reason) == (
+        "Block storm over: 6 of 7 tasks unblocked. Still blocked on its reason: T-0, T-8."
+    )
+    # Snoozed tasks are still blocked, said apart.
+    until = NOW + timedelta(days=2)
+    snooze = Snooze("T-1", until, "after the release", "ceo", NOW - M)
+    held = Snapshot(now=NOW, tasks=seven[:2], owners=(CEO,), snoozes={"T-1": snooze})
+    assert rule.resolved(storm.state, held, summary=storm.reason) == (
+        "Block storm over: 5 of 7 tasks unblocked. Still blocked on its reason: T-0. Snoozed: T-1."
+    )
+    # Its announcement listed only some: counted as its size less those still blocked.
+    many = tuple(blocked(n, 100 - n) for n in range(12))
+    [big] = storms(*many, rule=rule)
+    assert big.state is not None and "(+2 more)" in big.reason
+    assert rule.resolved(big.state, Snapshot(now=NOW, owners=(CEO,)), summary=big.reason) == (
+        "Block storm over: 12 of 12 tasks unblocked."
+    )
