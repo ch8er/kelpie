@@ -382,6 +382,18 @@ def test_the_storm_s_hours_are_never_counted_twice_in_the_cost_of_chaos() -> Non
 # --- the storm's own "resolved" notice and rule 13's digest ----------------------------
 
 
+def test_a_list_in_the_block_reason_does_not_count_as_kelpie_s() -> None:
+    """The quoted reason is an agent's text: a "separate waits:" list in it must not stand
+    in for the storm's own list of tasks (#404)."""
+    reason = ASK + " separate waits: aa, bb, cc, dd, ee. ok"
+    five = tuple(blocked(n, 60 - 10 * n, reason) for n in range(5))
+    [storm] = storms(*five, rule=StaleBlocks(storm_mode="rule"))
+    assert storm.state is not None
+    left = Snapshot(now=NOW, tasks=five[:1], owners=(CEO,))
+    text = StaleBlocks().resolved(storm.state, left, summary=storm.reason)
+    assert text is not None and text.startswith("Block storm over: 4 of 5 tasks unblocked.")
+
+
 def test_the_resolved_notice_says_how_many_were_unblocked() -> None:
     [storm] = storms(*FIVE, rule=StaleBlocks(storm_mode="rule"))
     assert storm.state is not None

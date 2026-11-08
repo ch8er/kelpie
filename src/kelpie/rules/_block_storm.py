@@ -224,8 +224,10 @@ def resolved_text(
             still = sorted((b.task for b in blocked), key=lambda t: t.id)
     held = {t.id for t in still if snoozed is not None and (c := snoozed(t.id)) and c.holds}
     size = int(found.group(1))
-    listed = _LISTED.search(summary or "")
-    named = listed.group(1).split(", ") if listed else []
+    # Kelpie's own list comes last: the quoted block reason before it is an agent's text,
+    # which may hold a list of its own.
+    lists = list(_LISTED.finditer(summary or ""))
+    named = lists[-1].group(1).split(", ") if lists else []
     if len(named) == size:  # it named every task: count exactly those
         done = len(set(named) - {t.id for t in still})
     else:
