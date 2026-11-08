@@ -872,3 +872,12 @@ commands = true           # keep the prefix of shell commands on tool spans ("ma
 # header_timeout = "3s"                 # accept -> end of headers (TLS included)
 # read_timeout = "30s"                  # each socket read or write
 # body_timeout = "60s"                  # a whole request body
+
+# --- Farm view (docs/configuration.md#view) ------------------------------------------------
+# A read-only listener serving the farm view as JSON (GET /v1/farm, read by
+# `kelpie status --server`). Off by default; off loopback it needs a token.
+# [view]
+# enabled = false
+# host = "127.0.0.1"
+# port = 9465
+# token_env = "KELPIE_VIEW_TOKEN"

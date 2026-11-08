@@ -163,6 +163,7 @@ from kelpie.traces.hooks import merge_hook_spans
 from kelpie.traces.ingest import IGNORED, ScopedToken, TraceIngest
 from kelpie.traces.scope import ScopeGuard
 from kelpie.traces.store import OffenderWatch, SpanRetention, SpanWindow, merge_spans
+from kelpie.view.config import ViewSettings, load_view
 
 log = logging.getLogger(__name__)
 
@@ -313,6 +314,7 @@ class Settings:
     hub: HubSettings | None = None  # [hub]: ``kelpie serve`` takes reports from agents
     snooze: SnoozeSettings = field(default_factory=SnoozeSettings)  # [snooze]
     server: Limits = field(default_factory=Limits)  # [server]: every listener's guards
+    view: ViewSettings = field(default_factory=ViewSettings)  # [view]: read-only farm view
 
     @property
     def spend(self) -> SpendConfig:
@@ -355,6 +357,7 @@ def load_settings(path: Path | None) -> Settings:
         "hub",
         "snooze",
         "server",
+        "view",
     }
     if unknown:
         raise ConfigError(f"unknown config sections: {sorted(unknown)}")
@@ -401,6 +404,7 @@ def load_settings(path: Path | None) -> Settings:
         hub = load_hub(data.get("hub"))
         snooze = load_snooze(data.get("snooze"), report.tz)
         server = load_server(data.get("server"))
+        view = load_view(data.get("view"))
     except ValueError as exc:
         raise ConfigError(str(exc)) from exc
     settings = Settings(
@@ -429,6 +433,7 @@ def load_settings(path: Path | None) -> Settings:
         hub=hub,
         snooze=snooze,
         server=server,
+        view=view,
     )
     _check_propose_token(settings)
     return settings
@@ -1644,6 +1649,8 @@ class ControlLoop:
     housekeeping: Callable[[], object] | None = None
     _stop: threading.Event = field(default_factory=threading.Event)
     _thread: threading.Thread | None = None
+    # The snapshot of the last tick that built one (the read-only farm view, [view]).
+    last_snapshot: Snapshot | None = None
 
     def tick_once(self) -> None:
         started = time.monotonic()
@@ -1659,6 +1666,8 @@ class ControlLoop:
             log.exception("engine tick failed")
             self.metrics.tick_failed(self.engine)
             return
+        if taken:
+            self.last_snapshot = taken[-1]
         self.metrics.observe_tick(
             time.monotonic() - started, results, self.engine, taken[-1] if taken else None
         )
@@ -2613,7 +2622,10 @@ def _github_steps(
 
 def check_exposure(settings: Settings, host: str) -> None:
     """Refuse to serve an unauthenticated ingest endpoint on a non-loopback address. With
-    ``[hub]`` this port takes no spans (agents relay them to the hub listener)."""
+    ``[hub]`` this port takes no spans (agents relay them to the hub listener). The
+    read-only farm view ([view]) listens on its own address: off loopback it needs a token."""
+    if (problem := settings.view.exposure_problem()) is not None:
+        raise ConfigError(problem)
     if settings.hub is not None:
         return
     try:

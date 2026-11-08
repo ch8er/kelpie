@@ -10,6 +10,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ### Added
 
+- `kelpie status` shows the farm after the rules: tasks per status (per board), waiting
+  conditions, open alert states and the last actions per rule, read-only (the board offline,
+  the database without writing to it; with no adapter, the last statuses `kelpie serve`
+  observed). `--json` prints the farm view alone for scripts, `--server [URL]` reads it from
+  a running `kelpie serve`. The view model is `kelpie.core.farmview`.
+- `[view]` (off by default): `kelpie serve` serves the farm view read-only as JSON on a
+  listener of its own (`GET /v1/farm`, 127.0.0.1:9465). No write endpoint; with
+  `[view] token_env` set every request needs the bearer token, and off loopback `kelpie
+  serve` refuses to start without a strong one.
 - Rule `unanswered_asks` (P1, #297, observe by default): an agent's `@question` to another
   agent in a task comment is an obligation until the recipient (or a person) answers.
   Kelpie reminds only while the recipient is idle, at most once per step (`steps`, default

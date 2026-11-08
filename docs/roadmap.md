@@ -775,13 +775,14 @@ fix, review time dropped from 48 to 27 minutes, and failures from 9 of 29 to 1 o
 labels: P0, week-3, area:core
 A quick terminal view of the farm from Kelpie's storage, without a custom UI.
 
-Today `kelpie status` (#7) shows the config, the rules it would load with their mode, the
-adapters, budgets and prices; none of the criteria below.
+`kelpie status` (#7) shows the config, the rules it would load with their mode, the
+adapters, budgets and prices, and then the farm view (`kelpie.core.farmview`, reused by
+the read-only page of #299).
 
 **Acceptance criteria**
-- [ ] Shows tasks per status, waiting conditions, open alerts and the last actions per rule
-- [ ] Works against a running server or directly against the storage file
-- [ ] Plain text by default, `--json` for scripts
+- [x] Shows tasks per status, waiting conditions, open alerts and the last actions per rule (#PR)
+- [x] Works against a running server or directly against the storage file: `--server` reads `kelpie serve`'s read-only `[view]` listener (off by default); without it the board is read offline and the database read-only, and with no adapter the last observed statuses stand in (#PR)
+- [x] Plain text by default, `--json` for scripts (#PR)
 
 ### traces: token optimization — caching, context growth, restarts
 labels: P1, week-3, area:traces

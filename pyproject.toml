@@ -107,6 +107,7 @@ source_modules = [
     "kelpie.app",
     "kelpie.server",
     "kelpie.metrics",
+    "kelpie.view",
 ]
 forbidden_modules = ["kelpie.report.root_cause"]
 
@@ -132,6 +133,7 @@ source_modules = [
     "kelpie.doctor",
     "kelpie.why",
     "kelpie.snooze",
+    "kelpie.view",
 ]
 forbidden_modules = ["kelpie.sim", "kelpie.demo"]
 

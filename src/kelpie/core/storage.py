@@ -1572,6 +1572,29 @@ def read_transitions(db: sqlite3.Connection, start: datetime, end: datetime) -> 
     return [status_change(r) for r in rows]
 
 
+def read_last_statuses(db: sqlite3.Connection) -> dict[str, StatusChange]:
+    """The newest stored transition per task id (the farm view without a board)."""
+    return {r["task_id"]: status_change(r) for r in db.execute(_LAST_TRANSITIONS).fetchall()}
+
+
+def read_open_states(db: sqlite3.Connection) -> list[OpenState]:
+    """The open alert states, oldest first."""
+    rows = db.execute(
+        "SELECT * FROM states WHERE closed_at IS NULL ORDER BY opened_at, rowid_"
+    ).fetchall()
+    return [open_state(r) for r in rows]
+
+
+def read_latest_actions(db: sqlite3.Connection, per_rule: int) -> list[LedgerEntry]:
+    """The newest ``per_rule`` ledger entries of each rule, newest first."""
+    rows = db.execute(
+        f"SELECT {_COLUMNS} FROM (SELECT *, ROW_NUMBER() OVER (PARTITION BY rule ORDER BY"
+        " at DESC, id DESC) AS n FROM actions) WHERE n <= ? ORDER BY at DESC, id DESC",
+        (per_rule,),
+    ).fetchall()
+    return [ledger_entry(r) for r in rows]
+
+
 def read_watches(
     db: sqlite3.Connection, start: datetime, end: datetime
 ) -> list[tuple[datetime, datetime]]:
