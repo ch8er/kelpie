@@ -23,18 +23,21 @@ def parse_duration(value: str | int | float | timedelta) -> timedelta:
         return value
     if isinstance(value, bool) or not isinstance(value, str | int | float):
         raise ValueError(f"invalid duration: {value!r}")
-    if isinstance(value, int | float):
-        return timedelta(seconds=value)
-    m = _DURATION.match(value.strip())
-    if not m or not any(m.groupdict().values()):
-        raise ValueError(f"invalid duration: {value!r}")
-    parts = {k: int(v) for k, v in m.groupdict().items() if v}
-    return timedelta(
-        days=parts.get("d", 0),
-        hours=parts.get("h", 0),
-        minutes=parts.get("m", 0),
-        seconds=parts.get("s", 0),
-    )
+    try:
+        if isinstance(value, int | float):
+            return timedelta(seconds=value)
+        m = _DURATION.match(value.strip())
+        if not m or not any(m.groupdict().values()):
+            raise ValueError(f"invalid duration: {value!r}")
+        parts = {k: int(v) for k, v in m.groupdict().items() if v}
+        return timedelta(
+            days=parts.get("d", 0),
+            hours=parts.get("h", 0),
+            minutes=parts.get("m", 0),
+            seconds=parts.get("s", 0),
+        )
+    except OverflowError:  # past timedelta's range: a message, not a traceback
+        raise ValueError(f"duration out of range: {value!r}") from None
 
 
 def parse_datetime(value: str | datetime) -> datetime:

@@ -139,6 +139,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
   synthetic board of 5,000 tasks one evaluation went from 5.8 s to 0.12 s (#391).
 - A `KELPIE_VIEW_TOKEN` with blanks around it (a trailing newline) now matches the client's
   token instead of refusing every request (#395).
+- A config duration past what Python's `timedelta` can hold (`window = 86400000000000`,
+  `"99999999999d"`) is a config error naming the value, not a traceback (#393).
 
 ### Security
 
