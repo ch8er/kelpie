@@ -585,10 +585,10 @@ Step by step for a first live run with `kelpie doctor`: on a Hermes farm,
 
 To watch a Hermes farm (observe mode), add the section below to `kelpie.toml`
 and install the hooks plugin on the Hermes host; see
-[`src/kelpie/adapters/hermes/README.md`](../src/kelpie/adapters/hermes/README.md). Through
-the Hermes CLI, Hermes carries out stops (rule 10), parks and wakes (rules 2, 12 and the
-dispatch gate), comments, unblocks (rule 4) and reassignments (rule 3), each only in `act`
-mode; WIP commits it cannot make yet.
+[`src/kelpie/adapters/hermes/README.md`](../src/kelpie/adapters/hermes/README.md). Kelpie
+carries out on Hermes, through its CLI, stops (rule 10), parks and wakes (rules 2, 12 and
+the dispatch gate), comments, unblocks (rule 4) and reassignments (rule 3), each only in
+`act` mode; closing a parent and WIP commits stay alerts.
 
 ```toml
 [adapters.hermes]

@@ -585,7 +585,9 @@ numeric user id is, or the owner id `answer_users` maps it to.
 
 The comment is always the answer; the unblock lets the agent read it. It runs only after
 its comment succeeded, only if the board opted in, and only if the task is still blocked
-with the same block (re-checked by the adapter, as Hermes' `unblock` already does).
+with the block the press referred to: the action carries that block (its `since`), and the
+adapter compares it with its own re-read before unblocking (Hermes' `unblock` re-checks
+against its latest snapshot today; the answer path needs it against the press's block).
 
 ### Rejected and replayed presses (the acceptance cases)
 
