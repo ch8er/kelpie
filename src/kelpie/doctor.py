@@ -24,7 +24,7 @@ from urllib.parse import urlsplit
 from kelpie import net
 from kelpie.adapters.claude_code import doctor as claude_code
 from kelpie.adapters.claude_code.adapter import ClaudeCodeAdapter
-from kelpie.adapters.hermes.adapter import HermesAdapter, HermesError, format_age
+from kelpie.adapters.hermes.adapter import FUTURE_SKEW, HermesAdapter, HermesError, format_age
 from kelpie.adapters.hermes.boards import HermesBoards
 from kelpie.adapters.hermes.git_state import read_git_state
 from kelpie.adapters.hermes.proctable import ProcessTable, Procfs, host_table
@@ -324,7 +324,7 @@ def check_hooks(adapter: HermesAdapter | HermesBoards, now: datetime, running: i
     )
     if not spool.exists():
         return _quiet_or_fail(name, f"spool missing ({spool})", fix, running)
-    last = adapter.last_spool_at()
+    last = adapter.last_spool_at(now + FUTURE_SKEW)
     if last is None:
         return _quiet_or_fail(name, f"spool has no readable lines ({spool})", fix, running)
     age = now - last

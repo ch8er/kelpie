@@ -226,6 +226,7 @@ SPOOL_TAIL = 65536  # bytes read from the end of the spool to find its newest li
 MAX_SPOOL_READ = 64 * 1024 * 1024  # bytes read per spool file and snapshot
 WRITER_ATTRIBUTE = "_kelpie.writer"  # a line's (pid, pid_start) until it is checked
 MAX_SPOOL_LINE = 16 * 1024  # a longer spool line is skipped (the plugin writes under 2 KB)
+FUTURE_SKEW = timedelta(minutes=5)  # spool lines dated further ahead are dropped
 DEFAULT_LOOKBACK = timedelta(hours=24)
 DEFAULT_GIT_TIMEOUT = timedelta(seconds=DEFAULT_TIMEOUT)
 # Branches task work starts from: a task's files are what it changed since its newest
@@ -797,12 +798,13 @@ class HermesAdapter:
             return ["spool: disabled"]
         if not self.spool.exists():
             return [f"spool: missing ({self.spool})"]
-        last = self.last_spool_at()
+        last = self.last_spool_at(now + FUTURE_SKEW)
         if last is None:
             return [f"spool: no readable lines ({self.spool})"]
         return [f"spool: last line {format_age(now - last)} ago ({self.spool})"]
 
-    def last_spool_at(self) -> datetime | None:
+    def last_spool_at(self, until: datetime | None = None) -> datetime | None:
+        """When the newest line was written; lines dated after ``until`` are skipped."""
         if self.spool is None:
             return None
         tail = _spool.tail_lines(self.spool, SPOOL_TAIL)
@@ -813,7 +815,7 @@ class HermesAdapter:
                 at = _utc(json.loads(line)["at"])
             except (ValueError, KeyError, TypeError, RecursionError):
                 continue
-            if at is not None:
+            if at is not None and (until is None or at <= until):
                 return at
         return None
 
@@ -837,7 +839,7 @@ class HermesAdapter:
     def snapshot(self, now: datetime) -> Snapshot:
         if now.tzinfo is None:
             raise ValueError("now must be timezone-aware")
-        part, rows = self.read_board(now, self._spans(now - self.lookback))
+        part, rows = self.read_board(now, self._spans(now - self.lookback, now + FUTURE_SKEW))
         if self.tools is not None:
             sessions, slots = self._with_tools(self.tools, part.sessions, part.tasks, rows, now)
             part = replace(part, sessions=sessions, resources=slots)
@@ -1591,8 +1593,8 @@ class HermesAdapter:
         # Agents write next to the spool: no symlink, no FIFO, a byte and a line cap.
         return _spool.spool_lines(self.spool, cutoff, MAX_SPOOL_READ, MAX_SPOOL_LINE)
 
-    def _spans(self, cutoff: datetime) -> tuple[Span, ...]:
-        events = (_event_from_line(line, cutoff) for line in self._spool_lines(cutoff))
+    def _spans(self, cutoff: datetime, until: datetime | None = None) -> tuple[Span, ...]:
+        events = (_event_from_line(line, cutoff, until) for line in self._spool_lines(cutoff))
         return spans_from_hook_events((e for e in events if e is not None), prefix="hermes")
 
     def _check_writers(self, conn: _Connection, spans: tuple[Span, ...]) -> tuple[Span, ...]:
@@ -2067,14 +2069,17 @@ def _own_spans(conn: _Connection, spans: tuple[Span, ...]) -> tuple[Span, ...]:
     return tuple(s for s in spans if mine(s))
 
 
-def _event_from_line(line: str, cutoff: datetime) -> HookEvent | None:
-    """One spool line to a hook event; malformed, foreign or old lines give ``None``."""
+def _event_from_line(
+    line: str, cutoff: datetime, until: datetime | None = None
+) -> HookEvent | None:
+    """One spool line to a hook event; malformed, foreign, older than ``cutoff`` or later
+    than ``until`` (a forged or mis-clocked line would keep a run alive) give ``None``."""
     try:
         rec = json.loads(line)
         if not isinstance(rec, dict) or rec.get("type") not in (TOOL, SESSION_END):
             return None
         at = _utc(rec["at"])
-        if at is None or at < cutoff:
+        if at is None or at < cutoff or (until is not None and at > until):
             return None
         duration = rec.get("duration_ms")
         millis = duration if isinstance(duration, int | float) and duration >= 0 else 0

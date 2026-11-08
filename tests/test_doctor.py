@@ -999,3 +999,18 @@ def test_a_cli_is_checked_only_when_it_is_a_path(
     path.write_text('[adapters.hermes]\ncli = "~/bin/hermes"\nstate_home = false\n')
     check = check_config_paths(load_settings(path), environ={})
     assert check.status == "WARN" and f"adapters.hermes.cli {tmp_path}/bin/hermes" in check.detail
+
+
+def test_hooks_fire_skips_a_spool_line_dated_ahead(tmp_path: Path) -> None:
+    """A forged or mis-clocked future line does not make the spool look fresh (#368)."""
+    from kelpie.adapters.hermes import HermesAdapter
+    from kelpie.doctor import check_hooks
+
+    spool = tmp_path / "spool.jsonl"
+    old = {"type": "tool", "at": (NOW - timedelta(days=2)).timestamp()}
+    ahead = {"type": "tool", "at": (NOW + timedelta(days=30)).timestamp()}
+    spool.write_text(json.dumps(old) + "\n" + json.dumps(ahead) + "\n")
+    adapter = HermesAdapter(db_path=tmp_path / "kanban.db", spool=spool)
+    check = check_hooks(adapter, NOW, 1)
+    assert check.status != "PASS" and "2d" in check.detail
+    assert adapter.status_detail(NOW)[0].startswith("spool: last line 2d")

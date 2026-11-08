@@ -26,7 +26,9 @@ def test_a_stopped_run_is_a_human_wait_not_a_stale_block(tmp_path: Path) -> None
         for _ in range(6):  # 5 minutes a tick, a call every 30 seconds, until Kelpie stops it
             for _ in range(10):
                 farm.advance(seconds=30)
-                farm.spool.tool_call("t_loop", rid, "heartbeat_check", {"target": "all"})
+                farm.spool.tool_call(
+                    "t_loop", rid, "heartbeat_check", {"target": "all"}, at=farm.now
+                )
                 b.update("t_loop", last_heartbeat_at=farm.now)
             farm.tick()
             if b.get("t_loop").status == "blocked":
