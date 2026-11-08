@@ -49,6 +49,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ### Security
 
+- A spool line, Claude Code task file or Hermes event payload nested too deep for the JSON
+  decoder (about 15 KB of `[`) is skipped like any malformed line. It used to raise
+  `RecursionError` out of the adapter, so one such line from any agent left the adapter's
+  whole snapshot out of every tick, and `kelpie spool scrub` aborted (#364).
 - Stop markers of the Claude Code and OpenClaw adapters are written relative to a handle
   on the stop folder, opened without following a symlink: an agent can no longer swap the
   folder for a symlink between Kelpie's check and its write (audit L4, #336).

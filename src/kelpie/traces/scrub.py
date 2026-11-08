@@ -59,7 +59,7 @@ def scrub_line(line: str) -> tuple[str | None, bool]:
         return None, False
     try:
         rec = json.loads(line)
-    except ValueError:
+    except (ValueError, RecursionError):
         return None, False
     if not isinstance(rec, dict):
         return None, False

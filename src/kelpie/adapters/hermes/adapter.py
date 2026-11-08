@@ -465,7 +465,7 @@ def _run_id(raw: Any) -> int | None:
 def _payload(raw: Any) -> dict[str, Any]:
     try:
         data = json.loads(raw) if isinstance(raw, str) else None
-    except ValueError:
+    except (ValueError, RecursionError):  # the board is written by agents
         return {}
     return data if isinstance(data, dict) else {}
 
@@ -769,7 +769,7 @@ class HermesAdapter:
         for line in reversed(tail):
             try:
                 at = _utc(json.loads(line)["at"])
-            except (ValueError, KeyError, TypeError):
+            except (ValueError, KeyError, TypeError, RecursionError):
                 continue
             if at is not None:
                 return at
@@ -1925,7 +1925,7 @@ def _event_from_line(line: str, cutoff: datetime) -> HookEvent | None:
             tool_call_id=str(call_id) if call_id else None,
             attributes=attributes,
         )
-    except (ValueError, KeyError, TypeError, OverflowError):
+    except (ValueError, KeyError, TypeError, OverflowError, RecursionError):
         return None
 
 
