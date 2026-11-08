@@ -122,7 +122,7 @@ Persist what Kelpie saw and did so that the report and before/after comparisons 
 SQLite by default; keep the schema DuckDB-compatible for analytics.
 
 **Acceptance criteria**
-- [ ] Tables for tasks (status history), sessions and conditions (the action ledger table and versioned migrations landed with engine item A; the `states` table with #12). Status history is the same work as #157 and the model-gaps criterion on status history
+- [ ] Tables for tasks (status history), sessions and conditions (the action ledger table and versioned migrations landed with engine item A; the `states` table with #12). Status history is the same work as #157 and the model-gaps criterion on status history; #157 records observed status transitions (`task_transitions`, schema 12) and the report's stages read them, owners, blocks and conditions are not recorded yet
 - [x] Retention for raw action-ledger rows: 30 days by default plus a size cap, both configurable; the in-memory ledger store is bounded too (`[storage] retention`, `max_rows`, #318)
 - [x] Closed alert states (table `states`) pruned with the raw ledger rows (#318; open states and snoozes never)
 - [x] Daily aggregates kept indefinitely (per rule, action kind and mode; executed / suppressed / failed counts), because rule 8's before/after verification needs history; aggregates are written before raw rows are pruned (`action_days`, #318; before/after reads mode changes from them)

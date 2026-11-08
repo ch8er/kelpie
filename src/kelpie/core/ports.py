@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from datetime import datetime
-from typing import Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from kelpie.core.actions import Action, ActionKind, ActionResult
 from kelpie.core.actlock import ActLock
@@ -22,6 +22,9 @@ from kelpie.core.model import (
     Task,
     ToolchainChange,
 )
+
+if TYPE_CHECKING:
+    from kelpie.core.transitions import StatusChange
 
 
 class UnsupportedAction(NotImplementedError):
@@ -244,6 +247,22 @@ class Alerter(Protocol):
         transition and what Kelpie itself did as separate fields (see
         :mod:`kelpie.core.alerts`); an implementation formats from those and must not read
         them back out of text."""
+        ...
+
+
+class TransitionStore(Protocol):
+    """Where the control loop keeps the task status transitions it observes (#157);
+    :class:`kelpie.core.transitions.TransitionRecorder` writes it. Rules never see it."""
+
+    def last_statuses(self) -> Mapping[str, StatusChange]:
+        """The newest stored change per task id (what a restart compares with)."""
+        ...
+
+    def record_tick(
+        self, changes: Sequence[StatusChange], watch_start: datetime, now: datetime
+    ) -> None:
+        """Store a tick's ``changes`` (often none) and extend the recorder's watch that
+        began at ``watch_start`` to ``now``, in one write; raise when it cannot be stored."""
         ...
 
 

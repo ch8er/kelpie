@@ -7,12 +7,13 @@ from collections import defaultdict
 
 from kelpie.core.spans import TokenUsage, usage
 from kelpie.core.stages import STAGES
+from kelpie.core.transitions import history
 from kelpie.report import md
 from kelpie.report.attribution import CallOwners, call_owners
 from kelpie.report.daily import wait_causes
 from kelpie.report.rework import rework_tokens
 from kelpie.report.sections import Section, SectionContext, Spend, register_section
-from kelpie.report.throughput import throughput
+from kelpie.report.throughput import RoleThroughput, throughput, union_hours
 from kelpie.report.waits import WAIT_CAUSES
 
 TITLE = "Farm throughput"
@@ -113,6 +114,8 @@ def throughput_section(ctx: SectionContext) -> Section | None:
         inputs.review_roles,
         ctx.roles,
         wait_causes(inputs, ctx.start, ctx.end).split,  # as the report's biggest wait
+        history(inputs.transitions),
+        inputs.watched,
     )
     if not roles:
         return None
@@ -213,17 +216,45 @@ def throughput_section(ctx: SectionContext) -> Section | None:
                 f"{WAIT_CAUSES[c]} {h:.1f} ({len(r.waited.get(c, ()))})" for c, h in causes
             )
             lines.append(f"- {md.text(r.role)}: {causes_text}")
-    lines += [
-        "",
-        "Stages are rebuilt from the board's current statuses, the sessions and their "
-        "declared end statuses, and Kelpie's own alert states: the board keeps no status "
-        "history, so a status change between sessions is placed at the next known change. "
-        "A task counts from its first known moment of the day, so queue time before its "
-        "first pickup is left out (a lower bound); the board only looks back so far "
-        "(Hermes `lookback`), and a session with no end or heartbeat counts until midnight. "
-        "A task's waiting time counts under what it waits (or last waited) for now: a hold "
-        "label, a person (rule 13), else the kind of its condition; the part inside an open "
-        "outage counts under it (a CI outage of rule 9, a block storm of rule 4, a tool "
-        "failure of rule 10).",
-    ]
+    lines += ["", _stage_source(roles, ctx)]
     return Section(TITLE, tuple(lines))
+
+
+def _stage_source(roles: list[RoleThroughput], ctx: SectionContext) -> str:
+    """Where the stages came from (#157): the status changes Kelpie recorded, for how many
+    of the tasks with stage time, and how long it watched within the day; inference for the
+    rest."""
+    active = {t for r in roles for t in r.active}
+    recorded = {t for r in roles for t in r.recorded}
+    watched = union_hours(
+        [(max(a, ctx.start), min(b, ctx.end)) for a, b in ctx.inputs.watched if b > ctx.start]
+    )
+    day = (ctx.end - ctx.start).total_seconds() / 3600
+    if recorded:
+        source = (
+            f"Status changes come from Kelpie's own record for {len(recorded)} of "
+            f"{len(active)} task(s) (it watched the boards {watched:.1f} of the day's "
+            f"{day:.0f} h; a change is known to within a tick, and one made while "
+            "`kelpie serve` was down is placed at the board's own `status_since` when that "
+            "falls inside the gap). For the other tasks, and while Kelpie was not watching, "
+            "they are inferred: "
+        )
+    else:
+        source = (
+            "No status change Kelpie recorded decided a stage here (`kelpie serve` records "
+            "them from its first tick on), so status changes are inferred: "
+        )
+    return (
+        "Stages are rebuilt from the board's current statuses, the sessions and their "
+        "declared end statuses, Kelpie's own alert states and its recorded status changes. "
+        + source
+        + "the board keeps no status history, so a status change between sessions is placed "
+        "at the next known change, and a task counts from its first known moment of the day "
+        "(queue time before its first pickup is left out: a lower bound). The board only "
+        "looks back so far (Hermes `lookback`), and a session with no end or heartbeat counts "
+        "until midnight. A task's waiting time counts under what it waits (or last waited) "
+        "for now: a hold label, a person (rule 13), else the kind of its condition; the part "
+        "inside an open outage counts under it (a CI outage of rule 9, a block storm of rule "
+        "4, a tool failure of rule 10). Before/after verification of fixes still infers "
+        "stages on both sides, so it compares like with like."
+    )

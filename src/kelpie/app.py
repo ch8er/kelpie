@@ -101,6 +101,7 @@ from kelpie.core.ports import (
     SupportsStop,
     SupportsWait,
     ToolchainReader,
+    TransitionStore,
     declared_actions,
     inapplicable_actions,
 )
@@ -139,6 +140,7 @@ from kelpie.core.storage import (
     SqliteLedgerStore,
     SqliteSpanStore,
 )
+from kelpie.core.transitions import MemoryTransitionStore, TransitionRecorder
 from kelpie.httpguard import Limits, load_server
 from kelpie.instructions.config import InstructionSettings, load_instructions, platform_sources
 from kelpie.instructions.watch import InstructionWatch
@@ -1963,7 +1965,11 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
         raise ConfigError(f"cannot open ledger database {settings.db_path}: {exc}") from exc
     # SQLite keeps open alert states across restarts; in memory they live with the process.
     states: StateStore = store if isinstance(store, SqliteLedgerStore) else MemoryStateStore()
-    ledger_retention = build_ledger_retention(settings, store, states, clock)
+    # Observed task status transitions (#157): in the database next to the ledger.
+    transitions: TransitionStore = (
+        store if isinstance(store, SqliteLedgerStore) else MemoryTransitionStore()
+    )
+    ledger_retention = build_ledger_retention(settings, store, states, clock, transitions)
     metrics.set_alert_channels(c.name for c in settings.alerts.channels)
     costs = cost_report_steps(settings, metrics, costs_source)
     enrich += costs
@@ -1977,6 +1983,7 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
         fallback=hub is None,
         sleep_watch=sleep_watch(settings.engine, clock),
         sleep_log=store.record_sleeps if isinstance(store, SqliteLedgerStore) else None,
+        transitions=TransitionRecorder(transitions),
     )
     farm = None
     if hub is not None:
@@ -2138,9 +2145,11 @@ def build_ledger_retention(
     store: LedgerStore,
     states: StateStore,
     clock: Callable[[], datetime],
+    transitions: TransitionStore | None = None,
 ) -> LedgerRetention:
     """The action ledger's retention (#318): SQLite rows summed per day and pruned on a
-    connection of their own; in memory, entries and closed states older than retention."""
+    connection of their own; in memory, entries and closed states older than retention.
+    Observed status transitions (#157) follow the same retention and row cap."""
     kept = settings.storage
     keep = ledger_keep(settings.engine)
     if isinstance(store, SqliteLedgerStore) and settings.db_path is not None:
@@ -2154,7 +2163,11 @@ def build_ledger_retention(
                     return None
                 if not opened:
                     opened.append(SqliteLedgerPruner(path))
-            return opened[0].prune(now, kept.retention, kept.max_rows, keep)
+            pruned = opened[0].prune(now, kept.retention, kept.max_rows, keep)
+            moved = opened[0].prune_transitions(now, kept.retention, kept.max_rows, keep)
+            if moved:
+                log.info("transition retention: %d row(s) deleted", moved)
+            return pruned
 
         closed = threading.Event()
 
@@ -2171,6 +2184,8 @@ def build_ledger_retention(
         closed = (
             states.prune_closed(now - kept.retention) if isinstance(states, MemoryStateStore) else 0
         )
+        if isinstance(transitions, MemoryTransitionStore):
+            transitions.prune(now - kept.retention, kept.max_rows)
         return gone, closed
 
     # in the control loop's thread: the in-memory stores are not thread-safe

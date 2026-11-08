@@ -21,6 +21,7 @@ from kelpie.core.files import write_private
 from kelpie.core.model import HostSleep, Reconciliation, Snapshot, Snooze, source_agent
 from kelpie.core.spend import SpendConfig
 from kelpie.core.storage import ActionDay, TokenRow
+from kelpie.core.transitions import StatusChange
 from kelpie.report.config import ReportSettings
 from kelpie.report.daily import (
     DailyReport,
@@ -100,6 +101,8 @@ def load_inputs(sources: ReportSources, day: date, board: Snapshot) -> ReportInp
     snoozes: list[Snooze] = []
     tokens: list[TokenRow] = []
     sleeps: list[HostSleep] = []
+    transitions: list[StatusChange] = []
+    watched: list[tuple[datetime, datetime]] = []
     if sources.db_path is not None and sources.db_path.exists():
         with ReportStore(sources.db_path) as store:
             actions = store.actions(history, end)
@@ -111,6 +114,8 @@ def load_inputs(sources: ReportSources, day: date, board: Snapshot) -> ReportInp
             snoozes = store.snoozes(start)
             tokens = store.instruction_tokens(history, end)
             sleeps = store.host_sleeps(history, end)
+            transitions = store.transitions(start, end)
+            watched = store.watched(start, end)
     # Hook spans (platforms without OTLP) live in the adapters, not in the store; the same
     # call reported both ways is kept once.
     merged = merge_hook_spans(
@@ -155,6 +160,8 @@ def load_inputs(sources: ReportSources, day: date, board: Snapshot) -> ReportInp
         instruction_tokens=tokens,
         host_sleeps=sleeps,
         usage=board.usage,
+        transitions=transitions,
+        watched=watched,
         agents=frozenset(a for t in board.tasks if (a := source_agent(t.source)) is not None),
     )
 

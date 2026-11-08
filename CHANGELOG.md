@@ -17,6 +17,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
   cannot tell the question was seen, and honours snoozes on the asking task. Blocked and
   waiting tasks and questions to people stay with rules 4, 2 and 13, so nothing is alerted
   twice.
+- `kelpie serve` records the task status changes it observes on every tick (status and the
+  platform's own status, per task, board and adapter) in its database, and the daily
+  report's "Farm throughput" stages use them where the board keeps no history: queue time
+  before a task's first pickup, and status changes between sessions. The section says
+  which source it used. Recorded rows follow `[storage] retention` and `max_rows` (#157).
+
+### Changed
+
+- **The database schema is now 12**: `kelpie serve` migrates an older database at start.
+  Older Kelpie versions (0.1.0a3 and before) refuse a database once it is migrated, and
+  `kelpie report` and `kelpie status` of this version ask to run `kelpie serve` once on a
+  database not yet migrated (#157).
 
 ## [0.1.0a3] - 2026-11-06
 

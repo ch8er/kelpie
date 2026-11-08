@@ -156,6 +156,8 @@ from kelpie.core.spans import (
 from kelpie.core.spend import SpendConfig, SpendMode, gap_causes
 from kelpie.core.states import OpenState
 from kelpie.core.storage import ActionDay, TokenRow
+from kelpie.core.transitions import StatusChange
+from kelpie.core.transitions import history as recorded_history
 from kelpie.report import farm, intervals, md
 from kelpie.report.attribution import CallOwners, call_owners
 from kelpie.report.boards import BoardLine, board_lines, rest_line
@@ -397,6 +399,11 @@ class ReportInputs:
     # The platforms' own usage records (``Snapshot.usage``, #271): which task and role a
     # session worked for, when the spans name only the session (#197 items 6 and 7).
     usage: Sequence[SessionUsage] = ()
+    # Task status changes Kelpie recorded (#157): those seen within the day and each task's
+    # last one before it; ``watched`` when the recorder ran, overlapping the day. Stages use
+    # them where the board keeps no history, only while Kelpie watched.
+    transitions: Sequence[StatusChange] = ()
+    watched: Sequence[tuple[datetime, datetime]] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -711,6 +718,8 @@ def _boards(
             inputs.review_roles,
             roles,
             causes[0].split,
+            recorded_history(inputs.transitions),
+            inputs.watched,
         )
         return biggest_wait(per_role, part.tasks, causes[0], inputs.farm)
 
@@ -829,6 +838,8 @@ def _biggest_wait(
         inputs.review_roles,
         roles,
         causes.split,
+        recorded_history(inputs.transitions),
+        inputs.watched,
     )
     explained = sum(
         r.waits.get(c, 0.0)

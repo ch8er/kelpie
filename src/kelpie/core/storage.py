@@ -35,6 +35,7 @@ from kelpie.core.model import (
     Span,
     SpanKind,
     SpanTotals,
+    Status,
     capped,
 )
 from kelpie.core.snooze import EXPIRED_KEPT, MAX_BY, MAX_REASON, PRUNE_AFTER
@@ -51,6 +52,7 @@ from kelpie.core.spans import (
     last_at,
 )
 from kelpie.core.states import OpenState
+from kelpie.core.transitions import StatusChange
 
 _V1 = """
 CREATE TABLE actions (
@@ -269,12 +271,40 @@ CREATE TABLE ledger_days (
     summed_at TEXT NOT NULL
 );
 """
+# Task status transitions Kelpie observed (#157, kelpie.core.transitions): one row when a
+# task is first seen (previous NULL) and one each time its status or platform status
+# changes, never its text. ``at`` is the tick that saw it, ``after_at`` the last time the
+# old status was seen, ``since`` the board's own status_since then. Pruned with the
+# ledger's ``[storage] retention`` and ``max_rows``, keeping each task's status at the cut.
+# ``transition_watches``: one row per recorder run, from its first tick to its latest one
+# (a recorded status is evidence only while Kelpie watched; across a downtime it is not).
+_V12 = """
+CREATE TABLE transition_watches (
+    started_at TEXT PRIMARY KEY,
+    until_at   TEXT NOT NULL
+);
+CREATE TABLE task_transitions (
+    id                INTEGER PRIMARY KEY,
+    at                TEXT NOT NULL,
+    task_id           TEXT NOT NULL,
+    status            TEXT NOT NULL,
+    since             TEXT NOT NULL,
+    platform_status   TEXT,
+    previous          TEXT,
+    previous_platform TEXT,
+    after_at          TEXT,
+    board             TEXT,
+    source            TEXT
+);
+CREATE INDEX task_transitions_task ON task_transitions (task_id, at);
+CREATE INDEX task_transitions_at ON task_transitions (at);
+"""
 SNOOZES_SINCE = 8  # the first schema with snoozes: read-only readers accept it (no growth)
 
 # version -> script that upgrades from version - 1. Append, never edit a released one.
 MIGRATIONS: dict[int, str] = {
     1: _V1, 2: _V2, 3: _V3, 4: _V4, 5: _V5, 6: _V6, 7: _V7, 8: _V8, 9: _V9, 10: _V10,
-    11: _V11,
+    11: _V11, 12: _V12,
 }  # fmt: skip
 SCHEMA_VERSION = max(MIGRATIONS)
 # Characters of an action's reason, its executor's detail and an alert state's summary
@@ -391,6 +421,38 @@ class SqliteLedgerStore:
     def host_sleeps(self, start: datetime, end: datetime) -> list[HostSleep]:
         with self._lock:
             return read_host_sleeps(self._db, start, end)
+
+    def record_tick(
+        self, changes: Sequence[StatusChange], watch_start: datetime, now: datetime
+    ) -> None:
+        """Store a tick's observed task status changes (#157) and extend the recorder's
+        watch to ``now``, in one transaction."""
+        rows = [_transition_row(c) for c in changes]
+
+        def write(db: sqlite3.Connection) -> sqlite3.Cursor:
+            if rows:
+                db.executemany(_INSERT_TRANSITION, rows)
+            return db.execute(
+                "INSERT INTO transition_watches (started_at, until_at) VALUES (?, ?)"
+                " ON CONFLICT (started_at) DO UPDATE SET until_at = excluded.until_at",
+                (_ts(watch_start), _ts(now)),
+            )
+
+        self._write(write)
+
+    def watched(self, start: datetime, end: datetime) -> list[tuple[datetime, datetime]]:
+        with self._lock:
+            return read_watches(self._db, start, end)
+
+    def last_statuses(self) -> dict[str, StatusChange]:
+        """The newest stored transition per task id."""
+        with self._lock:
+            rows = self._db.execute(_LAST_TRANSITIONS).fetchall()
+        return {r["task_id"]: status_change(r) for r in rows}
+
+    def transitions(self, start: datetime, end: datetime) -> list[StatusChange]:
+        with self._lock:
+            return read_transitions(self._db, start, end)
 
     def by_fingerprint(self, fingerprint: str, after: datetime) -> Sequence[LedgerEntry]:
         sql = f"SELECT {_COLUMNS} FROM actions WHERE fingerprint = ? AND at > ? ORDER BY at, id"
@@ -1451,6 +1513,78 @@ CREATE TABLE IF NOT EXISTS host_sleeps (
 HOST_SLEEPS_KEEP = timedelta(days=30)
 
 
+_TRANSITION_COLUMNS = (
+    "at, task_id, status, since, platform_status, previous, previous_platform, after_at,"
+    " board, source"
+)
+_INSERT_TRANSITION = (
+    f"INSERT INTO task_transitions ({_TRANSITION_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+)
+_LAST_TRANSITIONS = (
+    "SELECT * FROM task_transitions WHERE id IN"
+    " (SELECT MAX(id) FROM task_transitions GROUP BY task_id)"
+)
+
+
+def _opt_ts(at: datetime | None) -> str | None:
+    return None if at is None else _ts(at)
+
+
+def _transition_row(c: StatusChange) -> tuple[object, ...]:
+    return (
+        _ts(c.at),
+        c.task_id,
+        str(c.status),
+        _ts(c.since),
+        c.platform_status,
+        None if c.previous is None else str(c.previous),
+        c.previous_platform,
+        _opt_ts(c.after),
+        c.board,
+        c.source,
+    )
+
+
+def status_change(r: sqlite3.Row) -> StatusChange:
+    return StatusChange(
+        at=datetime.fromisoformat(r["at"]),
+        task_id=r["task_id"],
+        status=Status(r["status"]),
+        since=datetime.fromisoformat(r["since"]),
+        platform_status=r["platform_status"],
+        previous=None if r["previous"] is None else Status(r["previous"]),
+        previous_platform=r["previous_platform"],
+        after=None if r["after_at"] is None else datetime.fromisoformat(r["after_at"]),
+        board=r["board"],
+        source=r["source"],
+    )
+
+
+def read_transitions(db: sqlite3.Connection, start: datetime, end: datetime) -> list[StatusChange]:
+    """Observed status transitions (#157) seen in ``[start, end)``, plus each task's newest
+    one before ``start`` (its status when the range began), oldest first."""
+    rows = db.execute(
+        "SELECT * FROM task_transitions WHERE (at >= ? AND at < ?) OR id IN"
+        " (SELECT MAX(id) FROM task_transitions WHERE at < ? GROUP BY task_id)"
+        " ORDER BY at, id",
+        (_ts(start), _ts(end), _ts(start)),
+    ).fetchall()
+    return [status_change(r) for r in rows]
+
+
+def read_watches(
+    db: sqlite3.Connection, start: datetime, end: datetime
+) -> list[tuple[datetime, datetime]]:
+    """When the transition recorder watched (#157), the runs that overlap ``[start, end)``,
+    oldest first: ``(first tick, latest tick)``."""
+    rows = db.execute(
+        "SELECT started_at, until_at FROM transition_watches WHERE started_at < ? AND"
+        " until_at >= ? ORDER BY started_at",
+        (_ts(end), _ts(start)),
+    ).fetchall()
+    return [(datetime.fromisoformat(a), datetime.fromisoformat(b)) for a, b in rows]
+
+
 def read_host_sleeps(db: sqlite3.Connection, start: datetime, end: datetime) -> list[HostSleep]:
     """Sleeps that overlap ``[start, end)``, by start; none when the table was never
     created."""
@@ -1524,6 +1658,19 @@ def _day_of(at: str) -> date:
     return datetime.fromisoformat(at).astimezone(UTC).date()
 
 
+# The row cap of task_transitions: rows a newer row of the same task follows, oldest first;
+# then any row, oldest first (both only before the ledger's own windows).
+_CAP_OLDER = (
+    "DELETE FROM task_transitions WHERE id IN (SELECT t.id FROM task_transitions t"
+    " WHERE t.at < ? AND EXISTS (SELECT 1 FROM task_transitions n"
+    " WHERE n.task_id = t.task_id AND n.id > t.id) ORDER BY t.at, t.id LIMIT ?)"
+)
+_CAP_ANY = (
+    "DELETE FROM task_transitions WHERE id IN (SELECT id FROM task_transitions"
+    " WHERE at < ? ORDER BY at, id LIMIT ?)"
+)
+
+
 class SqliteLedgerPruner:
     """Retention of the raw action ledger and of closed alert states (#318), on a
     connection of its own: the ledger store's lock is never taken, and every write is a
@@ -1577,6 +1724,50 @@ class SqliteLedgerPruner:
             (_ts(now - retention),),
         )
         return LedgerPruned(days, actions, states)
+
+    def prune_transitions(
+        self, now: datetime, retention: timedelta, max_rows: int, keep: timedelta
+    ) -> int:
+        """Delete observed task status transitions (#157) seen more than ``retention``
+        before ``now``, except each task's newest one before that cut (its status at the
+        cut, and what a restart compares with); then, while more than ``max_rows`` are
+        left, the oldest seen at least ``keep`` before ``now`` (rows that are not a task's
+        newest first). Watches that ended before the cut go too. Returns the transitions deleted."""
+        cut = _ts(now - retention)
+        deleted = self._delete(
+            "DELETE FROM task_transitions WHERE id IN (SELECT id FROM task_transitions"
+            " WHERE at < ? AND id NOT IN"
+            " (SELECT MAX(id) FROM task_transitions WHERE at < ? GROUP BY task_id)"
+            " ORDER BY at LIMIT ?)",
+            (cut, cut),
+        )
+        self._delete(  # watches that ended before the cut (not counted)
+            "DELETE FROM transition_watches WHERE started_at IN (SELECT started_at FROM"
+            " transition_watches WHERE until_at < ? LIMIT ?)",
+            (cut,),
+        )
+        floor = _ts(now - keep)
+        excess = self._count_transitions() - max(0, max_rows)
+        # history before a task's newest row first, then the newest rows themselves
+        for older in (_CAP_OLDER, _CAP_ANY):
+            while excess > 0 and not self._closing.is_set():
+                with self._lock:
+                    if self._closing.is_set():
+                        break
+                    with self._db:
+                        n = self._db.execute(older, (floor, min(self._batch, excess))).rowcount
+                if self._on_batch is not None and n:
+                    self._on_batch()
+                if not n:
+                    break
+                deleted, excess = deleted + n, excess - n
+        return deleted
+
+    def _count_transitions(self) -> int:
+        with self._lock:
+            if self._closing.is_set():
+                return 0
+            return int(self._db.execute("SELECT COUNT(*) FROM task_transitions").fetchone()[0])
 
     def _prune_day(self, day: date, now: datetime) -> tuple[int, int]:
         lo, hi = _day_start(day), _day_start(day + timedelta(days=1))

@@ -44,6 +44,7 @@ from kelpie.core.model import HostSleep, Snapshot
 from kelpie.core.ports import ActionConnector, Alerter, Deferred, PlatformAdapter
 from kelpie.core.rule import Rule
 from kelpie.core.states import MemoryStateStore, OpenState, StateStore, StateTracker, Transition
+from kelpie.core.transitions import TransitionRecorder
 
 log = logging.getLogger(__name__)
 
@@ -105,6 +106,9 @@ class Engine:
     sleep_watch: SleepWatch | None = None
     # Stores each host sleep a snapshot carries once (the daily report lists them).
     sleep_log: Callable[[Sequence[HostSleep]], object] | None = None
+    # Records the task status transitions each snapshot shows (#157), before rules run; a
+    # failing store is logged and never stops the tick. None: nothing recorded.
+    transitions: TransitionRecorder | None = None
     _by_name: dict[str, Rule] = field(init=False, default_factory=dict)
     _detail: str | None = field(init=False, default=None)  # of the action being handled
     ledger: ActionLedger = field(init=False)
@@ -600,6 +604,8 @@ class Engine:
             if mine:
                 snapshot = replace(snapshot, host_sleeps=merge_sleeps(snapshot.host_sleeps, mine))
         self._log_sleeps(snapshot.host_sleeps)
+        if self.transitions is not None:
+            self.transitions.record(snapshot)
         return self.execute(self.evaluate(snapshot), snapshot)
 
     def _log_sleeps(self, sleeps: Sequence[HostSleep]) -> None:
