@@ -139,7 +139,7 @@ and a `kelpie` CLI with `serve`, `check-config` and `run-once --dry-run`.
 
 **Acceptance criteria**
 - [x] `uv run kelpie serve` starts the loop with the configured adapter
-- [x] `kelpie run-once --dry-run` prints the actions for a single snapshot and exits: every loaded rule on one read-only snapshot (offline; `--refresh` adds GitHub), with each rule's mode; nothing dispatched or written; `--json` (#PR)
+- [x] `kelpie run-once --dry-run` prints the actions for a single snapshot and exits: every loaded rule on one read-only snapshot (offline; `--refresh` adds GitHub), with each rule's mode; nothing dispatched or written; `--json` (#379)
 - [x] Secrets can be supplied via environment variables, never only in the file
 - [x] Invalid config fails fast with a readable error
 
