@@ -8,6 +8,8 @@ description: >
   someone else's work. This fixture uses a smaller representative sample (8 of 10 returns
   are merge conflicts) with the same shape. Kelpie analyzes return causes and issues a
   recommendation (alert listing the hot files) and warns in-progress tasks touching them.
+  Some returns carry the conflicting files the platform recorded (``files``) instead of
+  naming them in the text.
 rule: return_causes
 config:
   window: "24h"
@@ -50,9 +52,10 @@ snapshot:
       owner_id: agent-dev-3
       files: [src/app/routes.py, src/app/types.py, src/app/webhooks.py]
       returns:
-        - {at: "2026-03-02T08:30:00+00:00", reason: "merge conflict in src/app/routes.py", category: merge_conflict}
-        - {at: "2026-03-02T10:50:00+00:00", reason: "merge conflict in src/app/types.py", category: merge_conflict}
-        - {at: "2026-03-02T12:40:00+00:00", reason: "merge conflict in src/app/routes.py", category: merge_conflict}
+        # The platform recorded the conflicting files apart from the text (Return.files).
+        - {at: "2026-03-02T08:30:00+00:00", reason: "CONFLICT (content): merge conflict", category: merge_conflict, files: [src/app/routes.py]}
+        - {at: "2026-03-02T10:50:00+00:00", reason: "CONFLICT (content): merge conflict", category: merge_conflict, files: [src/app/types.py]}
+        - {at: "2026-03-02T12:40:00+00:00", reason: "merge conflict in src/app/routes.py", category: merge_conflict, files: [src/app/routes.py]}
     - id: T-704
       title: "Add report export"
       status: done

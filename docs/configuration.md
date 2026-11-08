@@ -722,7 +722,9 @@ Why tasks come back (incident 7). Returns (`Task.returns`; Hermes: a reviewer's 
 requested and reopened reviews) are grouped by cause over a window: what sent a task
 back (a merge conflict, a failing or flaky test, else what review found:
 `review_findings`), not the stage it went through. When merge conflicts dominate and some
-files keep coming up in them, Kelpie raises one alert with the hot files and a
+files keep coming up in them (the files a platform recorded for a conflict, `Return.files`,
+which also needs a conflict category or wording; else the paths its reason names), Kelpie
+raises one alert with the hot files and a
 recommendation, and comments on in-progress tasks that touch them. Otherwise a dominant
 cause gets an informational alert with the shares by cause; review findings are not
 reported as dominant when every return of the window was filed under a stage (a Hermes

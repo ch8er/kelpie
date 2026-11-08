@@ -23,7 +23,8 @@ conflict). The share of each cause is computed over every return in the window, 
 finished tasks too. On a live farm every return went through review, and the rule kept
 reporting that 95 to 100% of them were "review".
 
-**Hot files.** The files a conflict names: paths in its reason, matched to the task's files
+**Hot files.** The files a conflict names: the files the platform recorded for it
+(``Return.files``) when there are any, else paths in its reason; matched to the task's files
 (``Task.files``; a bare file name is resolved to the one file of that name any task
 reports), minus ``expected_shared`` (glob patterns of files many tasks are meant to edit;
 without its own list, this rule uses rule 12's, ``conflict_warning`` ``expected_shared``).
@@ -314,13 +315,15 @@ class ReturnCauses:
         return any(fnmatchcase(path, p) for p in self.expected_shared)
 
     def _files(self, task: Task, r: Return, names: dict[str, set[str]]) -> set[str]:
-        """The files a conflict names: paths in its reason, a bare file name resolved to the
-        one file of that name the tasks report (this task's first)."""
+        """The files a conflict names: those the platform recorded (``Return.files``), else
+        paths in its reason; a bare file name resolved to the one file of that name the
+        tasks report (this task's first)."""
         mine = {_clean(f) for f in task.files}
         found: set[str] = set()
-        for token in _PATH.findall(r.reason[:MAX_REASON]):
+        recorded = [t for t in (_clean(f.strip()) for f in r.files) if t]
+        for token in recorded or _PATH.findall(r.reason[:MAX_REASON]):
             token = _clean(token)
-            if _NOT_FILES.search(token):
+            if not recorded and _NOT_FILES.search(token):
                 continue
             if "/" in token:
                 found.add(token)

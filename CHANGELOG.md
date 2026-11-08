@@ -90,6 +90,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
   report's "Farm throughput" stages use them where the board keeps no history: queue time
   before a task's first pickup, and status changes between sessions. The section says
   which source it used. Recorded rows follow `[storage] retention` and `max_rows` (#157).
+- `Return.files`: the files a merge conflict was in, when the platform records them apart
+  from the reason (at most 100). `return_causes` counts them for its hot files and parses
+  the reason only for a return without them, so returns without files (every adapter today)
+  behave as before; fixture 07 has returns of both kinds.
 - Rule 7 (`resources`) says when it is blind: if the host resources cannot be read
   (Prometheus down, unreachable, refusing the token), one warning names the cause and since
   when, once per cause, and a "resolved" notice follows when readings come back (until now
