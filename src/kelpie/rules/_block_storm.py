@@ -47,6 +47,7 @@ import re
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
+from functools import lru_cache
 
 from kelpie.core.actions import Action, ActionKind, Severity
 from kelpie.core.conditions import linked_conditions
@@ -116,8 +117,16 @@ def _own_stripped(reason: str, *own: str | None) -> str:
     platform wrote it, without a multi-host hub's or a board's prefix (``Task.local_id``)."""
     text = reason[:MAX_REASON]
     for item in {o for o in own if o}:
-        text = re.sub(rf"(?<![\w.-]){re.escape(item)}(?![\w-])", " ", text, flags=re.I)
+        text = _word(item, re.I).sub(" ", text)
     return text
+
+
+# Task and owner ids are many and stable across ticks: past re's own cache (512 patterns),
+# compiling them per call made every tick of a large board recompile each one (#248).
+@lru_cache(maxsize=4096)
+def _word(item: str, flags: int = 0) -> re.Pattern[str]:
+    """``item`` as a whole id: not inside a longer id, a dotted name or a path."""
+    return re.compile(rf"(?<![\w.-]){re.escape(item)}(?![\w-])", flags)
 
 
 def _local(item_id: str | None, host: str | None) -> str | None:
@@ -331,7 +340,7 @@ def _person(snapshot: Snapshot, reason: str, task: Task) -> str | None:
     for owner in humans:
         for own in {owner.id, _local(owner.id, owner.host)} - {None, ""}:
             assert own is not None
-            if re.search(rf"(?<![\w.-]){re.escape(own.lower())}(?![\w-])", text):
+            if _word(own.lower()).search(text):
                 return owner.id
     for owner in humans:
         role = owner.role.lower().strip()
