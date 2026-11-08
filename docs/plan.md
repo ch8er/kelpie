@@ -246,7 +246,6 @@ The plan marks only multi-host and the audit as blocking the release. Several ol
 
 - `kelpie status` as a farm view
 - ledger retention and status history in storage
-- the cloud setup script
 - `kelpie run-once`
 - the rest of the model gaps
 - the live-run records

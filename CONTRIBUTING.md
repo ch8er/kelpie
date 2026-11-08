@@ -13,6 +13,16 @@ cd kelpie
 uv sync            # creates .venv and installs runtime + dev dependencies
 ```
 
+On a fresh machine or cloud session, `scripts/bootstrap.sh` does the whole setup in one
+step: it installs uv when it is missing (`pip install --user uv`, else uv's installer),
+makes sure uv finds a Python 3.12 (installing one only when there is none) and runs
+`uv sync --frozen`, as CI does. It is idempotent and safe to re-run: every step is a no-op
+when its result is already there, and it changes no tracked file and nothing in git.
+`scripts/bootstrap.sh --check` then runs the checks below and prints how long each step
+took. From a fresh clone with an empty uv cache the setup takes about 10 seconds when the
+host has Python 3.12 (a uv-managed Python adds a download); the full test suite then
+takes several minutes on its own, so for a quick start run only the tests you touch.
+
 Before pushing, run the same checks CI runs:
 
 ```bash
