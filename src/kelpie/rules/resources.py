@@ -55,6 +55,11 @@ them, and with none newer than ``path_max_age`` (3h) that the script stopped. Gr
 utilization threshold gets the forecast in that alert, at the worse of the two severities,
 not a second alert.
 
+**Blind** (no data is not "all fine"). When the host resources could not be read this tick
+(``Snapshot.resources_failure``: Prometheus down, unreachable, refusing the token), one
+``warning`` says that every host check is blind, with the cause: a lasting state announced
+once per cause (a new cause is a "changed" notice), resolved when readings come back.
+
 Every alert is about a lasting state: a stable ``state`` and ``key`` per resource, so the
 engine alerts when it opens, when it gets worse and when it ends, not on every tick.
 """
@@ -63,7 +68,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from kelpie.core.actions import Action, ActionKind, Severity
@@ -75,6 +80,7 @@ from kelpie.rules._alerts import alert_params, count
 from kelpie.rules._tasks import responsible
 
 NAME = "resources"
+SOURCE_STATE = f"{NAME}:source"  # host resources could not be read
 DEFAULT_MAX_READING_AGE = timedelta(minutes=10)
 DEFAULT_QUOTA_WARNING = 0.1
 DEFAULT_RATE_LIMIT_EVENTS = 20
@@ -173,7 +179,42 @@ class Resources:
     name: str = NAME
 
     def evaluate(self, snapshot: Snapshot) -> Sequence[Action]:
-        return [*self._host_alerts(snapshot), *self._provider_alerts(snapshot)]
+        return [
+            *self._source_alert(snapshot),
+            *self._host_alerts(snapshot),
+            *self._provider_alerts(snapshot),
+        ]
+
+    # --- the source ---------------------------------------------------------------------
+
+    def _source_alert(self, snapshot: Snapshot) -> list[Action]:
+        """Host resources could not be read: every host check is blind until they are. One
+        lasting state, announced once per cause (its key) and resolved when they read."""
+        failure = snapshot.resources_failure
+        if failure is None:
+            return []
+        cause = failure.cause
+        return [
+            Action(
+                ActionKind.ALERT,
+                NAME,
+                f"Kelpie cannot read host resources ({cause}) since "
+                f"{failure.since.astimezone(UTC):%Y-%m-%d %H:%M} UTC: disk, memory, load and "
+                "process alerts see no data until the source answers again. Check that "
+                "Prometheus is up and reachable from Kelpie, and the URL and token in "
+                "[resources.prometheus] (kelpie doctor checks them).",
+                severity=Severity.WARNING,
+                key=f"{SOURCE_STATE}:{cause}",
+                state=SOURCE_STATE,
+                since=failure.since,
+                params={
+                    "cause": cause,
+                    **alert_params(
+                        f"Host resources cannot be read ({cause}): host checks are blind"
+                    ),
+                },
+            )
+        ]
 
     # --- hosts --------------------------------------------------------------------------
 
@@ -280,6 +321,8 @@ class Resources:
         the current reading, not the alert that opened it. None for the others (heavy
         tasks, quotas, credentials): the engine's general notice. A reading is matched by
         its name, which the shipped source prefixes with the host ("host-a:/")."""
+        if state_id == SOURCE_STATE:
+            return "Host resources are read again: disk, memory and load are watched."
         if state_id.endswith(":heavy"):
             return None  # a host's heavy tasks (a host may be named "memory")
         rule, _, rest = state_id.partition(":")

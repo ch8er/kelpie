@@ -84,6 +84,7 @@ from kelpie.core.model import (
     ReportedCost,
     Snapshot,
     Snooze,
+    SourceFailure,
     Span,
     SpanKind,
     Task,
@@ -93,6 +94,7 @@ from kelpie.core.ports import (
     CostReportReader,
     PlatformAdapter,
     ProviderReader,
+    ResourceHealth,
     ResourceReader,
     SnapshotSource,
     SupportsActLock,
@@ -1179,9 +1181,11 @@ def merged_snapshot(
     the snapshot's session owners and task labels are recorded so spend stays attributed
     after adapters drop them. A failed spend read is logged and counted, and that tick
     carries the last good budget state with ``budgets_ok`` false. With ``resources``, host
-    readings (Prometheus) are added; a reader that raises is logged and counted, and the
-    tick goes on without them. With ``providers``, LLM provider statuses and limit hits are
-    added (before budgets, which forecast from the hits), under the same rule. With
+    readings (Prometheus) are added, with why there are none (``resources_failure``); a
+    reader that raises is logged and counted, and the tick goes on without its readings,
+    marked as failing since its first raise. With ``providers``, LLM provider statuses and
+    limit hits are added (before budgets, which forecast from the hits), under the same
+    rule. With
     ``offenders``, repeated huge-output offenders (rule ``output_offenders``) are added,
     recomputed hourly from the span store; a failed read is logged and counted. With
     ``snoozes``, ``Snapshot.snoozes`` is filled on the merged board (the agents' boards
@@ -1194,6 +1198,7 @@ def merged_snapshot(
     """
     last = _LastBudgets()
     carried: dict[str, Contribution] = {}  # per connector step, from its last good tick
+    raising = _Raising()  # the resource reader's run of raised reads
 
     def source() -> Snapshot:
         now = clock()
@@ -1281,16 +1286,29 @@ def merged_snapshot(
                 )
         if resources is not None:
             try:
-                merged = replace(merged, resources=merged.resources + tuple(resources.read(now)))
-                if isinstance(resources, ToolchainReader):
-                    merged = replace(
-                        merged,
-                        toolchain_changes=merged.toolchain_changes
-                        + tuple(resources.toolchain_changes(now)),
-                    )
+                read = tuple(resources.read(now))
+                failure = resources.failure() if isinstance(resources, ResourceHealth) else None
+                changes = (
+                    tuple(resources.toolchain_changes(now))
+                    if isinstance(resources, ToolchainReader)
+                    else ()
+                )
             except Exception as exc:
                 log.error("resource source failed: %s", type(exc).__name__)
                 metrics.resource_failed("unexpected")
+                # since the first of a run of such failures
+                raising.since = raising.since or now
+                merged = replace(
+                    merged, resources_failure=SourceFailure("unexpected", raising.since)
+                )
+            else:
+                raising.since = None
+                merged = replace(
+                    merged,
+                    resources=merged.resources + read,
+                    resources_failure=failure,
+                    toolchain_changes=merged.toolchain_changes + changes,
+                )
         if providers is not None:
             try:
                 statuses, hits = providers.read(now)
@@ -1571,6 +1589,13 @@ def snooze_reader(settings: Settings, store: LedgerStore) -> SnoozeReader:
             store.set_snooze_growth,
         )
     return SnoozeReader(settings.snooze)
+
+
+@dataclass(slots=True)
+class _Raising:
+    """When a reader began raising on every read (None: its last read did not raise)."""
+
+    since: datetime | None = None
 
 
 @dataclass(slots=True)

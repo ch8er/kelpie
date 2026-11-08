@@ -594,3 +594,46 @@ def test_resolved_texts_for_unknown_growth_stale_readings_and_others() -> None:
         assert rule.resolved(other, unknown) is None, other
     off = Resources(thresholds={**Resources().thresholds, K.DISK: Thresholds(None, None)})
     assert "under its threshold" not in (off.resolved(state, unknown) or "")
+
+
+# --- the source itself cannot be read ------------------------------------------------
+
+
+def test_an_unreadable_source_alerts_once_per_cause() -> None:
+    from kelpie.core.model import SourceFailure
+    from kelpie.rules.resources import SOURCE_STATE
+
+    rule = Resources()
+    since = NOW - timedelta(minutes=7)
+    (alert,) = rule.evaluate(Snapshot(now=NOW, resources_failure=SourceFailure("http_auth", since)))
+    assert alert.kind is ActionKind.ALERT and alert.severity is Severity.WARNING
+    assert alert.state == SOURCE_STATE and alert.since == since
+    assert alert.key == f"{SOURCE_STATE}:http_auth" and alert.params["cause"] == "http_auth"
+    assert "since 2026-03-02 11:53 UTC" in alert.reason
+    assert "needed" not in alert.params  # no task: what to check is in the reason
+    assert "Prometheus is up" in alert.reason
+    # Another cause is another key of the same state: a "changed" notice, not a new alert.
+    (other,) = rule.evaluate(Snapshot(now=NOW, resources_failure=SourceFailure("timeout", since)))
+    assert other.state == alert.state and other.key != alert.key
+    # Read again: nothing, and the notice says so.
+    assert rule.evaluate(Snapshot(now=NOW)) == []
+    assert "read again" in (rule.resolved(SOURCE_STATE, Snapshot(now=NOW)) or "")
+
+
+def test_an_unreadable_source_through_the_engine_is_said_once() -> None:
+    from kelpie.core.config import EngineConfig, Mode
+    from kelpie.core.engine import Engine
+    from kelpie.core.model import SourceFailure
+    from tests.fakes import FakeAdapter, FakeAlerter
+
+    alerter = FakeAlerter()
+    config = EngineConfig(dry_run=False, default_mode=Mode.SUGGEST)
+    engine = Engine([Resources()], adapters=[FakeAdapter()], alerter=alerter, config=config)  # type: ignore[list-item]
+    down = SourceFailure("connection", NOW)
+    for minute in range(0, 60, 5):
+        at = NOW + timedelta(minutes=minute)
+        engine.tick(lambda at=at: Snapshot(now=at, resources_failure=down))
+    assert len(alerter.events) == 1
+    for minute in range(60, 120, 5):
+        engine.tick(lambda m=minute: Snapshot(now=NOW + timedelta(minutes=m)))
+    assert len(alerter.events) == 2 and "read again" in alerter.events[-1].reason

@@ -5,7 +5,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from kelpie.core.model import Resource, ResourceKind
+from kelpie.core.model import Resource, ResourceKind, SourceFailure
 from kelpie.core.ports import ResourceReader
 from kelpie.resources import prometheus
 from kelpie.resources.prometheus import (
@@ -340,17 +340,22 @@ def test_warns_once_per_cause_and_again_after_recovery(caplog: pytest.LogCapture
             prom.status = 500
             for i in range(3):  # three failed fetches
                 assert source.read(NOW + timedelta(seconds=10 * i)) == ()
+            # rule 7 hears of it with the cause and when the fetches began failing
+            assert source.failure() == SourceFailure("http_error", NOW)
             warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
             assert len(warnings) == 1
             prom.status = 401  # a new cause warns again
             source.read(NOW + timedelta(seconds=30))
             assert len([r for r in caplog.records if r.levelno == logging.WARNING]) == 2
+            assert source.failure() == SourceFailure("http_auth", NOW)  # the run's start
             prom.status = 200
             source.read(NOW + timedelta(seconds=40))
             assert any("answers again" in r.message for r in caplog.records)
+            assert source.failure() is None
             prom.status = 500  # an outage after the recovery warns once more
             source.read(NOW + timedelta(seconds=50))
             assert len([r for r in caplog.records if r.levelno == logging.WARNING]) == 3
+            assert source.failure() == SourceFailure("http_error", NOW + timedelta(seconds=50))
     assert observer.failures == ["http_error"] * 3 + ["http_auth", "http_error"]
     assert observer.reads == [0]
 
@@ -646,3 +651,37 @@ def test_no_load_readings_until_the_os_query_first_answers() -> None:
         assert "host-a:memory" in first  # only load waits
         prom.responses[text(cfg, "os")] = vector(({**B, "sysname": "Linux"}, "1"))
         assert "host-b:load1" in by_name(source.read(NOW + timedelta(minutes=1)))
+
+
+def test_the_snapshot_carries_why_host_resources_are_missing() -> None:
+    from kelpie.app import merged_snapshot
+    from kelpie.core.ports import ResourceHealth
+    from kelpie.metrics import Metrics
+
+    class Failing:
+        def __init__(self, failure: SourceFailure | None) -> None:
+            self._failure = failure
+
+        def read(self, now: datetime) -> tuple[Resource, ...]:
+            return ()
+
+        def failure(self) -> SourceFailure | None:
+            return self._failure
+
+    class Raising:
+        def read(self, now: datetime) -> tuple[Resource, ...]:
+            raise RuntimeError("boom")
+
+    down = SourceFailure("http_auth", NOW - timedelta(minutes=5))
+    assert isinstance(Failing(None), ResourceHealth)
+    snap = merged_snapshot([], Metrics(), lambda: NOW, resources=Failing(down))()
+    assert snap.resources_failure == down
+    assert (
+        merged_snapshot([], Metrics(), lambda: NOW, resources=Failing(None))().resources_failure
+        is None
+    )
+    clock = iter([NOW, NOW + timedelta(minutes=1)])
+    raising = merged_snapshot([], Metrics(), lambda: next(clock), resources=Raising())  # type: ignore[arg-type]
+    assert raising().resources_failure == SourceFailure("unexpected", NOW)
+    # still raising: failing since the first raise, not since this tick
+    assert raising().resources_failure == SourceFailure("unexpected", NOW)

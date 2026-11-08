@@ -53,6 +53,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
   report's "Farm throughput" stages use them where the board keeps no history: queue time
   before a task's first pickup, and status changes between sessions. The section says
   which source it used. Recorded rows follow `[storage] retention` and `max_rows` (#157).
+- Rule 7 (`resources`) says when it is blind: if the host resources cannot be read
+  (Prometheus down, unreachable, refusing the token), one warning names the cause and since
+  when, once per cause, and a "resolved" notice follows when readings come back (until now
+  only a log line and `kelpie_resource_read_failures_total`).
 - `scripts/bootstrap.sh` prepares a fresh checkout or cloud session for the local checks
   (uv, Python 3.12, `uv sync --frozen`) in one idempotent step; `--check` also runs them.
 - A design note in `docs/security.md` for answering an agent's question from the chat
