@@ -63,8 +63,10 @@ MAX_SLOT_POOLS = 20  # tool slot pools exported (pools are config data)
 # Role labels come from the boards (and a hub's agents): at most this many roles, first seen
 # first, each cut to MAX_ROLE_CHARS; the rest are summed under OTHER_ROLE (audit L10).
 MAX_ROLES = 32
-# Longest step between two ticks counted as idle time (kelpie_role_idle_seconds_total).
+# Longest step between two ticks counted as idle time (kelpie_role_idle_seconds_total): this,
+# or IDLE_STEP_TICKS engine intervals when that is longer.
 MAX_IDLE_STEP = timedelta(minutes=10)
+IDLE_STEP_TICKS = 3
 MAX_ROLE_CHARS = 64
 OTHER_ROLE = "other"  # a real role of that name is summed with them
 MAX_STATUS_CHARS = 64  # a pre-work platform status label, cut the same way
@@ -87,6 +89,10 @@ def _bounded(statuses: Iterable[BudgetStatus]) -> tuple[BudgetStatus, ...]:
         for b in statuses
         if str(b.scope) != "task" or str(b.state) != "ok" or (b.budget, b.subject) in top
     )
+
+
+def _minutes(d: timedelta) -> str:
+    return f"{d.total_seconds() / 60:g} minutes"
 
 
 class Metrics:
@@ -118,6 +124,7 @@ class Metrics:
         # role -> agent-seconds idle, summed tick to tick (see MAX_IDLE_STEP)
         self.idle_seconds: Counter[str] = Counter()
         self._fleet_at: datetime | None = None  # the snapshot time of the last fleet reading
+        self.idle_step = MAX_IDLE_STEP  # see IDLE_STEP_TICKS; set from the engine's interval
         # (board, platform status) -> (cards in it before work, seconds the oldest sat there)
         self.prework: dict[tuple[BoardKey, str], tuple[int, float]] = {}
         # tool slot pool -> (slots, {holder: slots held}) (Hermes [adapters.hermes.tools])
@@ -449,6 +456,7 @@ class Metrics:
         snapshot: Snapshot | None = None,
     ) -> None:
         with self._lock:
+            self.idle_step = max(MAX_IDLE_STEP, IDLE_STEP_TICKS * engine.config.interval)
             if snapshot is not None:
                 self._fleet(snapshot)
             self.ticks += 1
@@ -504,13 +512,14 @@ class Metrics:
     def _idle_time(self, now: datetime) -> None:
         """Add the idle agents of the previous reading times the time since it, per role:
         idle time is counted from the tick that saw it to the next. A gap longer than
-        ``MAX_IDLE_STEP`` (serve stopped, the host slept, a tick hung) is not counted, and
-        neither is a clock that went back."""
+        ``idle_step`` (serve stopped, the host slept, a tick hung) is not counted, and
+        neither is a clock that went back. A failed tick in between reads no snapshot: the
+        step since the last good reading is then counted with that reading's idle agents."""
         last, self._fleet_at = self._fleet_at, now
         if last is None:
             return
         step = (now - last).total_seconds()
-        if not 0 < step <= MAX_IDLE_STEP.total_seconds():
+        if not 0 < step <= self.idle_step.total_seconds():
             return
         for role, n in self.idle_agents.items():
             self.idle_seconds[role] += n * step
@@ -836,8 +845,8 @@ class Metrics:
                     "kelpie_role_idle_seconds_total",
                     "counter",
                     "Agent-seconds the agents of a role spent idle (no live session, no open "
-                    "task), counted from each tick to the next; gaps between ticks over 10 "
-                    "minutes are not counted.",
+                    "task), counted from each tick to the next; a gap between ticks over "
+                    f"{_minutes(self.idle_step)} is not counted.",
                     [
                         f"kelpie_role_idle_seconds_total{_labels(role=r)} {s:.0f}"
                         for r, s in sorted(self.idle_seconds.items())

@@ -977,6 +977,39 @@
       "description": "How long the oldest card in each pre-work status has sat there; rule 3 alerts past prework_after only when tasks depend on it."
     },
     {
+      "id": 89,
+      "type": "timeseries",
+      "title": "Idle agent-hours per hour by role",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "kelpie-prometheus"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 24,
+        "x": 0,
+        "y": 58
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "kelpie-prometheus"
+          },
+          "refId": "A",
+          "expr": "increase(kelpie_role_idle_seconds_total[1h]) / 3600",
+          "legendFormat": "{{role}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "description": "Idle time per role: agent-hours its agents spent with no live session and no open task over the last hour (1 = one agent idle all hour)."
+    },
+    {
       "id": 24,
       "type": "row",
       "title": "Budgets & spend",
@@ -985,7 +1018,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 58
+        "y": 65
       },
       "panels": []
     },
@@ -1001,7 +1034,7 @@
         "h": 7,
         "w": 8,
         "x": 0,
-        "y": 59
+        "y": 66
       },
       "targets": [
         {
@@ -1033,7 +1066,7 @@
         "h": 7,
         "w": 8,
         "x": 8,
-        "y": 59
+        "y": 66
       },
       "targets": [
         {
@@ -1065,7 +1098,7 @@
         "h": 7,
         "w": 8,
         "x": 16,
-        "y": 59
+        "y": 66
       },
       "targets": [
         {
@@ -1097,7 +1130,7 @@
         "h": 7,
         "w": 8,
         "x": 0,
-        "y": 66
+        "y": 73
       },
       "targets": [
         {
@@ -1129,7 +1162,7 @@
         "h": 7,
         "w": 8,
         "x": 8,
-        "y": 66
+        "y": 73
       },
       "targets": [
         {
@@ -1161,7 +1194,7 @@
         "h": 7,
         "w": 8,
         "x": 16,
-        "y": 66
+        "y": 73
       },
       "targets": [
         {
@@ -1195,7 +1228,7 @@
         "h": 7,
         "w": 12,
         "x": 0,
-        "y": 73
+        "y": 80
       },
       "targets": [
         {
@@ -1233,7 +1266,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 80
+        "y": 87
       },
       "panels": []
     },
@@ -1249,7 +1282,7 @@
         "h": 7,
         "w": 8,
         "x": 0,
-        "y": 81
+        "y": 88
       },
       "targets": [
         {
@@ -1281,7 +1314,7 @@
         "h": 7,
         "w": 8,
         "x": 8,
-        "y": 81
+        "y": 88
       },
       "targets": [
         {
@@ -1322,7 +1355,7 @@
         "h": 7,
         "w": 8,
         "x": 16,
-        "y": 81
+        "y": 88
       },
       "targets": [
         {
@@ -1354,7 +1387,7 @@
         "h": 7,
         "w": 12,
         "x": 0,
-        "y": 88
+        "y": 95
       },
       "targets": [
         {
@@ -1405,7 +1438,7 @@
         "h": 7,
         "w": 12,
         "x": 12,
-        "y": 88
+        "y": 95
       },
       "targets": [
         {
@@ -1452,7 +1485,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 95
+        "y": 102
       },
       "panels": []
     },
@@ -1468,7 +1501,7 @@
         "h": 7,
         "w": 8,
         "x": 0,
-        "y": 96
+        "y": 103
       },
       "targets": [
         {
@@ -1500,7 +1533,7 @@
         "h": 7,
         "w": 8,
         "x": 8,
-        "y": 96
+        "y": 103
       },
       "targets": [
         {
@@ -1541,7 +1574,7 @@
         "h": 7,
         "w": 8,
         "x": 16,
-        "y": 96
+        "y": 103
       },
       "targets": [
         {
@@ -1573,7 +1606,7 @@
         "h": 7,
         "w": 24,
         "x": 0,
-        "y": 103
+        "y": 110
       },
       "targets": [
         {
@@ -1603,7 +1636,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 110
+        "y": 117
       },
       "panels": []
     },
@@ -1619,7 +1652,7 @@
         "h": 7,
         "w": 8,
         "x": 0,
-        "y": 111
+        "y": 118
       },
       "targets": [
         {
@@ -1660,7 +1693,7 @@
         "h": 7,
         "w": 8,
         "x": 8,
-        "y": 111
+        "y": 118
       },
       "targets": [
         {
@@ -1702,7 +1735,7 @@
         "h": 7,
         "w": 8,
         "x": 16,
-        "y": 111
+        "y": 118
       },
       "targets": [
         {
@@ -1741,7 +1774,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 118
+        "y": 125
       },
       "panels": []
     },
@@ -1757,7 +1790,7 @@
         "h": 4,
         "w": 4,
         "x": 0,
-        "y": 119
+        "y": 126
       },
       "targets": [
         {
@@ -1789,7 +1822,7 @@
         "h": 4,
         "w": 4,
         "x": 4,
-        "y": 119
+        "y": 126
       },
       "targets": [
         {
@@ -1821,7 +1854,7 @@
         "h": 4,
         "w": 16,
         "x": 8,
-        "y": 119
+        "y": 126
       },
       "targets": [
         {
@@ -1851,7 +1884,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 123
+        "y": 130
       },
       "panels": []
     },
@@ -1867,7 +1900,7 @@
         "h": 7,
         "w": 8,
         "x": 0,
-        "y": 124
+        "y": 131
       },
       "targets": [
         {
@@ -1900,7 +1933,7 @@
         "h": 7,
         "w": 8,
         "x": 8,
-        "y": 124
+        "y": 131
       },
       "targets": [
         {
@@ -1933,7 +1966,7 @@
         "h": 7,
         "w": 8,
         "x": 16,
-        "y": 124
+        "y": 131
       },
       "targets": [
         {
@@ -1963,7 +1996,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 131
+        "y": 138
       },
       "panels": []
     },
@@ -1979,7 +2012,7 @@
         "h": 7,
         "w": 8,
         "x": 0,
-        "y": 132
+        "y": 139
       },
       "targets": [
         {
@@ -2012,7 +2045,7 @@
         "h": 7,
         "w": 8,
         "x": 8,
-        "y": 132
+        "y": 139
       },
       "targets": [
         {
@@ -2045,7 +2078,7 @@
         "h": 7,
         "w": 8,
         "x": 16,
-        "y": 132
+        "y": 139
       },
       "targets": [
         {
@@ -2078,7 +2111,7 @@
         "h": 7,
         "w": 12,
         "x": 0,
-        "y": 139
+        "y": 146
       },
       "targets": [
         {
@@ -2111,7 +2144,7 @@
         "h": 7,
         "w": 12,
         "x": 12,
-        "y": 139
+        "y": 146
       },
       "targets": [
         {
@@ -2153,7 +2186,7 @@
         "h": 7,
         "w": 24,
         "x": 0,
-        "y": 146
+        "y": 153
       },
       "targets": [
         {
@@ -2183,7 +2216,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 153
+        "y": 160
       },
       "panels": []
     },
@@ -2199,7 +2232,7 @@
         "h": 7,
         "w": 8,
         "x": 0,
-        "y": 154
+        "y": 161
       },
       "targets": [
         {
@@ -2241,7 +2274,7 @@
         "h": 7,
         "w": 8,
         "x": 8,
-        "y": 154
+        "y": 161
       },
       "targets": [
         {
@@ -2274,7 +2307,7 @@
         "h": 7,
         "w": 4,
         "x": 16,
-        "y": 154
+        "y": 161
       },
       "targets": [
         {
@@ -2307,7 +2340,7 @@
         "h": 7,
         "w": 4,
         "x": 20,
-        "y": 154
+        "y": 161
       },
       "targets": [
         {
@@ -2337,7 +2370,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 161
+        "y": 168
       },
       "panels": []
     },
@@ -2353,7 +2386,7 @@
         "h": 7,
         "w": 8,
         "x": 0,
-        "y": 162
+        "y": 169
       },
       "targets": [
         {
@@ -2386,7 +2419,7 @@
         "h": 7,
         "w": 8,
         "x": 8,
-        "y": 162
+        "y": 169
       },
       "targets": [
         {
@@ -2419,7 +2452,7 @@
         "h": 7,
         "w": 8,
         "x": 16,
-        "y": 162
+        "y": 169
       },
       "targets": [
         {
@@ -2449,7 +2482,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 169
+        "y": 176
       },
       "panels": []
     },
@@ -2465,7 +2498,7 @@
         "h": 7,
         "w": 8,
         "x": 0,
-        "y": 170
+        "y": 177
       },
       "targets": [
         {
@@ -2507,7 +2540,7 @@
         "h": 7,
         "w": 8,
         "x": 8,
-        "y": 170
+        "y": 177
       },
       "targets": [
         {
@@ -2542,7 +2575,7 @@
         "h": 7,
         "w": 8,
         "x": 16,
-        "y": 170
+        "y": 177
       },
       "targets": [
         {
@@ -2584,7 +2617,7 @@
         "h": 7,
         "w": 12,
         "x": 0,
-        "y": 177
+        "y": 184
       },
       "targets": [
         {
@@ -2617,7 +2650,7 @@
         "h": 7,
         "w": 12,
         "x": 12,
-        "y": 177
+        "y": 184
       },
       "targets": [
         {
@@ -2647,7 +2680,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 184
+        "y": 191
       },
       "panels": []
     },
@@ -2663,7 +2696,7 @@
         "h": 7,
         "w": 6,
         "x": 0,
-        "y": 185
+        "y": 192
       },
       "targets": [
         {
@@ -2696,7 +2729,7 @@
         "h": 7,
         "w": 6,
         "x": 6,
-        "y": 185
+        "y": 192
       },
       "targets": [
         {
@@ -2729,7 +2762,7 @@
         "h": 7,
         "w": 12,
         "x": 12,
-        "y": 185
+        "y": 192
       },
       "targets": [
         {
@@ -2749,39 +2782,6 @@
         "overrides": []
       },
       "description": "OTLP requests authenticated by a previous token: exporters not yet on the new one. Should reach zero before the grace period ends."
-    },
-    {
-      "id": 89,
-      "type": "timeseries",
-      "title": "Idle agent-hours per hour by role",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "kelpie-prometheus"
-      },
-      "gridPos": {
-        "h": 7,
-        "w": 12,
-        "x": 0,
-        "y": 192
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "kelpie-prometheus"
-          },
-          "refId": "A",
-          "expr": "increase(kelpie_role_idle_seconds_total[1h]) / 3600",
-          "legendFormat": "{{role}}"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short"
-        },
-        "overrides": []
-      },
-      "description": "Idle time per role: agent-hours its agents spent with no live session and no open task over the last hour (1 = one agent idle all hour)."
     }
   ],
   "templating": {

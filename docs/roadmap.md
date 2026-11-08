@@ -662,7 +662,7 @@ No custom UI in the MVP. Kelpie exposes Prometheus metrics, Grafana shows them, 
 open in Langfuse.
 
 - [x] `/metrics` in Prometheus text format: tick duration, actions per rule, tasks per status (#7)
-- [x] `/metrics`: idle time per role: `kelpie_role_idle_seconds_total` (agent-seconds idle, tick to tick, gaps over 10 minutes not counted), with a dashboard panel (#381)
+- [x] `/metrics`: idle time per role: `kelpie_role_idle_seconds_total` (agent-seconds idle, tick to tick, gaps over 10 minutes or 3 intervals not counted), with a dashboard panel (#381)
 - [x] `/metrics`: idle agents per role (count)
 - [x] Grafana dashboard JSON provisioned by docker compose
 - [ ] Dashboard links to traces in Langfuse when configured (not started)

@@ -61,3 +61,42 @@ def test_a_long_gap_or_a_clock_going_back_is_not_counted() -> None:
 
 def test_nothing_before_a_snapshot() -> None:
     assert _idle(Metrics(), "coder") is None
+
+
+def test_a_long_interval_widens_the_step() -> None:
+    from kelpie.core.config import EngineConfig
+
+    metrics = Metrics()
+    engine = Engine([], config=EngineConfig(interval=timedelta(minutes=15)))
+    for minutes in (0, 15.5):
+        metrics.observe_tick(
+            0.1, [], engine, replace(_snapshot(), now=NOW + timedelta(minutes=minutes))
+        )
+    assert _idle(metrics, "coder") == "930"
+    assert "over 45 minutes is not counted" in metrics.render()
+
+
+def test_a_failed_tick_counts_the_last_reading() -> None:
+    metrics = Metrics()
+    _tick(metrics, 0)
+    metrics.observe_tick(0.1, [], Engine([]), None)  # no snapshot: nothing read
+    _tick(metrics, 2)
+    assert _idle(metrics, "coder") == "120"
+
+
+def test_roles_past_the_cap_are_summed_under_other() -> None:
+    from kelpie.core.model import Owner
+    from kelpie.metrics import MAX_ROLES
+
+    owners = tuple(Owner(f"a-{i}", f"role-{i:02d}") for i in range(MAX_ROLES + 3))
+    metrics = Metrics()
+    for minutes in (0, 1):
+        snap = replace(
+            _snapshot(), owners=owners, tasks=(), sessions=(), now=NOW + timedelta(minutes=minutes)
+        )
+        metrics.observe_tick(0.1, [], Engine([]), snap)
+    lines = [
+        x for x in metrics.render().splitlines() if x.startswith("kelpie_role_idle_seconds_total{")
+    ]
+    assert len(lines) == MAX_ROLES + 1
+    assert _idle(metrics, "other") == "180"

@@ -14,7 +14,7 @@ itself ([runbook](runbook.md)). With docker compose both are provisioned for you
 | Health | ledger, dry run, last tick age, budget data stale, span store errors, ticks and their duration, adapter, rule and connector errors |
 | Hosts | Kelpie's version and uptime; with `kelpie agent` hosts, which are up and how old their last report is |
 | Actions, Open states | actions per rule, kind and outcome; the loaded rules and their modes; open alert states |
-| Tasks & agents, Throughput | tasks by status and stage, idle agents, cards before work, done per hour, returns and reopened tasks per role |
+| Tasks & agents, Throughput | tasks by status and stage, idle agents and idle agent-hours per role, cards before work, done per hour, returns and reopened tasks per role |
 | Budgets & spend, Spend check | spend, remaining budget, burn rate and run-out forecasts; the providers' bills against the spend priced from traces |
 | Traces ingest, Token rotation | OTLP requests and spans, the span store, forwarding; the traces token file and requests on a rotated-out token |
 | Connectors, LLM providers | GitHub requests and rate limit, block conditions, how long a connector has failed; provider reachability, quota and limit hits |
