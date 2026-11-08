@@ -142,6 +142,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ### Security
 
+- A block storm's "Block storm over" notice counts the tasks Kelpie listed, not a list an
+  agent wrote into its block reason (#404).
 - The `[view]` listener on loopback answers only requests addressed to a loopback name or
   its configured host (421 otherwise): a web page could rebind its own name to 127.0.0.1 and
   read the farm view through the operator's browser (#395).
