@@ -2370,7 +2370,7 @@ There is no write endpoint: every other method gets 405, and the page has no for
 | --- | --- | --- |
 | `enabled` | `false` | Start the listener with `kelpie serve`. |
 | `host` | `127.0.0.1` | Bind address. Off loopback a token is required: `kelpie serve` refuses to start without a strong one (16+ characters, 6+ different), and `kelpie doctor` warns. |
-| `port` | `9465` | Port. |
+| `port` | `9466` | Port (9464 is the main port, 9465 `[hub]`'s). `kelpie serve` refuses to start when two of its listeners would share a port. |
 | `token_env` | `KELPIE_VIEW_TOKEN` | Variable holding the token. When set, every request needs it, on loopback too: `Authorization: Bearer <token>` (scripts), or as the password of the browser's sign-in prompt (HTTP Basic; any user name). |
 | `long_after` | `2h` | A task in progress this long is "running long" on the page. |
 
@@ -2385,6 +2385,8 @@ Kelpie refuses to start when:
 
 - `[view]` is enabled on an address off loopback without a strong token in its
   `token_env`.
+- Two of its listeners would share a port on one address (the main port, `[hub] listen`,
+  `[view]`; an address of `0.0.0.0` or `::` overlaps every other).
 - `[[budgets]]` exist but `[traces] enabled = false`; a budget `window` exceeds
   `[traces] retention`; a `usd` budget exists without `[prices]` while
   `[spend] default_prices = false`.

@@ -62,7 +62,7 @@ def server_url(settings: Settings, given: str) -> str:
     parts = urlsplit(given)
     if parts.scheme not in ("http", "https") or not parts.netloc:
         raise ValueError(
-            f"--server must be an http(s) URL such as http://127.0.0.1:9465, got {given!r}"
+            f"--server must be an http(s) URL such as http://127.0.0.1:9466, got {given!r}"
         )
     return given.rstrip("/") + PATH if parts.path in ("", "/") else given
 

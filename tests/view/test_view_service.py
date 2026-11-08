@@ -28,7 +28,7 @@ TOKEN = "0123456789abcdef0123456789abcdef"
 def test_defaults_are_off_and_on_loopback() -> None:
     view = load_view(None)
     assert view == ViewSettings() and not view.enabled
-    assert view.host == "127.0.0.1" and view.port == 9465 and view.loopback
+    assert view.host == "127.0.0.1" and view.port == 9466 and view.loopback
 
 
 @pytest.mark.parametrize(
@@ -147,7 +147,7 @@ def test_server_url() -> None:
     settings = Settings(view=ViewSettings(host="0.0.0.0", port=9999))
     assert server_url(settings, "") == f"http://127.0.0.1:9999{PATH}"
     assert server_url(settings, "http://host-a:1/") == f"http://host-a:1{PATH}"
-    assert server_url(Settings(view=ViewSettings(host="::1")), "") == f"http://[::1]:9465{PATH}"
+    assert server_url(Settings(view=ViewSettings(host="::1")), "") == f"http://[::1]:9466{PATH}"
 
 
 @pytest.mark.parametrize("method", ["HEAD", "OPTIONS", "TRACE"])

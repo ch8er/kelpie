@@ -880,6 +880,6 @@ commands = true           # keep the prefix of shell commands on tool spans ("ma
 # [view]
 # enabled = false
 # host = "127.0.0.1"
-# port = 9465
+# port = 9466                          # 9465 is [hub]'s
 # token_env = "KELPIE_VIEW_TOKEN"
 # long_after = "2h"                     # in progress this long: "running long"

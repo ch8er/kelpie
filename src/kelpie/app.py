@@ -2655,6 +2655,31 @@ def check_exposure(settings: Settings, host: str) -> None:
         raise ConfigError(str(exc)) from exc
 
 
+def _same_address(a: tuple[str, int], b: tuple[str, int]) -> bool:
+    """Whether two listeners would bind one port: same port, and the same host or either on
+    every address (an empty host, ``0.0.0.0`` or ``::``)."""
+    wildcard = {"", "0.0.0.0", "::"}
+    return a[1] == b[1] and (a[0] == b[0] or a[0] in wildcard or b[0] in wildcard)
+
+
+def check_listeners(settings: Settings, host: str, port: int) -> None:
+    """Refuse to start when two of ``kelpie serve``'s listeners (the main port, ``[hub]``,
+    ``[view]``) would bind the same address: the second would fail to bind after the
+    first started, or, with ``SO_REUSEPORT``, share it."""
+    listeners = [("the main port (--port, $KELPIE_PORT)", (host, port))]
+    if settings.hub is not None:
+        listeners.append(("[hub] listen", (settings.hub.host, settings.hub.port)))
+    if settings.view.enabled:
+        listeners.append(("[view]", (settings.view.host, settings.view.port)))
+    for i, (name, address) in enumerate(listeners):
+        for other, other_address in listeners[i + 1 :]:
+            if _same_address(address, other_address):
+                raise ConfigError(
+                    f"{name} and {other} both listen on port {address[1]}: give one of them "
+                    "another port"
+                )
+
+
 def instruction_watch(
     settings: Settings, adapters: Sequence[PlatformAdapter], record: bool = True
 ) -> InstructionWatch | None:

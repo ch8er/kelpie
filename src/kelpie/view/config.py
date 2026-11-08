@@ -1,10 +1,10 @@
 """``[view]``: the read-only farm view listener of ``kelpie serve``. Off by default.
 
-It listens on its own address (``host``, ``port``; 127.0.0.1:9465 by default), apart from
-the main port, so OTLP ingest can be opened to agents while the view stays on loopback. Off
-loopback it needs a token (``token_env``, default ``KELPIE_VIEW_TOKEN``): ``kelpie serve``
-refuses to start without a strong one, and ``kelpie doctor`` warns. ``long_after``: a
-task in progress this long is shown as "running long" on the page.
+It listens on its own address (``host``, ``port``; 127.0.0.1:9466 by default, as 9465 is the
+hub's), apart from the main port, so OTLP ingest can be opened to agents while the view
+stays on loopback. Off loopback it needs a token (``token_env``, default
+``KELPIE_VIEW_TOKEN``): ``kelpie serve`` refuses to start without a strong one, and ``kelpie
+doctor`` warns. ``long_after``: a task in progress this long is shown as "running long" on the page.
 """
 
 from __future__ import annotations
@@ -20,7 +20,7 @@ from kelpie.core.serde import parse_duration
 from kelpie.traces.config import is_loopback, weak_token
 
 DEFAULT_HOST = "127.0.0.1"
-DEFAULT_PORT = 9465
+DEFAULT_PORT = 9466  # 9464: main port, 9465: [hub]
 DEFAULT_TOKEN_ENV = "KELPIE_VIEW_TOKEN"
 _KEYS = frozenset({"enabled", "host", "port", "token_env", "long_after"})
 

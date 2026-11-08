@@ -18,6 +18,7 @@ from kelpie.app import (
     build_adapters,
     build_app,
     check_exposure,
+    check_listeners,
     find_config,
     load_rules,
     load_settings,
@@ -388,6 +389,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0
         load_rules(settings.engine)  # rule errors first: they are the likelier mistake
         check_exposure(settings, args.host)
+        check_listeners(settings, args.host, args.port)
         locks = serve_act_locks(settings)  # one acting instance per board (audit M7)
         try:
             app = build_app(settings)
