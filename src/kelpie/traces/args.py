@@ -29,6 +29,6 @@ def args_hash_of_attribute(value: Any) -> str:
     string is parsed first, so ``'{"b": 1, "a": 2}'`` hashes like the dict a hook sees.
     """
     if isinstance(value, str):
-        with contextlib.suppress(ValueError):  # not JSON: hash the text itself
+        with contextlib.suppress(ValueError, RecursionError):  # not JSON: hash the text
             value = json.loads(value)
     return args_hash(value)

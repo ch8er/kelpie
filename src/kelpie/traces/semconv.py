@@ -486,7 +486,7 @@ def _raw_command(attrs: Mapping[str, Any], claude_code: bool) -> str | None:
     for key in keys:
         value = attrs.get(key)
         if isinstance(value, str):
-            with contextlib.suppress(ValueError):
+            with contextlib.suppress(ValueError, RecursionError):
                 value = json.loads(value)
         if (found := command_of(value)) is not None:
             return found

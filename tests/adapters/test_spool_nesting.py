@@ -9,6 +9,7 @@ snapshot (and every rule watching it) offline.
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -17,6 +18,8 @@ import pytest
 from kelpie.adapters.claude_code import adapter as claude_code
 from kelpie.adapters.hermes import adapter as hermes
 from kelpie.adapters.openclaw import adapter as openclaw
+from kelpie.traces import semconv
+from kelpie.traces.args import args_hash, args_hash_of_attribute
 from kelpie.traces.scrub import scrub_line
 
 NOW = datetime(2026, 11, 8, 12, tzinfo=UTC)
@@ -27,6 +30,7 @@ DEEP = "[" * 15_000  # nested past the decoder's limit, under every line cap
 def test_deep_line_fits_the_line_caps() -> None:
     assert len(DEEP.encode()) < hermes.MAX_SPOOL_LINE
     assert len(DEEP.encode()) < claude_code.MAX_LINE
+    assert len(DEEP.encode()) < openclaw.MAX_LINE
     with pytest.raises(RecursionError):
         json.loads(DEEP)
 
@@ -40,7 +44,7 @@ def test_deep_line_fits_the_line_caps() -> None:
     ],
     ids=["hermes", "claude-code", "openclaw"],
 )
-def test_deep_spool_line_is_skipped(parse) -> None:  # type: ignore[no-untyped-def]
+def test_deep_spool_line_is_skipped(parse: Callable[[str], object]) -> None:
     assert parse(DEEP) is None
 
 
@@ -82,3 +86,11 @@ def test_claude_code_task_file_nested_too_deep_is_skipped(tmp_path: Path) -> Non
 
 def test_scrub_drops_a_deep_line() -> None:
     assert scrub_line(DEEP) == (None, False)
+
+
+def test_otlp_arguments_nested_too_deep_hash_as_text() -> None:
+    """Tool arguments that do not decode are hashed as their text, and the span is kept
+    (it used to be counted malformed, out of rule 10's sight)."""
+    assert args_hash_of_attribute(DEEP) == args_hash(DEEP)
+    assert semconv._raw_command({semconv.ARGUMENTS: DEEP}, True) is None
+    assert semconv._raw_command({semconv.CC_PARAMETERS: DEEP}, True) is None
