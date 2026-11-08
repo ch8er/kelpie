@@ -780,9 +780,9 @@ adapters, budgets and prices, and then the farm view (`kelpie.core.farmview`, re
 the read-only page of #299).
 
 **Acceptance criteria**
-- [x] Shows tasks per status, waiting conditions, open alerts and the last actions per rule (#PR)
-- [x] Works against a running server or directly against the storage file: `--server` reads `kelpie serve`'s read-only `[view]` listener (off by default); without it the board is read offline and the database read-only, and with no adapter the last observed statuses stand in (#PR)
-- [x] Plain text by default, `--json` for scripts (#PR)
+- [x] Shows tasks per status, waiting conditions, open alerts and the last actions per rule (#363)
+- [x] Works against a running server or directly against the storage file: `--server` reads `kelpie serve`'s read-only `[view]` listener (off by default); without it the board is read offline and the database read-only, and with no adapter the last observed statuses stand in (#363)
+- [x] Plain text by default, `--json` for scripts (#363)
 
 ### traces: token optimization — caching, context growth, restarts
 labels: P1, week-3, area:traces
