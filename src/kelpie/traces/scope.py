@@ -58,6 +58,7 @@ MAX_BINDINGS = 1_000_000  # all tokens; the least recently used go first
 MAX_INDEX = 200_000  # entries per map; the oldest go first
 MAX_UNPLACED = 10_000  # ids one token may hold bound while the board does not place them
 LOG_EVERY = timedelta(minutes=1)
+REMOVED_TOKEN = "<not configured>"  # the log name of every token no longer configured
 
 SESSION, TASK = "session_id", "task_id"  # binding kinds: the span column they name
 
@@ -402,7 +403,12 @@ class ScopeGuard:
             active = self._active.setdefault(token, OrderedDict())
             while active and now - next(iter(active.values())) > UNPLACED_ACTIVE:
                 active.popitem(last=False)
-            new = sum(1 for k, b in zip(ids, held, strict=True) if b is None and k not in active)
+            # every unsettled id not used lately counts, an old binding of its own included
+            new = sum(
+                1
+                for k, b in zip(ids, held, strict=True)
+                if (b is None or not b.settled) and k not in active
+            )
             if new and len(active) + new > MAX_UNPLACED:
                 return SCOPE_BACKLOG
             for key, b in zip(ids, held, strict=True):
@@ -496,7 +502,9 @@ class ScopeGuard:
             elif self.judge(token, span)[0] is not Verdict.OUT:
                 continue
             out.add(span_key(span))
-            self._log(token, f"session {_short(span.session_id)!r}", now)
+            # names no longer configured share one log slot: a sender could make up many
+            name = token if token in self.scopes else REMOVED_TOKEN
+            self._log(name, f"session {_short(span.session_id)!r}", now)
         if out and self.store is not None:
             try:
                 deleted += self.store.discard(out)

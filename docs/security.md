@@ -92,7 +92,9 @@ names (first seen first, until the hub restarts) get alerts and series; a later 
 still keeps its tasks out of the rules but is only counted, once per report
 (`kind="board"`), with no alert of its own. A fixed list was chosen over "the first names an agent reports": it holds
 across hub restarts and gives an agent no first report to abuse. Host sleeps an agent
-reports are kept only when they ended before its report, and at most 64 per agent. Role
+reports are kept only when they ended before its report, and at most 64 per agent. Spans in a
+report never carry a traces token's mark (`kelpie.ingest.token`): the hub drops it, so a
+report can neither pose as a token nor make up names to log. Role
 names on `/metrics` come from the agents' boards too; they are bounded too ([Text from agents](#text-from-agents), audit L10).
 
 ## Text from agents

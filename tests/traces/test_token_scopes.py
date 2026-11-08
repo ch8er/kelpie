@@ -785,3 +785,45 @@ def test_use_refreshes_a_binding_and_requests_stay_fast() -> None:
     kept, refused = guard.ingest_filter("dev-2", spans, NOW)
     assert time.monotonic() - started < 5
     assert refused[scope.SCOPE_BACKLOG] > 0 and len(kept) <= scope.MAX_UNPLACED
+
+
+def test_old_unplaced_bindings_count_toward_the_cap_again(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ids bound more than a day ago and still unplaced count again when used again, so a
+    token cannot hold several days' worth of ids at once (#374)."""
+    import kelpie.traces.scope as scope
+
+    monkeypatch.setattr(scope, "MAX_UNPLACED", 3)
+    guard = ScopeGuard(SCOPES, store=MemorySpanStore(), retention=timedelta(days=7))
+    guard.index.update(board())
+    for day in range(2):
+        at = NOW + timedelta(hours=25 * day)
+        for i in range(3):
+            assert guard._bind("dev-1", [(SESSION, f"new-{day}-{i}")], at) is None
+    later = NOW + timedelta(hours=26)
+    ok = [guard._bind("dev-1", [(SESSION, f"new-0-{i}")], later) is None for i in range(3)]
+    assert ok == [False, False, False]  # day 1's three ids are the token's active ones
+
+
+def test_unconfigured_token_names_share_one_log_slot(caplog: pytest.LogCaptureFixture) -> None:
+    """Spans whose mark names a token that is not configured (removed, or forged in a hub
+    report) are deleted once the board places them, logged once a minute in all (#374)."""
+    guard = ScopeGuard(SCOPES, store=MemorySpanStore())
+    spans = tuple(
+        Span(
+            "t",
+            f"s{i}",
+            "x",
+            SpanKind.TOOL,
+            NOW,
+            session_id="S-101",
+            attributes={TOKEN_ATTRIBUTE: f"made-up-{i}"},
+        )
+        for i in range(500)
+    )
+    with caplog.at_level("WARNING", logger="kelpie.traces.scope"):
+        snap, _ = guard.check(replace(board(), spans=spans))
+    assert snap.spans == ()
+    assert len(guard._logged) == 1
+    assert len([r for r in caplog.records if "outside its scope" in r.message]) == 1
