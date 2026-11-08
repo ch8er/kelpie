@@ -286,6 +286,26 @@ class ActionLedger:
             return Suppression.RATE_LIMIT, first
         return None
 
+    def repeats(self, action: Action, mode: Mode, now: datetime) -> tuple[int, datetime] | None:
+        """The repeats of ``action`` the ledger merged since it last let it through in
+        ``mode`` (sent, or tried and failed or dropped), and when that was: the suppressions
+        counted on that entry and after it (an entry stored as suppressed is one, plus those
+        counted on it). None when there
+        were none, or it was not let through within twice the longest window the ledger
+        counts repeats in (cooldown, retry, an hour)."""
+        fp = fingerprint(action)
+        after = now - 2 * max(self.cooldown, self.retry_after, timedelta(hours=1))
+        found = self._with_unsaved(self.store.by_fingerprint(fp, after), after, fp=fp)
+        same = sorted((e for e in found if e.mode is mode), key=lambda e: e.at)
+        last = next(
+            (i for i in range(len(same) - 1, -1, -1) if same[i].outcome is not Outcome.SUPPRESSED),
+            None,
+        )
+        if last is None:
+            return None
+        merged = same[last].suppressed + sum(1 + e.suppressed for e in same[last + 1 :])
+        return (merged, same[last].at) if merged else None
+
     def failed_attempts(self, action: Action, mode: Mode, now: datetime) -> int:
         """Earlier FAILED attempts of ``action`` in ``mode``: within ``once_window`` for a
         once-action, else within ``cooldown``."""

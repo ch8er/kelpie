@@ -330,6 +330,9 @@ def _transition(event: AlertEvent, lang: str) -> str | None:
         case Transition.CHANGED:
             return i18n.text(lang, "transition.changed")
         case _:
+            if event.repeats and event.repeats_over is not None:  # merged by the ledger
+                key = f"transition.repeated.{i18n.plural(lang, event.repeats)}"
+                return i18n.text(lang, key, n=event.repeats, age=i18n.age(lang, event.repeats_over))
             return None
 
 

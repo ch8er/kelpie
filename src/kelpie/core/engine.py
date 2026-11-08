@@ -380,6 +380,20 @@ class Engine:
         self._record(dispatched, snapshot.now)
         return dispatched
 
+    def _merged(self, action: Action, mode: Mode, now: datetime) -> tuple[int, datetime] | None:
+        """For an alert that is not about a long-lived state (those speak on transitions, and
+        resolve notices are theirs): the repeats the ledger merged since it was last let
+        through, and when that was."""
+        if action.kind not in _ALERT_ACTIONS or action.state is not None:
+            return None
+        if action.key is not None and action.key in self._transitions:
+            return None
+        try:
+            return self.ledger.repeats(action, mode, now)
+        except Exception:
+            log.exception("could not count merged repeats of %s", action)
+            return None
+
     def _last_attempt(self, action: Action, mode: Mode, now: datetime) -> bool:
         """Whether this failure should reach a human.
 
@@ -644,7 +658,10 @@ class Engine:
                 (held := self._held.get(k)) and all(kind is Did.DONE for _, _, kind, _ in held)
                 for k in keys
             )
-            if not self._alert(action, snapshot, did=" ".join(lines) or None, effects_done=done):
+            merged = self._merged(action, mode, snapshot.now)
+            if not self._alert(
+                action, snapshot, did=" ".join(lines) or None, effects_done=done, merged=merged
+            ):
                 return Outcome.DROPPED
             self._told.update(k for k in keys if k in self._lines)
             return Outcome.ALERTED
@@ -711,12 +728,14 @@ class Engine:
         kind: Did | None = None,
         did: str | None = None,
         effects_done: bool = False,
+        merged: tuple[int, datetime] | None = None,
     ) -> bool:
         """Send ``action`` to a human. Return False if there is no alerter to send it to.
         ``kind`` is what Kelpie did when that is more than telling a human (suggested, done,
         failed); an action that was not executed counts as ``Did.NOT_EXECUTED`` unless it
         failed. ``effects_done``: the effects the alert announces were all carried out, so
-        it asks nobody to do them (see :func:`alert_items`)."""
+        it asks nobody to do them (see :func:`alert_items`). ``merged``: the repeats the
+        ledger merged into this alert since it was last let through, and when that was."""
         if self.alerter is None:
             log.warning("no alerter configured; dropped: %s", action)
             return False
@@ -741,6 +760,8 @@ class Engine:
                 items=alert_items(action, snapshot, effects_done=effects_done),
                 snoozed=snoozed_items(action, snapshot),
                 snoozed_total=_count(action.params.get("snoozed_total")),
+                repeats=merged[0] if merged else None,
+                repeats_over=snapshot.now - merged[1] if merged else None,
                 at=snapshot.now,
                 # a resolve notice names the state it closes (its Action.state stays None)
                 state=action.state if note is None or note.closes is None else note.closes,

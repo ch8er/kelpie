@@ -458,3 +458,39 @@ def test_a_failures_reason_is_recorded(tmp_path: Path) -> None:
     (entry,) = store.since(now - timedelta(hours=1))
     assert entry.outcome is Outcome.FAILED
     assert entry.detail == "RuntimeError (details in the Kelpie log)"  # never the message
+
+
+# --- merged repeats ---------------------------------------------------------------------
+
+
+def test_repeats_counts_what_was_merged_since_the_last_send() -> None:
+    ledger = ActionLedger(MemoryLedgerStore(), cooldown=timedelta(minutes=30))
+    a = Action(ActionKind.ALERT, "emit", "disk", key="disk:h")
+    assert ledger.repeats(a, Mode.ACT, T0) is None  # never sent
+    ledger.record(done(a, outcome=Outcome.ALERTED), T0)
+    assert ledger.repeats(a, Mode.ACT, T0 + timedelta(minutes=1)) is None  # nothing merged
+    for minute in range(1, 4):
+        held = Dispatched(a, Mode.ACT, Outcome.SUPPRESSED, Suppression.COOLDOWN)
+        ledger.record(held, T0 + timedelta(minutes=minute))
+    assert ledger.repeats(a, Mode.ACT, T0 + timedelta(minutes=31)) == (3, T0)
+    assert ledger.repeats(a, Mode.OBSERVE, T0 + timedelta(minutes=31)) is None  # another mode
+    # Past the hour the ledger counts on, a held repeat is stored as an entry of its own.
+    late = Dispatched(a, Mode.ACT, Outcome.SUPPRESSED, Suppression.COOLDOWN)
+    ledger.record(late, T0 + timedelta(minutes=70))
+    ledger.record(late, T0 + timedelta(minutes=71))
+    assert ledger.repeats(a, Mode.ACT, T0 + timedelta(minutes=72)) == (5, T0)
+    # Sent again: counting starts over.
+    ledger.record(done(a, outcome=Outcome.ALERTED), T0 + timedelta(minutes=80))
+    assert ledger.repeats(a, Mode.ACT, T0 + timedelta(minutes=81)) is None
+    # A send older than twice that window is forgotten.
+    assert ledger.repeats(a, Mode.ACT, T0 + timedelta(hours=10)) is None
+
+
+def test_repeats_read_the_same_from_sqlite(tmp_path: Path) -> None:
+    ledger = ActionLedger(SqliteLedgerStore(tmp_path / "l.db"), cooldown=timedelta(minutes=30))
+    a = Action(ActionKind.ALERT, "emit", "disk", key="disk:h")
+    ledger.record(done(a, outcome=Outcome.ALERTED), T0)
+    for minute in (5, 10, 70, 71):
+        held = Dispatched(a, Mode.ACT, Outcome.SUPPRESSED, Suppression.COOLDOWN)
+        ledger.record(held, T0 + timedelta(minutes=minute))
+    assert ledger.repeats(a, Mode.ACT, T0 + timedelta(minutes=72)) == (4, T0)

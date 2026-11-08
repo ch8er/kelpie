@@ -41,6 +41,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
   `cancel_build`, since the fix push builds them again. A refused job or a re-run in
   progress is no verdict. Only logged until `fail_fast_mode = "rule"`; the GitHub connector
   does not carry out this cancel yet.
+- An alert raised again after its cooldown says, in its headline line, how many repeats the
+  ledger merged into it since it was last sent ("raised 5 more times in 30 min"; Russian
+  too). Alerts about a lasting condition keep speaking only on their transitions. A re-send
+  with a count is not a duplicate of the previous send for a channel's own de-duplication.
 - Rule `unanswered_asks` (P1, #297, observe by default): an agent's `@question` to another
   agent in a task comment is an obligation until the recipient (or a person) answers.
   Kelpie reminds only while the recipient is idle, at most once per step (`steps`, default
