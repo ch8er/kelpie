@@ -51,7 +51,7 @@ from datetime import datetime, timedelta
 from kelpie.core.actions import Action, ActionKind, Severity
 from kelpie.core.conditions import linked_conditions
 from kelpie.core.incidents import BLOCK_STORM, Outage, incident_state_id, is_outage_state
-from kelpie.core.model import KelpieMark, OwnerKind, Snapshot, Status, Task
+from kelpie.core.model import CUT_MARK, KelpieMark, OwnerKind, Snapshot, Status, Task
 from kelpie.rules._alerts import alert_params, count
 from kelpie.rules._snoozes import SnoozeCheck
 from kelpie.rules._toolchain import DEFAULT_WINDOW as TOOLCHAIN_WINDOW
@@ -200,7 +200,7 @@ def _groups(
 
 
 _SCOPE = re.compile(r": (\d+) tasks blocked within ")
-_LISTED = re.compile(r"separate waits: (.+?)(?: \(\+\d+ more\))?\.(?: |$)")
+_LISTED = re.compile(r"\. One cause, not (\d+) separate waits: (.+?)(?: \(\+\d+ more\))?\.(?: |$)")
 
 
 def resolved_text(
@@ -224,10 +224,13 @@ def resolved_text(
             still = sorted((b.task for b in blocked), key=lambda t: t.id)
     held = {t.id for t in still if snoozed is not None and (c := snoozed(t.id)) and c.holds}
     size = int(found.group(1))
-    # Kelpie's own list comes last: the quoted block reason before it is an agent's text,
-    # which may hold a list of its own.
-    lists = list(_LISTED.finditer(summary or ""))
-    named = lists[-1].group(1).split(", ") if lists else []
+    # Kelpie's own list, in its own wording and for the storm's size: the quoted block
+    # reason before it is an agent's text and may hold a look-alike. A summary cut short
+    # lost the list's end: then the size alone counts.
+    said = summary or ""
+    lists = [m for m in _LISTED.finditer(said) if int(m.group(1)) == size]
+    cut = said.endswith(CUT_MARK)
+    named = lists[-1].group(2).split(", ") if lists and not cut else []
     if len(named) == size:  # it named every task: count exactly those
         done = len(set(named) - {t.id for t in still})
     else:
