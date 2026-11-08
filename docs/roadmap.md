@@ -310,7 +310,7 @@ Implement `requeue`, `unblock`, `comment`, `wake`, `reassign` and `wip_commit` f
 - [ ] Actions are idempotent (re-running the same action is a no-op) (waking an awake task is quiet, #75, and the ledger stops repeats; but a second park of a parked task, or a requeue of a task Kelpie did not park, raises `UnsupportedAction`)
 - [x] Concurrent writes with Hermes handled safely (transactions, retry on lock) (Kelpie never writes `kanban.db`: every write goes through the `hermes kanban` CLI; reads are read-only with a busy timeout; #13, #75)
 - [x] Tasks in Kelpie's `waiting` status are reported to the Hermes dispatcher as waiting and alive, never as dead (the "waiting" heartbeat of rule 2) (a parked task sits in Hermes `scheduled`, which the dispatcher does not treat as dead; `test_a_parked_ready_task_does_not_make_its_assignee_look_active`, #75)
-- [ ] `unblock`, `reassign` and `wip_commit` for Hermes (today `unblock` and `wip_commit` raise `NotImplementedError` and are not declared; `reassign` is not implemented)
+- [ ] `unblock`, `reassign` and `wip_commit` for Hermes (`unblock` and `reassign` done and declared, tested against the simulated Hermes CLI, #367; `wip_commit` raises `NotImplementedError` and is not declared)
 
 ### adapters: Hermes plugin for post_tool_call and on_session_end
 labels: P0, week-1, area:adapters
