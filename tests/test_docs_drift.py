@@ -113,8 +113,11 @@ def commands() -> list[tuple[str, str]]:
 
 _ANY = "<placeholder>"
 
-# Lines that show a command failing on purpose.
-COUNTER_EXAMPLES = {" status --config x.toml"}
+# Lines that show a command failing on purpose, or one a design note only proposes.
+COUNTER_EXAMPLES = {
+    " status --config x.toml",  # install.md: global options go before the command
+    " answer <task> <label>",  # security.md, #300 design (proposed)
+}
 
 
 def check(args: str, top: argparse.ArgumentParser) -> str | None:
