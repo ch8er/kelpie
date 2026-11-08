@@ -28,14 +28,14 @@ snapshot:
       status_since: "2026-03-02T13:00:00+00:00"
       role: ops
       owner_id: agent-ops-1
-      block: {reason: "waiting_human: needs_input: which region for staging?", since: "2026-03-02T13:00:00+00:00"}
+      block: {category: waiting_human, reason: "waiting_human: needs_input: which region for staging?", since: "2026-03-02T13:00:00+00:00"}
     - id: T-1352
       title: "Backfill invoices table"
       status: blocked
       status_since: "2026-03-02T12:00:00+00:00"
       role: developer
       owner_id: agent-dev-1
-      block: {reason: "waiting_human: capability: needs a production database grant", since: "2026-03-02T12:00:00+00:00"}
+      block: {category: waiting_human, reason: "waiting_human: capability: needs a production database grant", since: "2026-03-02T12:00:00+00:00"}
     # Distractors: asked 10 minutes ago; and a block that waits for CI, not for a person.
     - id: T-1353
       title: "Rename feature flag"
@@ -43,7 +43,7 @@ snapshot:
       status_since: "2026-03-02T13:50:00+00:00"
       role: developer
       owner_id: agent-dev-2
-      block: {reason: "waiting_human: needs_input: keep the old flag?", since: "2026-03-02T13:50:00+00:00"}
+      block: {category: waiting_human, reason: "waiting_human: needs_input: keep the old flag?", since: "2026-03-02T13:50:00+00:00"}
     - id: T-1354
       title: "Fix flaky login test"
       status: blocked

@@ -158,12 +158,58 @@ def blocked(reason: str | None, condition_id: str | None = None, since: datetime
     "reason", ["guard", "GUARD", "guard: wait for CI", "waiting_ci #12", " quota "]
 )
 def test_allowed_block_reasons(reason: str) -> None:
-    assert run(blocked(reason)) == []
+    assert run(blocked(reason), session()) == []
 
 
 @pytest.mark.parametrize("reason", ["", "stuck", "guardian", "waiting", None])
 def test_disallowed_or_missing_block_reason_is_requeued(reason: str | None) -> None:
     assert run(blocked(reason), session()) == [ActionKind.REQUEUE]
+
+
+def categorized(reason: str, category: str | None) -> Task:
+    block = Block(reason, NOW - H, category=category)
+    return task(Status.BLOCKED, since=NOW - H, block=block)
+
+
+@pytest.mark.parametrize(
+    ("reason", "category", "requeued"),
+    [
+        ("stuck on the vendor", "guard", False),  # the category allows it, not the text
+        ("anything", " Waiting_CI ", False),
+        ("guard: trust me", "review_feedback", True),  # text is not read beside a category
+        ("guard: wait for CI", None, False),  # no category: the reason, as before
+        ("waiting_ci #12", None, False),
+        ("stuck", None, True),
+        ("guard: wait for CI", "  ", False),  # a blank category is none
+        ("waiting_human: needs_input: which API?", "waiting_human", False),
+    ],
+)
+def test_a_block_category_decides_over_its_text(
+    reason: str, category: str | None, requeued: bool
+) -> None:
+    got = run(categorized(reason, category), session())
+    assert got == ([ActionKind.REQUEUE] if requeued else [])
+
+
+def test_a_several_word_entry_still_matches_the_adapters_prefix() -> None:
+    rule = build({"allowed_block_reasons": ["waiting_human: needs_input"]})
+    typed = categorized("waiting_human: needs_input: which API?", "waiting_human")
+    assert run(typed, session(), rule=rule) == []  # as before categories
+    other = categorized("waiting_human: capability: grant access", "waiting_human")
+    assert run(other, session(), rule=rule) == [ActionKind.REQUEUE]
+    # A one-word entry never reads the text beside a category.
+    rule = build({"allowed_block_reasons": ["guard"]})
+    assert run(categorized("guard: trust me", "other"), session(), rule=rule) == [
+        ActionKind.REQUEUE
+    ]
+
+
+def test_the_requeue_names_the_category_that_decided() -> None:
+    snap = Snapshot(now=NOW, tasks=(categorized("guard: trust me", "review_feedback"),),
+                    sessions=(session(),))  # fmt: skip
+    (a,) = ExitContract().evaluate(snap)
+    assert "category 'review_feedback' (reason 'guard: trust me')" in a.reason
+    assert a.params["block_category"] == "review_feedback"
 
 
 def test_blocks_not_left_by_a_session_are_ignored() -> None:

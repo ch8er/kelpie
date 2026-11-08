@@ -33,6 +33,7 @@ snapshot:
       owner_id: agent-ops-1
       block:
         reason: "waiting_human: needs_input: CEO: backup-d1 on main (run 1001) — 403 10042 «Please enable R2 through the Cloudflare dashboard.» The job retried three times and stopped; enable R2 for the account, then rerun the job and unblock this task. Until then no backup is written and the retention check fails every night."
+        category: waiting_human
         since: "2026-03-02T14:00:00+00:00"
     # A person's task with agent work behind it: one agent task parked on it by a linked
     # human_task condition (its reason asks a person too), and one more behind that.
@@ -66,6 +67,7 @@ snapshot:
       owner_id: agent-dev-1
       block:
         reason: "waiting_human: needs_input: Stopped by Kelpie: Runaway run. The task stays blocked until a human resumes it."
+        category: waiting_human
         since: "2026-03-04T05:00:00+00:00"
         kelpie: stop
     # Look-alikes that wait on a condition, not on a person: rule 4's.

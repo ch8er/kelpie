@@ -609,8 +609,8 @@ db_path = "~/.hermes/kanban.db"
 session_stale_after = "60m"
 ```
 
-`kelpie.example.toml` has the same for `orphan_status` and `wait_condition`, and the
-alternative `allowed_block_reasons` list for Hermes block kinds.
+`kelpie.example.toml` has the same for `orphan_status` and `wait_condition`, and how rule 1
+reads Hermes block categories.
 
 Install node_exporter on each host where agents run, and point it at the Kelpie server.
 

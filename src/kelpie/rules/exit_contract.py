@@ -68,6 +68,7 @@ from typing import Any
 
 from kelpie.core.actions import Action, ActionKind, Severity
 from kelpie.core.model import (
+    Block,
     ConditionKind,
     KelpieMark,
     OwnerKind,
@@ -148,8 +149,10 @@ DEFAULT_ALLOWED_BLOCK_REASONS = (
 
 @dataclass(frozen=True, slots=True)
 class ExitContract:
-    """``allowed_block_reasons`` match the whole reason, or its first word followed by
-    ``:`` or a space, ignoring case ("guard: wait for CI" is a ``guard`` block). A block
+    """``allowed_block_reasons`` match the block's ``category`` when the adapter set one
+    (the platform's own record of the kind of block, not text an agent wrote), ignoring
+    case; without a category, the whole reason, or its first word followed by ``:`` or a
+    space ("guard: wait for CI" is a ``guard`` block). A block
     tied to a registered condition (named by the block or linked to the task) is always
     allowed. ``session_exit_grace`` gives the platform time to record a status after an
     exit, and applies to blocks left behind too."""
@@ -382,7 +385,7 @@ class ExitContract:
         # Tied to a condition (via the block or the task) means something will clear it.
         conditions, missing = linked_conditions(task, snapshot)
         block = task.block
-        if conditions or missing or (block is not None and self._allowed(block.reason)):
+        if conditions or missing or (block is not None and self._allowed(block)):
             return
         if block is not None and block.kelpie is KelpieMark.STOP:
             return  # Kelpie stopped this run: requeueing it would undo the stop
@@ -465,6 +468,9 @@ class ExitContract:
     def _requeue_block(self, task: Task, session: Session) -> Action:
         block = task.block
         got = f"'{block.reason}'" if block is not None and block.reason else "no reason"
+        category = (block.category or "").strip() if block is not None else ""
+        if category:  # the category decided, whatever the text says
+            got = f"category '{category}' (reason {got})"
         return Action(
             ActionKind.REQUEUE,
             NAME,
@@ -479,15 +485,23 @@ class ExitContract:
                 "session_id": session.id,
                 "owner_id": session.owner_id,
                 "block_reason": block.reason if block is not None else None,
+                **({"block_category": category} if category else {}),
             },
         )
 
-    def _allowed(self, reason: str) -> bool:
-        head = reason.strip().lower()
-        return any(
-            head == r or head.startswith(f"{r}:") or head.startswith(f"{r} ")
-            for r in (a.strip().lower() for a in self.allowed_block_reasons)
-        )
+    def _allowed(self, block: Block) -> bool:
+        allowed = [a.strip().lower() for a in self.allowed_block_reasons]
+        head = block.reason.strip().lower()
+
+        def prefix(r: str) -> bool:
+            return head == r or head.startswith(f"{r}:") or head.startswith(f"{r} ")
+
+        category = (block.category or "").strip().lower()
+        if category:
+            # An entry of several words ("waiting_human: needs_input") matches the start the
+            # adapter writes in front of the agent's text, as it did before categories.
+            return category in allowed or any(prefix(r) for r in allowed if ":" in r or " " in r)
+        return any(prefix(r) for r in allowed)
 
 
 def _how_to_answer(c: Criterion) -> str:

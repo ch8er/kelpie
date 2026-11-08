@@ -449,22 +449,19 @@ file, and lines over 16 KiB skipped. A worktree's `.git` file and a linked workt
 
 Blocks (`Block.reason`), from a `blocked` event at or after `status_since`:
 
-| Hermes | Block reason |
-| --- | --- |
-| typed block `needs_input`, `capability`, `transient` | `waiting_human: <kind>: <reason>` (Hermes parks these for an operator) |
-| untyped legacy block | the raw reason |
-| circuit breaker park (`gave_up` event, no block event) | `guard: hermes circuit breaker (<failures>/<limit>): <error>` |
-| anything else | empty |
+| Hermes | Block reason | `Block.category` |
+| --- | --- | --- |
+| typed block `needs_input`, `capability`, `transient` | `waiting_human: <kind>: <reason>` (Hermes parks these for an operator) | `waiting_human` |
+| untyped legacy block | the raw reason | none |
+| circuit breaker park (`gave_up` event, no block event) | `guard: hermes circuit breaker (<failures>/<limit>): <error>` | `guard` |
+| anything else | empty | none |
 
 `tasks.block_kind` survives an unblock, so it is only trusted together with a current block
-event. Rule 1 allows `waiting_human` and `guard` by default. The alternative is to keep the
-adapter's wording out of it and list the Hermes kinds yourself:
-
-```toml
-[engine.rules.exit_contract]
-allowed_block_reasons = ["guard", "waiting_ci", "waiting_pr_merge", "waiting_human", "quota",
-                         "needs_input", "capability", "transient"]
-```
+event. The category comes from Hermes' own record (the block's kind, the breaker's event),
+never from the reason an agent wrote. Rule 1 (`allowed_block_reasons`) matches the category
+when there is one, so typed blocks (`waiting_human`) and breaker parks (`guard`) are allowed
+by default and an agent's text cannot change that; an untyped block has no category and is
+judged by its reason, as before.
 
 Run outcome to the session's `final_status`:
 

@@ -102,6 +102,7 @@ def test_typed_block_is_a_wait_for_an_operator(board: Board) -> None:
     block = adapter(board).snapshot(NOW).tasks[0].block
     assert block is not None
     assert block.reason == "waiting_human: needs_input: which API version?"
+    assert block.category == "waiting_human"  # from Hermes' kind, not the text
     assert block.since == ago(hours=2)
 
 
@@ -111,6 +112,7 @@ def test_every_typed_block_kind_is_allowed_by_exit_contract(board: Board, kind: 
     board.event("t_1", "blocked", ago(hours=2), {"kind": kind, "reason": None})
     block = adapter(board).snapshot(NOW).tasks[0].block
     assert block is not None and block.reason == f"waiting_human: {kind}"
+    assert block.category == "waiting_human"
 
 
 def test_untyped_legacy_block_stays_raw(board: Board) -> None:
@@ -121,6 +123,8 @@ def test_untyped_legacy_block_stays_raw(board: Board) -> None:
     blocks = {t.id: t.block for t in adapter(board).snapshot(NOW).tasks}
     assert blocks["t_1"] is not None and blocks["t_1"].reason == "waiting_ci"
     assert blocks["t_2"] is not None and blocks["t_2"].reason == "initial_status"
+    # An untyped reason is an agent's text: no category, rules read the text.
+    assert blocks["t_1"].category is None and blocks["t_2"].category is None
 
 
 def test_block_without_any_event_has_no_reason(board: Board) -> None:
@@ -131,6 +135,7 @@ def test_block_without_any_event_has_no_reason(board: Board) -> None:
     assert blocks["t_1"] is not None and blocks["t_1"].reason == ""
     assert blocks["t_1"].since == ago(hours=6)
     assert blocks["t_2"] is not None and blocks["t_2"].reason == ""
+    assert blocks["t_1"].category is None  # a leftover block_kind is not evidence
 
 
 def test_circuit_breaker_park_ignores_leftover_block_kind(board: Board) -> None:
@@ -155,6 +160,7 @@ def test_circuit_breaker_park_ignores_leftover_block_kind(board: Board) -> None:
     block = adapter(board).snapshot(NOW).tasks[0].block
     assert block is not None
     assert block.reason == "guard: hermes circuit breaker (3/3): worker crashed"
+    assert block.category == "guard"
     assert block.since == ago(hours=1)
 
 

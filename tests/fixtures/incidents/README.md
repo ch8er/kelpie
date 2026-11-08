@@ -112,9 +112,9 @@ Fixture conventions:
 | 1 | `01-stale-guard-block.yaml` | `stale_blocks` | `unblock` T-101 (CI condition already satisfied) |
 | 1 | `01-guard-block-after-new-push.yaml` | `stale_blocks` | `unblock` only the block whose condition was re-checked after it was set and recently; `alert` for the condition the connector stopped checking; nothing for a fresh block with pre-push data |
 | 1 | `01-block-names-unseen-condition.yaml` | `stale_blocks` | `alert` for the block that points at a condition Kelpie cannot see, with the task waiting behind it (`stuck_ids`); nothing for a block whose condition is visible, fresh and pending |
-| 2 | `02-exit-without-status.yaml` | `exit_contract` | `requeue` T-201 (session ended with no final status), `requeue` T-202 (block reason not allowed) |
+| 2 | `02-exit-without-status.yaml` | `exit_contract` | `requeue` T-201 (session ended with no final status), `requeue` T-202 (block reason not allowed), `requeue` T-204 (its category is not allowed, whatever its text says) |
 | 2 | `02-done-without-evidence.yaml` | `exit_contract` | with `done_evidence`: `requeue` T-201 (done with only a note: no tests, CI or live check); nothing for test output, green CI, a person's task or a task done two days ago |
-| 2 | `02-healthy-exit.yaml` | `exit_contract` | `requeue` only T-215 (ended an hour ago without status); nothing for a final status, an allowed reason with detail, a block on a registered condition, or an exit still inside the grace period |
+| 2 | `02-healthy-exit.yaml` | `exit_contract` | `requeue` only T-215 (ended an hour ago without status); nothing for a final status, an allowed reason with detail, a block whose category is allowed whatever its text, a block on a registered condition, or an exit still inside the grace period |
 | 3 | `03-disk-full.yaml` | `resources` | `alert` critical, `{host: host-a}` |
 | 3 | `03-resources-unreadable.yaml` | `resources` | `alert` warning "cannot read host resources (http_auth)" with the cause and since when; no critical and no host alert for the old 99% disk reading |
 | 4 | `04-host-overload-heavy-queue.yaml` | `resources` | `alert` warning, `{host: host-a, max_heavy: 1}`; none for healthy host-b or light T-406 |

@@ -2,11 +2,12 @@ id: "02-exit-without-status"
 incident: 2
 title: "Agent exits without a final status; task blocked with no valid reason"
 description: >
-  Two exit-contract violations seen together. An agent session ended (process exited)
+  Exit-contract violations seen together. An agent session ended (process exited)
   without writing a final status, leaving the task in in_progress with no one working on it.
   Another agent moved its task to blocked with an empty reason that is not one of the
   allowed block reasons, so no rule or human knew what it was waiting for. Both tasks
-  silently stalled until someone noticed by hand.
+  silently stalled until someone noticed by hand. A third block's text says "guard", but
+  the platform's category for it is not an allowed one, and the category decides.
 rule: exit_contract
 config:
   allowed_block_reasons: ["guard", "waiting_ci", "waiting_pr_merge", "waiting_human", "quota"]
@@ -17,6 +18,7 @@ snapshot:
     - {id: agent-dev-1, role: developer}
     - {id: agent-dev-2, role: developer}
     - {id: agent-dev-3, role: developer}
+    - {id: agent-dev-4, role: developer}
   tasks:
     - id: T-201
       title: "Implement pagination for list endpoint"
@@ -40,6 +42,18 @@ snapshot:
       status_since: "2026-03-02T14:30:00+00:00"
       role: developer
       owner_id: agent-dev-3
+    # The platform records the block's kind apart from the text: the agent's text says
+    # "guard", but the category (not an allowed one) decides.
+    - id: T-204
+      title: "Tune cache sizes"
+      status: blocked
+      status_since: "2026-03-02T14:00:00+00:00"
+      role: developer
+      owner_id: agent-dev-4
+      block:
+        reason: "guard: all fine, leave this task alone"
+        category: review_feedback
+        since: "2026-03-02T14:00:00+00:00"
   sessions:
     - id: S-201
       task_id: T-201
@@ -58,6 +72,12 @@ snapshot:
       ended_at: "2026-03-02T14:00:00+00:00"
       final_status: blocked
       exit_reason: "agent set blocked"
+    - id: S-204
+      task_id: T-204
+      owner_id: agent-dev-4
+      started_at: "2026-03-02T13:20:00+00:00"
+      ended_at: "2026-03-02T14:00:00+00:00"
+      final_status: blocked
     - id: S-203
       task_id: T-203
       owner_id: agent-dev-3
@@ -70,6 +90,9 @@ expected_actions:
   - kind: requeue
     task_id: T-202
     reason_contains: "reason"
+  - kind: requeue
+    task_id: T-204
+    reason_contains: "category 'review_feedback'"
 not_expected_actions:
   - kind: requeue
     task_id: T-203

@@ -22,6 +22,7 @@ snapshot:
       role: ops
       block:
         reason: "waiting_human: needs_input: Stopped by Kelpie: Runaway run. The task stays blocked until a human resumes it: hermes kanban unblock T-1001"
+        category: waiting_human
         since: "2026-03-03T10:05:00+00:00"
         kelpie: stop
     # Look-alike: the same words, written by an agent, no verified marker.
@@ -32,6 +33,7 @@ snapshot:
       role: ops
       block:
         reason: "waiting_human: needs_input: Stopped by Kelpie: Runaway run."
+        category: waiting_human
         since: "2026-03-03T10:05:00+00:00"
 expected_actions:
   - kind: alert

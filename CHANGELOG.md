@@ -58,6 +58,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
   `cancel_build`, since the fix push builds them again. A refused job or a re-run in
   progress is no verdict. Only logged until `fail_fast_mode = "rule"`; the GitHub connector
   does not carry out this cancel yet.
+- `Block.category`: the kind of block the platform records apart from the reason text,
+  set by the adapter (Hermes: `waiting_human` for a typed block, `guard` for its circuit
+  breaker; none for an untyped block). Rule 1's `allowed_block_reasons` match the category
+  when there is one, so an agent's wording cannot turn a categorized block into an allowed
+  kind; blocks without a category (untyped Hermes blocks, other adapters) are read by their
+  reason as before. An entry of several words (`"waiting_human: needs_input"`) still matches
+  the prefix the adapter writes. The fixtures of Hermes-shaped typed blocks carry the
+  category now. Multi-host: upgrade the hub before its agents (an older hub refuses a
+  snapshot with a categorized block).
 - An alert raised again after its cooldown says, in its headline line, how many repeats the
   ledger merged into it since it was last sent ("raised 5 more times in 30 min"; Russian
   too). Alerts about a lasting condition keep speaking only on their transitions. A re-send

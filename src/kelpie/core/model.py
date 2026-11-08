@@ -114,13 +114,22 @@ class KelpieMark(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class Block:
+    """Why a task is blocked. ``reason`` is the text (often an agent's own words);
+    ``category`` is the kind of block the platform records apart from that text, normalised
+    by the adapter (``waiting_human`` for a block parked for a person, ``guard`` for the
+    platform's own guard or circuit breaker, ...), or ``None`` when the platform records
+    none. Rules match a category when there is one and read the reason only without it."""
+
     reason: str
     since: datetime
     condition_id: str | None = None
     kelpie: KelpieMark | None = None  # set only by an adapter that verified Kelpie's marker
+    category: str | None = None
 
     def __post_init__(self) -> None:
-        _cap(self, "reason")
+        _cap(self, "reason", "category")
+        if self.category is not None and not self.category.strip():
+            object.__setattr__(self, "category", None)  # blank: none
 
 
 @dataclass(frozen=True, slots=True)

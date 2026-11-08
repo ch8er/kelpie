@@ -26,6 +26,7 @@ snapshot:
       owner_id: agent-ops-1
       block:
         reason: "waiting_human: needs_input: CEO: enable R2 in the Cloudflare dashboard"
+        category: waiting_human
         since: "2026-10-26T10:00:00+00:00"
     - id: t_qa4d5e6f
       title: "Manual QA pass before release"
@@ -33,7 +34,7 @@ snapshot:
       status_since: "2026-10-26T09:00:00+00:00"
       role: qa
       owner_id: agent-qa-1
-      block: {reason: "waiting_human: needs_input: manual QA pass", since: "2026-10-26T09:00:00+00:00"}
+      block: {category: waiting_human, reason: "waiting_human: needs_input: manual QA pass", since: "2026-10-26T09:00:00+00:00"}
   snoozes:
     t_r2a1b2c3: {task_id: t_r2a1b2c3, until: "2026-10-26T00:00:00+00:00", reason: "deferred to the release",
                  by: ceo, created_at: "2026-10-18T12:00:00+00:00", source: cli, behind_at_snooze: 0}

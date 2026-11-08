@@ -631,6 +631,20 @@ def _block_mark(
     return (*mark(status_event), "|", *mark(block_event))
 
 
+def _block_category(
+    row: sqlite3.Row, status_event: sqlite3.Row | None, block_event: Any
+) -> str | None:
+    """The kind of block Hermes records apart from the reason text (``Block.category``):
+    ``waiting_human`` for a typed block Hermes parks for an operator, ``guard`` for its
+    circuit breaker; ``None`` for an untyped block, whose reason is an agent's own words."""
+    if block_event is not None:
+        kind = str(_payload(block_event["payload"]).get("kind") or _col(row, "block_kind") or "")
+        return "waiting_human" if kind in TYPED_BLOCKS else None
+    if status_event is not None and status_event["kind"] == "gave_up":
+        return "guard"
+    return None
+
+
 def format_age(delta: timedelta) -> str:
     seconds = max(0, int(delta.total_seconds()))
     for unit, size in (("d", 86400), ("h", 3600), ("m", 60)):
@@ -1189,6 +1203,7 @@ class HermesAdapter:
                     reason=_block_text(row, event, current, stop),
                     since=at if current is not None and at is not None else since,
                     kelpie=KelpieMark.STOP if stop is not None else None,
+                    category=_block_category(row, event, current),
                 )
                 marks[row["id"]] = _block_mark(event, found)
             seen[row["id"]] = (row["status"], _run_id(_col(row, "current_run_id")))
