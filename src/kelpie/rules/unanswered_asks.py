@@ -130,7 +130,8 @@ def _resolve(name: str, task: Task, agents: dict[str, list[Owner]]) -> Owner | N
     return None
 
 
-Replies = dict[tuple[str | None, str], list[tuple[datetime, set[str]]]]
+# (machine, author, a name the author mentioned) -> when that author last mentioned it
+Replies = dict[tuple[str | None, str, str], datetime]
 
 
 @dataclass(frozen=True, slots=True)
@@ -151,6 +152,7 @@ class UnansweredAsks:
     def evaluate(self, snapshot: Snapshot) -> Sequence[Action]:
         actions: list[Action] = []
         snoozed = checker(snapshot)
+        live = self._live_owners(snapshot)  # once per tick: asks x sessions was quadratic
         for ask in open_asks(snapshot):
             task = ask.task
             if task.status in _LEFT_TO_OTHERS:
@@ -162,8 +164,8 @@ class UnansweredAsks:
                 continue
             if snapshot.now - ask.comment.at >= MAX_STOP_AFTER:
                 continue  # a host that slept a lot: the ledger's once-window is wall-clock
-            if self._busy(ask.recipient, snapshot):
-                continue
+            if ask.recipient.id in live:
+                continue  # busy mid-run: not interrupted
             snooze = snoozed(task.id)
             if snooze is not None and snooze.holds:
                 continue
@@ -171,12 +173,13 @@ class UnansweredAsks:
             actions.append(self._remind(ask, step, age, snapshot, snooze))
         return actions
 
-    def _busy(self, recipient: Owner, snapshot: Snapshot) -> bool:
-        return any(
-            s.owner_id == recipient.id
-            and is_live(s, snapshot.now, self.session_stale_after, snapshot.host_sleeps)
+    def _live_owners(self, snapshot: Snapshot) -> set[str]:
+        return {
+            s.owner_id
             for s in snapshot.sessions
-        )
+            if s.owner_id is not None
+            and is_live(s, snapshot.now, self.session_stale_after, snapshot.host_sleeps)
+        }
 
     def _remind(
         self, ask: Ask, step: int, age: timedelta, snapshot: Snapshot, snooze: SnoozeCheck | None
@@ -245,8 +248,11 @@ def open_asks(snapshot: Snapshot) -> list[Ask]:
     for t in snapshot.tasks:
         for c in t.comments:
             if not c.human:
-                names = {_local(m) for m in _mentions(c.text)}
-                replies.setdefault((t.host, _local(c.author)), []).append((c.at, names))
+                author = _local(c.author)
+                for name in {_local(m) for m in _mentions(c.text)}:
+                    key = (t.host, author, name)
+                    if key not in replies or c.at > replies[key]:
+                        replies[key] = c.at
     found: list[Ask] = []
     for task in snapshot.tasks:
         if task.status.is_terminal or not task.comments:
@@ -287,9 +293,8 @@ def _answered_elsewhere(
     host: str | None, pair: tuple[str, str], asked_at: datetime, replies: Replies
 ) -> bool:
     asker, recipient = pair
-    return any(
-        at > asked_at and asker in names for at, names in replies.get((host, _local(recipient)), ())
-    )
+    latest = replies.get((host, _local(recipient), asker))
+    return latest is not None and latest > asked_at
 
 
 def _delivery(ask: Ask, snapshot: Snapshot) -> str:
