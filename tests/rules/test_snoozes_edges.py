@@ -80,22 +80,24 @@ def deadline(seconds: float) -> Iterator[None]:
         raise TimeoutError("behind_count did not finish")
 
     old = signal.signal(signal.SIGALRM, expired)
-    signal.setitimer(signal.ITIMER_REAL, seconds)
     try:
+        outer = signal.setitimer(signal.ITIMER_REAL, seconds)
         yield
     finally:
         signal.setitimer(signal.ITIMER_REAL, 0)
         signal.signal(signal.SIGALRM, old)
+    if outer[0]:  # an outer timer (pytest --timeout) keeps running
+        signal.setitimer(signal.ITIMER_REAL, *outer)
 
 
 @pytest.mark.skipif(not hasattr(signal, "SIGALRM"), reason="needs SIGALRM")
 def test_a_cycle_behind_the_task_is_counted_once_and_ends() -> None:
     deps = (
-        Dependency("agent-a", "T-101"),
-        Dependency("agent-b", "agent-a"),
-        Dependency("agent-a", "agent-b"),
+        Dependency("T-102", "T-101"),
+        Dependency("T-103", "T-102"),
+        Dependency("T-102", "T-103"),
     )
-    s = snap(task("T-101"), task("agent-a"), task("agent-b"), deps=deps)
+    s = snap(task("T-101"), task("T-102"), task("T-103"), deps=deps)
     with deadline(2.0):
         assert behind_count(s, "T-101") == 2
 

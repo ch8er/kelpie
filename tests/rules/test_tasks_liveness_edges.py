@@ -3,6 +3,7 @@ multi-host farm a sleep counts only for the host that slept, and a session or ta
 ``kelpie agent`` is aged on that agent's clock; boundaries are inclusive as documented."""
 
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 from kelpie.core.model import Condition, ConditionKind, HostSleep, Session, Snapshot, Status, Task
 from kelpie.rules._tasks import (
@@ -22,10 +23,10 @@ H = timedelta(hours=1)
 LAPTOP = HostSleep(NOW - 50 * M, NOW - 10 * M, agent="laptop")
 
 
-def remote(sid: str = "S-1", heard: datetime = NOW - 55 * M, **kw: object) -> Session:
+def remote(sid: str = "S-1", heard: datetime = NOW - 55 * M, **kw: Any) -> Session:
     return Session(
         sid, "T-1", "laptop:dev-1", NOW - 2 * H, last_heartbeat=heard, source="laptop/hermes", **kw
-    )  # type: ignore[arg-type]
+    )
 
 
 def test_a_sleep_counts_only_for_its_host() -> None:
@@ -81,11 +82,11 @@ def test_slept_since_bar_is_exclusive_and_an_earlier_sleep_is_not_it() -> None:
 
 def test_fresh_from_the_moment_it_began() -> None:
     since = NOW - H
-    checked = Condition("c", ConditionKind.CUSTOM, {}, checked_at=since)
+    checked = Condition("c", ConditionKind.CUSTOM, checked_at=since)
     assert fresh(checked, since, NOW, 2 * H)
-    assert fresh(Condition("c", ConditionKind.CUSTOM, {}, checked_at=NOW - H), since, NOW, H)
+    assert fresh(Condition("c", ConditionKind.CUSTOM, checked_at=NOW - H), since, NOW, H)
     assert not fresh(
-        Condition("c", ConditionKind.CUSTOM, {}, checked_at=NOW - H - M), since, NOW, 2 * H
+        Condition("c", ConditionKind.CUSTOM, checked_at=NOW - H - M), since, NOW, 2 * H
     )
 
 

@@ -127,8 +127,8 @@ def test_error_window_inclusive() -> None:
 
 
 def test_error_span_from_first_to_last_inclusive() -> None:
-    """Five errors 61 s from first to last are a streak even when the middle ones came in a
-    burst; 59 s from the second is not what is measured."""
+    """Five errors exactly ``min_error_span`` (60 s) from first to last are a streak, even
+    when the middle ones came in a burst; 59 s from first to last are not."""
     start = NOW - 2 * M
     offsets = [0, 2, 3, 4, 60]  # first to last: exactly min_error_span
     times = [start + o * S for o in offsets]

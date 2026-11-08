@@ -21,8 +21,8 @@ session that never reported its end counts as ended once its heartbeat is older 
 
 **"Done" needs evidence** (P1, off until ``done_evidence`` is set). Tasks were marked done
 without test output, green CI or a live check, then reopened. Each ``done_evidence`` entry
-names one kind of evidence: an artifact of one of the task's sessions since it was last
-reopened, whose path matches a glob (``artifacts``, case-insensitive, on the whole path or
+names one kind of evidence: an artifact of one of the task's sessions stamped after it was
+last reopened, whose path matches a glob (``artifacts``, case-insensitive, on the whole path or
 the file name: test output, a live-check report), or a satisfied condition of a kind linked
 to the task (``condition``, e.g. ``ci_status``; it needs a connector that keeps such a
 condition on done tasks, which none does yet). A task an agent completed (a session ended

@@ -3,6 +3,7 @@ must not end the scan of the others, thresholds are inclusive where the docs say
 and host sleeps count for the recipient's liveness too."""
 
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 from kelpie.core.actions import Action
 from kelpie.core.model import (
@@ -29,16 +30,16 @@ OWNERS = (
 )
 
 
-def task(tid: str, *comments: Comment, **kw: object) -> Task:
+def task(tid: str, *comments: Comment, **kw: Any) -> Task:
     return Task(
         tid,
         "t",
         kw.pop("status", Status.IN_PROGRESS),
         NOW - 9 * H,
-        owner_id="dev-1",  # type: ignore[arg-type]
+        owner_id="dev-1",
         comments=comments,
         **kw,
-    )  # type: ignore[arg-type]
+    )
 
 
 def ask(at: datetime, text: str = "@arch-1 v3 or v4?", author: str = "dev-1") -> Comment:
@@ -47,7 +48,7 @@ def ask(at: datetime, text: str = "@arch-1 v3 or v4?", author: str = "dev-1") ->
 
 def run(*tasks: Task, rule: UnansweredAsks | None = None, **extra: object) -> list[Action]:
     owners = extra.pop("owners", OWNERS)
-    snap = Snapshot(now=NOW, tasks=tasks, owners=owners, **extra)  # type: ignore[arg-type]
+    snap = Snapshot(now=NOW, tasks=tasks, owners=owners, **extra)
     return list((rule or UnansweredAsks()).evaluate(snap))
 
 
@@ -56,7 +57,7 @@ def test_a_task_left_out_does_not_end_the_scan() -> None:
     block) skips that ask only: a later task's ask is still reminded."""
     skipped = [
         task("T-1", ask(NOW - 10 * M)),  # too young
-        task("T-2", ask(NOW - 7 * 24 * H)),  # older than six days of wall clock
+        task("T-2", ask(NOW - 7 * 24 * H)),  # past stop_after
         task("T-3", ask(NOW - 2 * H), block=Block("needs_input: which API version?", NOW - H)),
         task("T-4", ask(NOW - 2 * H), status=Status.DONE),  # terminal
         task("T-5"),  # no comments
@@ -90,7 +91,7 @@ def test_a_step_is_counted_from_its_age() -> None:
 
 def test_six_days_of_wall_clock_end_it_exactly() -> None:
     """A host that slept most of the time: awake age under stop_after, wall clock at the
-    cap. The cap is "six days or more"."""
+    cap: at six days the rule stops (the configuration table: "this old")."""
     asked = NOW - MAX_STOP_AFTER
     sleep = HostSleep(asked + H, NOW - 2 * H)
     assert run(task("T-1", ask(asked)), host_sleeps=(sleep,)) == []
