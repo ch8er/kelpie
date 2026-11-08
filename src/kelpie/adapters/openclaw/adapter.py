@@ -207,7 +207,9 @@ def parse_line(line: str, cutoff: datetime, until: datetime | None = None) -> Sp
         rec = json.loads(line)
     except (ValueError, RecursionError):  # agents can write the spool
         return None
-    if not isinstance(rec, dict) or rec.get("type") not in _EVENT_TYPES:
+    if not isinstance(rec, dict) or not isinstance(rec.get("type"), str):
+        return None
+    if rec["type"] not in _EVENT_TYPES:
         return None
     at = _utc(rec.get("at"))
     session = _text(rec.get("session_id"))
