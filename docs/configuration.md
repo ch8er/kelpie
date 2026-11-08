@@ -2395,7 +2395,7 @@ There is no write endpoint: every other method gets 405, and the page has no for
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `enabled` | `false` | Start the listener with `kelpie serve`. |
-| `host` | `127.0.0.1` | Bind address. Off loopback a token is required: `kelpie serve` refuses to start without a strong one (16+ characters, 6+ different), and `kelpie doctor` warns. |
+| `host` | `127.0.0.1` | Bind address. Off loopback a token is required: `kelpie serve` refuses to start without a strong one (16+ characters, 6+ different), and `kelpie doctor` warns. On loopback a request must be addressed to `localhost`, a loopback address or this host, else 421 ([security.md](security.md#farm-view), DNS rebinding). |
 | `port` | `9466` | Port (9464 is the main port, 9465 `[hub]`'s). `kelpie serve` refuses to start when two of its listeners would share a port. |
 | `token_env` | `KELPIE_VIEW_TOKEN` | Variable holding the token. When set, every request needs it, on loopback too: `Authorization: Bearer <token>` (scripts), or as the password of the browser's sign-in prompt (HTTP Basic; any user name). |
 | `long_after` | `2h` | A task in progress this long is "running long" on the page. |

@@ -63,7 +63,9 @@ you would not publish.
 same guards: task ids and titles, condition targets, alert summaries, ledger reasons and
 today's spend, which are farm data. It has no write endpoint (405 for every method but `GET`). On loopback without a
 token any local process can read it, as it can read `/metrics`: set the token on a shared
-machine. It binds
+machine. On loopback it answers only requests addressed to `localhost`, `127.0.0.1`, `::1`
+or its configured host (421 otherwise), so a web page that rebinds its own name to
+127.0.0.1 cannot read it through your browser (DNS rebinding, #395). It binds
 `127.0.0.1` by default; on any other address `kelpie serve` refuses to start unless
 `[view] token_env` holds a strong token, which every request must then carry as a bearer
 token or as the password of HTTP Basic auth (compared in constant time; over plain http a

@@ -99,6 +99,11 @@ def fetch_view(url: str, token: str | None, timeout: float = TIMEOUT) -> FarmVie
             ) from None
         if 300 <= exc.code < 400:
             raise OSError(f"{url} redirected; not following it with the token") from None
+        if exc.code == 421:
+            raise OSError(
+                f"{url}: the view answers only requests to the address it listens on "
+                "(localhost, a loopback address or its [view] host)"
+            ) from None
         if exc.code == 404:
             raise OSError(f"no farm view at {url}: is [view] enabled?") from None
         raise OSError(f"the server answered {exc.code}") from None
