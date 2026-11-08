@@ -18,7 +18,7 @@ from kelpie.core.model import Snapshot, Status, Task
 from kelpie.doctor import check_view
 from kelpie.view.cli import fetch_view, plain_http_warning, run, server_url
 from kelpie.view.config import ViewSettings, load_view
-from kelpie.view.service import PATH, ViewServer, ViewSource
+from kelpie.view.service import PATH, ViewServer, ViewSource, _loopback_host
 from kelpie.view.text import render
 
 NOW = datetime(2026, 3, 2, 15, tzinfo=UTC)
@@ -131,6 +131,45 @@ def test_on_loopback_only_a_loopback_host_is_served(
 ) -> None:
     """DNS rebinding: a web page the operator opens cannot read the farm (#395)."""
     assert _request(listener, "GET", PATH, {"Host": host})[0] == code
+
+
+@pytest.mark.parametrize(
+    ("configured", "header", "ok"),
+    [
+        ("127.0.0.1", "127.0.0.1:9465", True),
+        ("127.0.0.1", "localhost.", True),
+        ("127.0.0.1", "127.0.0.9", True),  # any loopback literal: never a rebound name
+        ("127.0.0.1", "[0:0:0:0:0:0:0:1]:9465", True),
+        ("127.0.0.2", "127.0.0.2:9465", True),
+        ("::1", "[::1]:9465", True),
+        ("localhost", "LocalHost:9465", True),
+        ("127.0.0.1", "", False),
+        ("127.0.0.1", "[::1]evil.example", False),
+        ("127.0.0.1", "localhost:abc", False),
+        ("127.0.0.1", "localhost.attacker.example", False),
+        ("127.0.0.1", "10.0.0.5:9465", False),
+    ],
+)
+@pytest.mark.parametrize("path", ["/", "/manifest.webmanifest", PATH])
+def test_every_path_checks_the_host(listener: ViewServer, path: str) -> None:
+    assert _request(listener, "GET", path, {"Host": "attacker.example:9465"})[0] == 421
+
+
+def test_host_check_table(configured: str, header: str, ok: bool) -> None:
+    assert _loopback_host(header, configured) is ok
+
+
+def test_a_request_without_host_is_served(listener: ViewServer) -> None:
+    assert listener.host_ok(None) is True  # HTTP/1.0: browsers always send a Host
+
+
+def test_off_loopback_the_token_guards_instead() -> None:
+    settings = ViewSettings(enabled=True, host="0.0.0.0", port=0)
+    server = ViewServer(settings, _source(), "x" * 32)
+    try:
+        assert server.host_ok("attacker.example") is True
+    finally:
+        server.server_close()
 
 
 def test_a_token_with_blanks_around_it_still_matches() -> None:

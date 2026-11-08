@@ -25,8 +25,10 @@ from __future__ import annotations
 import base64
 import binascii
 import hmac
+import ipaddress
 import json
 import logging
+import re
 import threading
 import time
 from collections.abc import Callable
@@ -166,6 +168,25 @@ def _presented(header: str | None) -> bytes | None:
     return None
 
 
+_HOST = re.compile(r"(?:\[(?P<v6>[0-9a-f:.]+)\]|(?P<name>[^:\[\]]+))(?::\d{1,5})?")
+
+
+def _loopback_host(header: str, configured: str) -> bool:
+    """Whether a Host header names this loopback listener: ``localhost``, a loopback IP
+    literal (any form: a rebound name is never one) or the configured host, with an
+    optional numeric port."""
+    m = _HOST.fullmatch(header.strip().lower())
+    if m is None:
+        return False
+    name = (m["v6"] or m["name"]).rstrip(".")
+    if name in ("localhost", configured.strip().lower().strip("[]")):
+        return True
+    try:
+        return ipaddress.ip_address(name).is_loopback
+    except ValueError:
+        return False
+
+
 class ViewServer(GuardedServer):
     name = "view"
 
@@ -188,12 +209,7 @@ class ViewServer(GuardedServer):
         browsers always send one."""
         if not self.settings.loopback or header is None:
             return True
-        host = header.strip().lower()
-        if host.startswith("["):
-            name = host[1 : host.find("]")] if "]" in host else host
-        else:
-            name = host.rsplit(":", 1)[0] if host.count(":") == 1 else host
-        return name in {"localhost", "127.0.0.1", "::1", self.settings.host.lower()}
+        return _loopback_host(header, self.settings.host)
 
     def authorized(self, header: str | None) -> bool:
         if self.token is None:
@@ -208,7 +224,7 @@ class ViewHandler(GuardedHandler):
     def do_GET(self) -> None:
         self.close_connection = True
         if not self.server.host_ok(self.headers.get("Host")):
-            self._json(421, {"error": "unexpected host: use 127.0.0.1 or localhost"})
+            self._json(421, {"error": "unexpected host: use the address the view listens on"})
             return
         path = self.path.split("?")[0]
         if not self.server.authorized(self.headers.get("Authorization")):
