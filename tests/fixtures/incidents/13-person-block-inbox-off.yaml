@@ -24,6 +24,7 @@ snapshot:
       owner_id: agent-ops-1
       block:
         reason: "waiting_human: needs_input: CEO: backup-d1 on main (run 1001) — 403 10042 «Please enable R2 through the Cloudflare dashboard.»"
+        category: waiting_human
         since: "2026-03-02T14:00:00+00:00"
     - id: t_a1b2c3d5
       title: "Rotate the backup key"

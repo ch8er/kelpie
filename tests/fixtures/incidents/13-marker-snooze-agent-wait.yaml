@@ -39,7 +39,7 @@ snapshot:
       status_since: "2026-10-19T08:00:00+00:00"
       role: developer
       owner_id: agent-dev-1
-      block: {reason: "waiting_human: needs_input: CEO decided: after the release until:2026-11-15", since: "2026-10-19T08:00:00+00:00"}
+      block: {category: waiting_human, reason: "waiting_human: needs_input: CEO decided: after the release until:2026-11-15", since: "2026-10-19T08:00:00+00:00"}
     - {id: H-9, title: "Sign the vendor contract", status: ready, status_since: "2026-10-19T08:00:00+00:00", role: owner, owner_id: ceo}
     - id: T-4
       title: "Integrate the vendor API"

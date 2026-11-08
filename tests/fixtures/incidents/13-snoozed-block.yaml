@@ -28,7 +28,7 @@ snapshot:
       status_since: "2026-10-17T14:00:00+00:00"
       role: ops
       owner_id: agent-ops-1
-      block: {reason: "waiting_human: needs_input: CEO: enable R2", since: "2026-10-17T14:00:00+00:00"}
+      block: {category: waiting_human, reason: "waiting_human: needs_input: CEO: enable R2", since: "2026-10-17T14:00:00+00:00"}
     - id: T-2
       title: "Ship the release notes"
       status: blocked

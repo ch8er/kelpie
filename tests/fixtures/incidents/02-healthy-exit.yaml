@@ -29,6 +29,13 @@ snapshot:
       status_since: "2026-03-02T14:00:00+00:00"
       owner_id: agent-dev-2
       block: {reason: "waiting_ci: example/repo#88", since: "2026-03-02T14:00:00+00:00"}
+    # The platform's own category allows it, whatever the agent's text says.
+    - id: T-216
+      title: "Wait for the vendor"
+      status: blocked
+      status_since: "2026-03-02T14:00:00+00:00"
+      owner_id: agent-dev-2
+      block: {reason: "vendor said maybe next week", category: GUARD, since: "2026-03-02T14:00:00+00:00"}
     # Blocked on a registered condition, free-text reason.
     - id: T-213
       title: "Rotate staging certificate"
@@ -45,6 +52,7 @@ snapshot:
   sessions:
     - {id: S-211, task_id: T-211, owner_id: agent-dev-1, started_at: "2026-03-02T14:00:00+00:00", ended_at: "2026-03-02T15:00:00+00:00", final_status: done}
     - {id: S-212, task_id: T-212, owner_id: agent-dev-2, started_at: "2026-03-02T13:30:00+00:00", ended_at: "2026-03-02T14:00:00+00:00", final_status: blocked}
+    - {id: S-216, task_id: T-216, owner_id: agent-dev-2, started_at: "2026-03-02T13:30:00+00:00", ended_at: "2026-03-02T14:00:00+00:00", final_status: blocked}
     - {id: S-213, task_id: T-213, owner_id: agent-dev-3, started_at: "2026-03-02T12:30:00+00:00", ended_at: "2026-03-02T13:00:00+00:00", final_status: blocked}
     - {id: S-214, task_id: T-214, owner_id: reviewer-1, started_at: "2026-03-02T15:20:00+00:00", ended_at: "2026-03-02T15:56:00+00:00"}
     - {id: S-215, task_id: T-215, owner_id: agent-dev-4, started_at: "2026-03-02T14:00:00+00:00", ended_at: "2026-03-02T15:00:00+00:00", exit_reason: "context limit"}
@@ -58,3 +66,4 @@ not_expected_actions:
   - {kind: requeue, task_id: T-212}
   - {kind: requeue, task_id: T-213}
   - {kind: requeue, task_id: T-214}
+  - {kind: requeue, task_id: T-216}
