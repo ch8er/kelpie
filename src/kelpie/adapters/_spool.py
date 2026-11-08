@@ -11,6 +11,7 @@ matching write: every step relative to one handle on the directory.
 from __future__ import annotations
 
 import contextlib
+import errno
 import os
 import secrets
 import stat
@@ -48,7 +49,9 @@ def write_in_dir(directory: Path, name: str, body: bytes, prefix: str = ".tmp-")
     try:
         dfd = os.open(directory, flags)
     except OSError as exc:
-        raise OSError(f"{directory} is not a plain directory ({exc.strerror})") from None
+        plain = exc.errno not in (errno.ELOOP, errno.ENOTDIR)
+        what = "cannot be opened" if plain else "is not a plain directory"
+        raise OSError(exc.errno, f"{directory} {what} ({exc.strerror})") from None
     try:
         if not stat.S_ISDIR(os.fstat(dfd).st_mode):  # defence in depth: O_DIRECTORY did
             raise OSError(f"{directory} is not a plain directory")
@@ -56,7 +59,12 @@ def write_in_dir(directory: Path, name: str, body: bytes, prefix: str = ".tmp-")
         create = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
         fd = os.open(tmp, create | getattr(os, "O_CLOEXEC", 0), 0o600, dir_fd=dfd)
         try:
-            with os.fdopen(fd, "wb") as f:
+            try:
+                f = os.fdopen(fd, "wb")
+            except BaseException:
+                os.close(fd)
+                raise
+            with f:
                 f.write(body)
             os.replace(tmp, name, src_dir_fd=dfd, dst_dir_fd=dfd)
         except BaseException:

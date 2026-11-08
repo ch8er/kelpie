@@ -305,7 +305,8 @@ def connect(
     own: a host with several blackholed A/AAAA records cannot take a multiple of the
     deadline. DNS resolution itself is not bounded. Raises TimeoutError once the deadline
     has passed, else the last attempt's error. The socket keeps the timeout of its attempt;
-    callers re-arm it for what follows."""
+    callers set the one they want for what follows (:func:`create_connection` restores the
+    whole timeout, ``request`` and the GitHub client bound each read by their deadline)."""
     host, port = address
     if deadline - clock() <= 0:
         raise TimeoutError("connect deadline passed")
@@ -340,7 +341,9 @@ def create_connection(
         if timeout is None:
             return socket.create_connection(address, None, source_address)
         return socket.create_connection(address, source_address=source_address)
-    return connect(address, time.monotonic() + timeout, source_address)
+    sock = connect(address, time.monotonic() + timeout, source_address)
+    sock.settimeout(timeout)  # as the stdlib: each later operation gets the whole timeout
+    return sock
 
 
 class DeadlineHTTPConnection(http.client.HTTPConnection):
@@ -370,6 +373,9 @@ class DeadlineHTTPHandler(urllib.request.HTTPHandler):
 
 
 class DeadlineHTTPSHandler(urllib.request.HTTPSHandler):
+    """The https counterpart of :class:`DeadlineHTTPHandler`; mirrors the stdlib
+    ``HTTPSHandler.https_open`` (Python 3.12 and 3.13), context included."""
+
     def https_open(self, req: urllib.request.Request) -> http.client.HTTPResponse:
         return self.do_open(DeadlineHTTPSConnection, req, context=self._context)  # type: ignore[attr-defined]
 

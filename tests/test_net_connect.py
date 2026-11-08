@@ -213,3 +213,58 @@ def test_the_doctor_prometheus_check_connects_through_the_deadline(
 
     check_prometheus("http://127.0.0.1:9", {})
     assert len(connects) == 1 and 2.0 < connects[0] <= 3.0
+
+
+def test_create_connection_with_the_default_timeout_is_the_stdlib(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: list[object] = []
+    monkeypatch.setattr(net.socket, "create_connection", lambda *a, **k: seen.append((a, k)) or "s")
+    monkeypatch.setattr(net, "connect", lambda *a, **k: pytest.fail("not with a deadline"))
+    default = socket._GLOBAL_DEFAULT_TIMEOUT  # type: ignore[attr-defined]
+    assert net.create_connection(("h.example.test", 80), default) == "s"
+    assert seen == [((("h.example.test", 80),), {"source_address": None})]
+
+
+def test_create_connection_gives_later_reads_the_whole_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A fallback address connects with what was left; reads after it get the timeout."""
+    clock = FakeClock()
+    outcomes = {"192.0.2.1": "refuse", "192.0.2.2": "ok", "2001:db8::1": "ok"}
+    fake_network(monkeypatch, clock, lambda a: outcomes[a[0]], refuse_after=0.0)
+    sock = net.create_connection(("api.example.test", 443), 7.0)
+    assert sock.timeout == 7.0  # type: ignore[attr-defined]
+
+
+def test_the_github_client_uses_its_own_clock_for_the_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from kelpie.connectors.github.client import GitHubClient, GitHubError
+
+    seen: list[tuple[float, float]] = []
+
+    def record(
+        address: object, deadline: float, source: object = None, clock: Any = None
+    ) -> socket.socket:
+        seen.append((deadline, clock()))
+        raise ConnectionRefusedError
+
+    monkeypatch.setattr(net, "connect", record)
+    gh = GitHubClient(
+        "http://127.0.0.1:9", None, timeout=timedelta(seconds=4), monotonic=lambda: 500.0
+    )
+    with pytest.raises(GitHubError):
+        gh.get("/repos/example/repo/pulls/1")
+    assert seen == [(504.0, 500.0)]
+
+
+def test_the_https_handler_passes_its_context(monkeypatch: pytest.MonkeyPatch) -> None:
+    import ssl
+
+    context = ssl.create_default_context()
+    handler = net.DeadlineHTTPSHandler(context=context)
+    seen: list[tuple[object, dict[str, object]]] = []
+    monkeypatch.setattr(handler, "do_open", lambda cls, req, **kw: seen.append((cls, kw)) or "r")
+    assert handler.https_open(urllib.request.Request("https://h.example.test/")) == "r"
+    assert seen == [(net.DeadlineHTTPSConnection, {"context": context})]
