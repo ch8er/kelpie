@@ -38,3 +38,15 @@ def lines(objects: st.SearchStrategy[Any]) -> st.SearchStrategy[str]:
     encoded = objects.map(lambda o: json.dumps(o, allow_nan=True))
     nested = st.integers(min_value=1, max_value=20_000).map(lambda n: "[" * n + "]" * (n % 3))
     return encoded | st.text(max_size=200) | nested
+
+
+def paths(data: Any, prefix: tuple[Any, ...] = ()) -> list[tuple[Any, ...]]:
+    """Every key path into nested dicts and lists, so a test can change one value."""
+    out = [prefix] if prefix else []
+    if isinstance(data, dict):
+        for key, value in data.items():
+            out += paths(value, (*prefix, key))
+    elif isinstance(data, list):
+        for i, value in enumerate(data):
+            out += paths(value, (*prefix, i))
+    return out

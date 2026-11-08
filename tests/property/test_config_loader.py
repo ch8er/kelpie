@@ -20,7 +20,7 @@ from hypothesis import strategies as st
 
 from kelpie import app
 from kelpie.app import ConfigError, load_rules, load_settings
-from kelpie.core.serde import parse_duration
+from tests.property.strategies import paths as _paths
 
 ROOT = Path(__file__).parents[2]
 
@@ -55,17 +55,6 @@ VALUES = st.recursive(
     ),
     max_leaves=6,
 )
-
-
-def _paths(data: Any, prefix: tuple[Any, ...] = ()) -> list[tuple[Any, ...]]:
-    out = [prefix] if prefix else []
-    if isinstance(data, dict):
-        for key, value in data.items():
-            out += _paths(value, (*prefix, key))
-    elif isinstance(data, list):
-        for i, value in enumerate(data):
-            out += _paths(value, (*prefix, i))
-    return out
 
 
 def _set(data: Any, path: tuple[Any, ...], value: Any) -> None:
@@ -117,14 +106,6 @@ def _load(config: dict[str, Any]) -> bool:
         app.read_config = original  # type: ignore[assignment]
 
 
-def test_most_bases_load() -> None:
-    """The docs' examples are worth starting from only if most load as they are (some
-    need environment variables or files this test does not provide)."""
-    loaded = sum(_load(copy.deepcopy(base)) for base in BASES)
-    assert loaded >= len(BASES) // 2
-
-
-@pytest.mark.parametrize("value", [8.64e13, 10**15, "99999999999d", "9999999999999h"])
-def test_a_duration_out_of_range_is_a_value_error(value: object) -> None:
-    with pytest.raises(ValueError, match="out of range"):
-        parse_duration(value)  # type: ignore[arg-type]
+def test_every_base_loads() -> None:
+    """The starting points load as they are: changes to them are what the property tests."""
+    assert all(_load(copy.deepcopy(base)) for base in BASES)

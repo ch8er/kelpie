@@ -29,23 +29,13 @@ from kelpie.remote.protocol import (
 from kelpie.rules import REGISTRY
 from tests.incidents import Incident, all_paths, load
 from tests.property.strategies import JSON
+from tests.property.strategies import paths as _paths
 
 INCIDENTS = [load(p) for p in all_paths()]
 
 
 def _wire(snapshot: Snapshot) -> Any:
     return json.loads(json.dumps(encode_snapshot(snapshot)))
-
-
-def _paths(data: Any, prefix: tuple[Any, ...] = ()) -> list[tuple[Any, ...]]:
-    out = [prefix] if prefix else []
-    if isinstance(data, dict):
-        for key, value in data.items():
-            out += _paths(value, (*prefix, key))
-    elif isinstance(data, list):
-        for i, value in enumerate(data):
-            out += _paths(value, (*prefix, i))
-    return out
 
 
 @cache
@@ -62,10 +52,7 @@ def _evaluate_all(snapshot: Snapshot, incident: Incident) -> None:
 @pytest.mark.parametrize("incident", INCIDENTS, ids=lambda i: i.path.stem)
 def test_a_fixture_snapshot_survives_the_wire(incident: Incident) -> None:
     """Encoded and decoded, a snapshot is the same snapshot, or the hub says why not."""
-    try:
-        decoded = decode_snapshot(_wire(incident.snapshot))
-    except ProtocolError:
-        return  # a fixture may hold what an agent may not send (a control character, ...)
+    decoded = decode_snapshot(_wire(incident.snapshot))
     for name in SNAPSHOT_FIELDS:  # only the board goes over the wire
         assert getattr(decoded, name) == getattr(incident.snapshot, name), name
 

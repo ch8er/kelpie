@@ -14,6 +14,11 @@ from typing import Any, Literal, Union, get_args, get_origin, get_type_hints
 from kelpie.core import model
 from kelpie.core.model import Snapshot
 
+
+class DurationOutOfRange(ValueError):
+    """A duration past what ``timedelta`` holds."""
+
+
 _DURATION = re.compile(r"^(?:(?P<d>\d+)d)?(?:(?P<h>\d+)h)?(?:(?P<m>\d+)m)?(?:(?P<s>\d+)s)?$")
 
 
@@ -37,7 +42,7 @@ def parse_duration(value: str | int | float | timedelta) -> timedelta:
             seconds=parts.get("s", 0),
         )
     except OverflowError:  # past timedelta's range: a message, not a traceback
-        raise ValueError(f"duration out of range: {value!r}") from None
+        raise DurationOutOfRange(f"duration out of range: {value!r}") from None
 
 
 def parse_datetime(value: str | datetime) -> datetime:
@@ -60,6 +65,8 @@ def parse_when(value: str, now: datetime, tz: tzinfo) -> datetime:
         if text.startswith("-"):
             try:
                 ago = parse_duration(text[1:].strip().lower())
+            except DurationOutOfRange:
+                raise OverflowError from None  # reported below as out of range
             except ValueError:
                 ago = None
             if ago is None or ago <= timedelta(0):

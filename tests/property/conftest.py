@@ -22,4 +22,16 @@ settings.register_profile(
     deadline=None,
     suppress_health_check=[HealthCheck.too_slow, HealthCheck.data_too_large],
 )
-settings.load_profile(os.environ.get("KELPIE_HYPOTHESIS", "default"))
+# CI: the same examples on every run, no example database, and a failure prints the blob
+# that replays it (``@reproduce_failure``), so a red build is never a coin toss.
+settings.register_profile(
+    "ci",
+    max_examples=60,
+    deadline=None,
+    derandomize=True,
+    database=None,
+    print_blob=True,
+    suppress_health_check=[HealthCheck.too_slow, HealthCheck.data_too_large],
+)
+_default = "ci" if os.environ.get("CI") else "default"
+settings.load_profile(os.environ.get("KELPIE_HYPOTHESIS", _default))
