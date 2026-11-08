@@ -213,8 +213,12 @@ farm throughput metrics from traces.
   [security.md](security.md#text-from-agents)), with
   a Throughput row in the Grafana dashboard; these are snapshots of now (agents with any
   work, ownerless tasks only, returns per done task), not the report's day-long
-  utilization, queue and rework rate. The board keeps no status history, so stages
-  are rebuilt from current statuses, sessions and Kelpie's alert states.
+  utilization, queue and rework rate. The board keeps no status history, so Kelpie records
+  the status changes it observes on every tick ([storage](configuration.md#observed-task-status-transitions))
+  and stages are rebuilt from them, current statuses, sessions and Kelpie's alert states;
+  where nothing was recorded (before `kelpie serve` first ran, or past retention) a status
+  change between sessions is still placed at the next known change, and the section says
+  which source it used. Before/after verification still infers stages on both sides.
 
 ## Daily report
 

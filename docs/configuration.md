@@ -858,9 +858,9 @@ agents' sessions or edits their instructions.
 
 | Key | Default | Meaning |
 | --- | --- | --- |
-| `path` | `"kelpie.db"` | SQLite database: action ledger, alert states, snoozes, spans, recorded fixes. `":memory:"` keeps it in memory. `$KELPIE_DB` overrides it. |
-| `retention` | `"30d"` | Raw action-ledger rows, and alert states closed, older than this are pruned, hourly. At least the ledger's own windows: `[engine] once_window`, `cooldown`, `retry_after` and a day; at most `3650d`. |
-| `max_rows` | `1000000` | Raw action-ledger rows kept at most; past it the oldest whole days go first, but never a day within the ledger's own windows (above). In memory (`":memory:"`) the ledger keeps at most 100,000 entries, the newest, whatever their age: a farm that fills that within the ledger's windows may see an action repeat; use a database file. |
+| `path` | `"kelpie.db"` | SQLite database: action ledger, alert states, snoozes, spans, recorded fixes, observed task status transitions. `":memory:"` keeps it in memory. `$KELPIE_DB` overrides it. |
+| `retention` | `"30d"` | Raw action-ledger rows, alert states closed, and observed task status transitions older than this are pruned, hourly. At least the ledger's own windows: `[engine] once_window`, `cooldown`, `retry_after` and a day; at most `3650d`. |
+| `max_rows` | `1000000` | Raw action-ledger rows kept at most, and, counted apart, observed task status transitions; past it the oldest whole days of the ledger (the oldest transitions) go first, but never within the ledger's own windows (above). In memory (`":memory:"`) the ledger keeps at most 100,000 entries, the newest, whatever their age: a farm that fills that within the ledger's windows may see an action repeat; use a database file. |
 
 What retention keeps and drops:
 
@@ -881,7 +881,27 @@ What retention keeps and drops:
 - `kelpie doctor` shows the database's size (with its WAL), the raw ledger rows, the oldest
   one, and how many days are summed; it warns when the oldest row is two days past
   `retention` (nothing is pruning it).
+- Observed task status transitions (#157) are pruned the same way, row by row: those seen
+  more than `retention` ago go, except each task's newest one before that cut, which keeps
+  the task's status at the cut (a report can tell what status a task had when its day
+  began, and a restart compares with it). Past `max_rows`, the oldest go first, those
+  newest rows included, never within the ledger's own windows; a task whose last row went
+  that way is recorded again as a first sighting, never as a transition.
 - Spans have their own `[traces] retention` and `max_rows`.
+
+### Observed task status transitions
+
+Boards keep no status history, so on every tick `kelpie serve` compares each task's status
+(and the platform's own status, such as Hermes `triage` or `scheduled`) with the last one it
+recorded and stores a row only when it changed: the task id, the board (named Hermes boards;
+task ids carry its prefix, after the host's on a multi-host farm), the adapter, the old and
+the new status, the tick's time, the board's own `status_since`, and the last time the old
+status was seen. A task seen for the first time gets a row with the board's `status_since`
+as its start. Nothing is written to the board, no text is stored, and a task missing from a
+tick records nothing. The last record per task is read back at start, so a restart invents
+no transition; a change during the downtime is known only to within the gap (the board's
+`status_since` places it when it falls inside). On a multi-host farm the hub records the
+merged boards. Rules never read these rows; the daily report does ([report](#report)).
 
 ## [snooze]
 
