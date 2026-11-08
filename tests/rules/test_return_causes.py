@@ -1,3 +1,4 @@
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -54,6 +55,38 @@ def test_dominant_conflicts_on_a_hot_file_alert_and_warn_live_tasks() -> None:
     assert "4 of 6 task returns in the last 24h (67%)" in alert.reason
     assert comment.kind is ActionKind.COMMENT and comment.task_id == "L" and comment.once
     assert comment.params["hot_files"] == [ROUTES]
+
+
+def test_recorded_files_decide_over_the_text() -> None:
+    other = "merge conflict in src/app/other.py"
+
+    def conflict(*files: str, text: str = other) -> Return:
+        return Return(NOW - H, text, "merge_conflict", files)
+
+    tasks = (
+        task("A", conflict(ROUTES), conflict(" ./src/app/routes.py "), files=(ROUTES,)),
+        task("B", conflict(ROUTES), ret("lint")),
+        task("C", conflict("routes.py"), ret("missing tests")),  # a bare name resolves
+    )
+    alert = run(*tasks)[0]
+    # The text names other.py four times, the recorded files name routes.py: they count.
+    assert alert.params["hot_files"] == [ROUTES]
+    assert alert.params["conflicts_by_file"] == {ROUTES: 4}
+    # The same returns without recorded files: the reason counts, as before.
+    plain = [task(t.id, *(replace(r, files=()) for r in t.returns)) for t in tasks]
+    assert run(*plain)[0].params["hot_files"] == ["src/app/other.py"]
+    # Names that are only whitespace are no names: the reason counts.
+    blank = [task(t, conflict("   ")) for t in "DEFGH"]
+    assert run(*blank)[0].params["hot_files"] == ["src/app/other.py"]
+
+
+def test_recorded_files_respect_expected_shared() -> None:
+    tasks = [
+        task(t, Return(NOW - H, "merge conflict", "merge_conflict", (ROUTES,))) for t in "ABCDE"
+    ]
+    assert run(*tasks)[0].params["hot_files"] == [ROUTES]
+    rule = ReturnCauses(expected_shared=("src/app/*.py",))
+    assert all(a.params.get("finding") != "hot_files" for a in run(*tasks, rule=rule))
 
 
 def test_the_reason_beats_the_category() -> None:

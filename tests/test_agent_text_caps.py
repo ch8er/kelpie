@@ -123,3 +123,13 @@ def test_the_ledger_cuts_agent_text_in_params(tmp_path: Path) -> None:
     assert got["b"] == {"observe_only": True, "state": "s", "n": 3, "truncated": True}
     assert got["c"] == {"rounds": 3}
     assert MAX_STORED_PARAMS > 1000
+
+
+def test_conflict_file_names_are_cleaned_and_capped() -> None:
+    from kelpie.core.model import MAX_RETURN_FILE, MAX_RETURN_FILES, Return
+
+    bad = ("src/a.py\n\n**urgent**", "src/" + "x" * (MAX_RETURN_FILE + 1), "", "  ", "\tb.py")
+    r = Return(NOW, "merge conflict", files=[" src/ok.py ", *bad, "src/ok.py"])  # type: ignore[arg-type]
+    assert r.files == ("src/ok.py", "b.py")
+    many = Return(NOW, "merge conflict", files=tuple(f"f{i}.py" for i in range(500)))
+    assert len(many.files) == MAX_RETURN_FILES and isinstance(many.files, tuple)

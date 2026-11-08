@@ -6,6 +6,7 @@ read-only input; they never mutate it and never perform I/O.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
@@ -18,6 +19,9 @@ from typing import Any, Literal
 # whole into the ledger, the report and ``kelpie why``.
 MAX_AGENT_TEXT = 8000  # as far as acceptance criteria and evidence are searched
 CUT_MARK = "\u2026"
+MAX_RETURN_FILES = 100  # conflicting files kept per return
+MAX_RETURN_FILE = 1024  # characters of one such file name
+_CONTROL = re.compile(r"[\x00-\x1f\x7f]")
 
 
 def capped(text: str, limit: int = MAX_AGENT_TEXT) -> str:
@@ -125,14 +129,23 @@ class Block:
 
 @dataclass(frozen=True, slots=True)
 class Return:
-    """A task sent back (e.g. from review or merge) with a categorized reason."""
+    """A task sent back (e.g. from review or merge) with a categorized reason. ``files`` are
+    the files a merge conflict was in, when the platform records them apart from the
+    reason text (repository paths; an adapter that fills them also sets ``category`` to
+    ``merge_conflict`` unless its reason says so); empty when it does not. Names are
+    stripped; empty ones, ones over ``MAX_RETURN_FILE`` characters or with control
+    characters are dropped, as are repeats, and at most ``MAX_RETURN_FILES`` are kept."""
 
     at: datetime
     reason: str
     category: str | None = None
+    files: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         _cap(self, "reason")
+        names = (f.strip() for f in self.files if isinstance(f, str))
+        kept = (f for f in names if f and len(f) <= MAX_RETURN_FILE and not _CONTROL.search(f))
+        object.__setattr__(self, "files", tuple(dict.fromkeys(kept))[:MAX_RETURN_FILES])
 
 
 @dataclass(frozen=True, slots=True)
