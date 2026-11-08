@@ -24,6 +24,7 @@ from kelpie.core.actions import Action, ActionKind, Severity
 from kelpie.core.model import OwnerKind, Return, Snapshot, Task
 from kelpie.rules import register
 from kelpie.rules._alerts import alert_params, count
+from kelpie.rules._params import positive_int as _positive_int
 
 NAME = "ping_pong"
 
@@ -115,12 +116,6 @@ class PingPong:
             o.id for o in snapshot.owners if o.kind is OwnerKind.HUMAN and o.serves(task)
         )
         return humans[0] if humans else None
-
-
-def _positive_int(value: Any, name: str) -> int:
-    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
-        raise ValueError(f"{name} must be a positive integer")
-    return value
 
 
 @register(NAME)

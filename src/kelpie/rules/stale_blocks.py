@@ -108,6 +108,7 @@ from kelpie.rules import needs_you, register
 from kelpie.rules._alerts import alert_params, check_connectors
 from kelpie.rules._block_storm import resolved_text, storms
 from kelpie.rules._chains import behind_lookup, behind_text
+from kelpie.rules._params import human as _human
 from kelpie.rules._snoozes import SnoozeCheck, checker, describe
 from kelpie.rules._tasks import (
     DEFAULT_MAX_CONDITION_AGE,
@@ -430,14 +431,6 @@ def _back(snooze: SnoozeCheck | None) -> str:
 
 def _snooze_params(snooze: SnoozeCheck | None) -> dict[str, Any]:
     return {"snooze": snooze.params()} if snooze is not None and not snooze.holds else {}
-
-
-def _human(d: timedelta) -> str:
-    minutes = max(0, int(d.total_seconds() // 60))
-    hours, minutes = divmod(minutes, 60)
-    if hours and minutes:
-        return f"{hours}h {minutes:02d}m"
-    return f"{hours}h" if hours else f"{minutes}m"
 
 
 def _short(d: timedelta) -> str:

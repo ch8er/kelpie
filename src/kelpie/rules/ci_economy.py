@@ -111,6 +111,7 @@ from kelpie.rules._alerts import count as counted
 from kelpie.rules._ci_not_started import STATE as NOT_STARTED
 from kelpie.rules._ci_not_started import not_started, ran_again
 from kelpie.rules._ci_outage import outages, passed_again
+from kelpie.rules._params import strings as _strings
 from kelpie.rules._toolchain import DEFAULT_WINDOW as TOOLCHAIN_WINDOW
 
 NAME = "ci_economy"
@@ -691,12 +692,6 @@ def _hours(d: timedelta) -> str:
 
 
 # --- configuration ----------------------------------------------------------------------
-
-
-def _strings(value: Any, name: str) -> tuple[str, ...]:
-    if not isinstance(value, list | tuple) or not all(isinstance(v, str) and v for v in value):
-        raise ValueError(f"{name} must be a list of non-empty strings")
-    return tuple(value)
 
 
 def _duration(value: Any, name: str) -> timedelta:

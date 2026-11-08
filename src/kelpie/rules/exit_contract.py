@@ -82,6 +82,7 @@ from kelpie.core.serde import parse_duration
 from kelpie.rules import register
 from kelpie.rules._acceptance import ANNOUNCEMENT, Criterion, unanswered
 from kelpie.rules._alerts import alert_params
+from kelpie.rules._params import hours as _hours
 from kelpie.rules._tasks import (
     DEFAULT_STALE_AFTER,
     Exit,
@@ -519,10 +520,6 @@ def _how_to_answer(c: Criterion) -> str:
 
 def _minutes(d: timedelta) -> str:
     return f"{round(d.total_seconds() / 60)} min"
-
-
-def _hours(d: timedelta) -> str:
-    return f"{d.total_seconds() / 3600:.1f}h"
 
 
 def _duration(value: Any, name: str) -> timedelta:
