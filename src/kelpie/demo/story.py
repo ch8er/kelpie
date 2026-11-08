@@ -223,7 +223,9 @@ class Story:
                 call = ModelCall("t_heartbeat", session, MODEL, CONTEXT, 300, f.ago(seconds=5))
                 f.export([call])
                 model_calls += 1
-                f.spool.tool_call("t_heartbeat", rid, "heartbeat_check", {"target": "all"})
+                f.spool.tool_call(
+                    "t_heartbeat", rid, "heartbeat_check", {"target": "all"}, at=f.now
+                )
                 b.update("t_heartbeat", last_heartbeat_at=f.now)
             if any(d.action.rule == "loop_breaker" for d in f.tick()):
                 break

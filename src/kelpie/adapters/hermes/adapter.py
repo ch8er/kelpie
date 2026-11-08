@@ -756,12 +756,13 @@ class HermesAdapter:
             return ["spool: disabled"]
         if not self.spool.exists():
             return [f"spool: missing ({self.spool})"]
-        last = self.last_spool_at()
+        last = self.last_spool_at(now + FUTURE_SKEW)
         if last is None:
             return [f"spool: no readable lines ({self.spool})"]
         return [f"spool: last line {format_age(now - last)} ago ({self.spool})"]
 
-    def last_spool_at(self) -> datetime | None:
+    def last_spool_at(self, until: datetime | None = None) -> datetime | None:
+        """When the newest line was written; lines dated after ``until`` are skipped."""
         if self.spool is None:
             return None
         tail = _spool.tail_lines(self.spool, SPOOL_TAIL)
@@ -772,7 +773,7 @@ class HermesAdapter:
                 at = _utc(json.loads(line)["at"])
             except (ValueError, KeyError, TypeError, RecursionError):
                 continue
-            if at is not None:
+            if at is not None and (until is None or at <= until):
                 return at
         return None
 
