@@ -2,9 +2,10 @@
 utilization per role, rework rate (cost per completed task is priced by the report
 section). Pure and deterministic; no LLM.
 
-**Where the time comes from.** Kelpie does not store a task's status history: the board
-reports each task's current status and since when, its returns, and the sessions that
-worked on it (start, end, the status each declared at its end). The day of every task is
+**Where the time comes from.** Boards keep no status history: they report each task's
+current status and since when, its returns, and the sessions that worked on it (start, end,
+the status each declared at its end). Kelpie records the status changes it observes itself
+(``task_transitions``, :mod:`kelpie.core.transitions`, #157). The day of every task is
 rebuilt from those and from Kelpie's own long-lived alert states, cut into segments at
 every known change; each segment gets one stage, the first that applies:
 
@@ -14,15 +15,20 @@ every known change; each segment gets one stage, the first that applies:
 3. ``waiting``: a ``wait_condition`` or ``stale_blocks`` state is open (waiting for
    conditions);
 4. else the status at that time: the current one from ``status_since`` on (``in_progress``
-   without an owner is ``ownerless``), before that the status the last session declared at
-   its end (none: ready). ``ready`` and ``in_progress``
+   without an owner is ``ownerless``); before that the latest of the recorded status
+   (placed at :func:`kelpie.core.transitions.changed_at`) and the status the last session
+   declared at its end (neither: ready). ``ready`` and ``in_progress``
    outside a session are ``queue`` (waiting for an agent), ``review`` and ``accepted`` are
    ``review`` (waiting for a reviewer or a merge), ``blocked`` and ``waiting`` are
    ``waiting``; ``backlog`` and finished statuses are not counted.
 
 A task is counted from its first known moment within the day (its first session, alert
-state or current status, whichever is earliest): when it was created is not known, so queue
-time before its first pickup is left out and the queue is a lower bound. The board only
+state, recorded status or current status, whichever is earliest). Without a record, when
+it was created is not known, so queue time before its first pickup is left out and the
+queue is a lower bound; a recorded first sighting starts it at the board's
+``status_since`` then. Where nothing was recorded (before recording started, or a task
+retention dropped), a status change between sessions is still placed at the next known
+change. The board only
 looks back so far (Hermes ``lookback``): older sessions and finished tasks are missing. A
 session without an end or a heartbeat counts as running until the end of the day. Hours
 are task-hours: two tasks in the queue for an hour are two queue hours, and the *mean queue
@@ -55,6 +61,7 @@ from itertools import pairwise
 from kelpie.core.model import Owner, OwnerKind, Session, Status, Task
 from kelpie.core.stages import STAGES, UNKNOWN_ROLE, rework_role, status_stage, task_roles
 from kelpie.core.states import OpenState
+from kelpie.core.transitions import StatusChange, changed_at
 
 OWNERLESS_RULES = frozenset({"orphan_status"})
 WAITING_RULES = frozenset({"wait_condition", "stale_blocks"})
@@ -82,6 +89,8 @@ class RoleThroughput:
     # waiting task-hours by cause (kelpie.report.waits), and the tasks that waited for each
     waits: Mapping[str, float] = field(default_factory=dict)
     waited: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
+    # active tasks whose stages used a status Kelpie recorded (#157), not only inference
+    recorded: tuple[str, ...] = ()
 
     @property
     def tasks_per_hour(self) -> float:
@@ -124,10 +133,14 @@ def throughput(
     review_roles: Sequence[str] = ("reviewer",),
     session_roles: Mapping[str, str] | None = None,
     wait_cause: WaitSplit | None = None,
+    history: Mapping[str, Sequence[StatusChange]] | None = None,
 ) -> list[RoleThroughput]:
     """Throughput per role for the day ``[start, end)``, roles in name order.
     ``session_roles`` names the role of sessions whose owner is not in ``owners``;
-    ``wait_cause`` splits a stretch of a task's ``waiting`` stage by what it waited for."""
+    ``wait_cause`` splits a stretch of a task's ``waiting`` stage by what it waited for;
+    ``history`` holds the status changes Kelpie recorded per task id, in time order
+    (:func:`kelpie.core.transitions.history`; None: inferred only)."""
+    recorded_of = history or {}
     hours = (end - start).total_seconds() / 3600
     roles_of_task = task_roles(tasks, owners)
     owner_roles = {o.id: o.role for o in owners}
@@ -151,8 +164,9 @@ def throughput(
         a = acc[role]
         mine = sorted(by_task.get(task.id, ()), key=lambda s: (s.started_at, s.id))
         waiting: list[tuple[datetime, datetime]] = []
+        rec = _known(recorded_of.get(task.id, ()), end)
         stages = _task_stages(
-            task, mine, windows, start, end, review_roles, role_of_session, waiting
+            task, mine, windows, start, end, review_roles, role_of_session, waiting, rec
         )
         done = task.status is Status.DONE and start <= task.status_since < end
         for stage, h in stages.items():
@@ -166,6 +180,8 @@ def throughput(
             a.completed.append(task.id)
         if stages or done:
             a.active.append(task.id)
+            if rec:
+                a.recorded.append(task.id)
             # Rework: who worked the task within the day (non-review sessions), and for
             # each return the role that redid it (core.stages.rework_role).
             worked = {
@@ -184,7 +200,7 @@ def throughput(
                     acc[r].worked.add(task.id)
                     acc[r].returns += 1
         a.reopened += sum(1 for at in task.reopened_at if start <= at < end)
-        if _stage_at(task, mine, windows, end, review_roles, role_of_session, end) == "queue":
+        if _stage_at(task, mine, windows, end, review_roles, role_of_session, end, rec) == "queue":
             a.queue_now += 1
 
     agents: dict[str, list[str]] = defaultdict(list)
@@ -227,6 +243,7 @@ def throughput(
                 queue_now=a.queue_now,
                 waits=dict(a.waits),
                 waited={c: tuple(sorted(ids)) for c, ids in a.waited.items()},
+                recorded=tuple(sorted(a.recorded)),
             )
         )
     return out
@@ -251,6 +268,7 @@ class _Acc:
     queue_now: int = 0
     waits: Counter[str] = field(default_factory=Counter)
     waited: defaultdict[str, set[str]] = field(default_factory=lambda: defaultdict(set))
+    recorded: list[str] = field(default_factory=list)
 
 
 def union_hours(intervals: list[tuple[datetime, datetime]]) -> float:
@@ -291,12 +309,15 @@ def stage_spans(
     end: datetime,
     review_roles: Sequence[str],
     role_of_session: _RoleOf,
+    recorded: Sequence[StatusChange] = (),
 ) -> list[tuple[str, datetime, datetime]]:
     """The task's stages within ``[start, end)`` as ``(stage, from, to)`` stretches, in time
-    order (see the module docs); ``sessions`` are the task's own."""
+    order (see the module docs); ``sessions`` are the task's own, ``recorded`` its recorded
+    status changes in time order (none: the status before ``status_since`` is inferred)."""
     if task.status.is_terminal and task.status_since < start:
         return []
     points = {end, task.status_since}
+    points.update(p for c in recorded if (p := changed_at(c)) < end)
     for s in sessions:
         points.update((s.started_at, session_end(s, end)))
     for kind in ("ownerless", "waiting"):
@@ -307,7 +328,7 @@ def stage_spans(
     cuts = sorted(p for p in points | {first} if first <= p <= end)
     out = []
     for a, b in pairwise(cuts):
-        stage = _stage_at(task, sessions, windows, a, review_roles, role_of_session, end)
+        stage = _stage_at(task, sessions, windows, a, review_roles, role_of_session, end, recorded)
         if stage is not None:
             out.append((stage, a, b))
     return out
@@ -322,11 +343,14 @@ def _task_stages(
     review_roles: Sequence[str],
     role_of_session: _RoleOf,
     waiting: list[tuple[datetime, datetime]] | None = None,
+    recorded: Sequence[StatusChange] = (),
 ) -> dict[str, float]:
     """Hours of the task per stage within ``[start, end)`` (see the module docs); the
     stretches in the ``waiting`` stage are appended to ``waiting``."""
     out: Counter[str] = Counter()
-    spans = stage_spans(task, sessions, windows, start, end, review_roles, role_of_session)
+    spans = stage_spans(
+        task, sessions, windows, start, end, review_roles, role_of_session, recorded
+    )
     for stage, a, b in spans:
         out[stage] += (b - a).total_seconds() / 3600
         if stage == "waiting" and waiting is not None:
@@ -342,6 +366,7 @@ def _stage_at(
     review_roles: Sequence[str],
     role_of_session: _RoleOf,
     end: datetime,
+    recorded: Sequence[StatusChange] = (),
 ) -> str | None:
     """The task's stage from ``at`` until the next known change."""
     if task.status.is_terminal and at >= task.status_since:
@@ -357,4 +382,12 @@ def _stage_at(
     before = [s for s in sessions if session_end(s, end) <= at]
     last = max(before, key=lambda s: (session_end(s, end), s.id)) if before else None
     status = last.final_status if last and last.final_status else Status.READY
+    seen = [c for c in recorded if changed_at(c) <= at]
+    if seen and (last is None or changed_at(seen[-1]) >= session_end(last, end)):
+        status = seen[-1].status  # recorded after the last session's end: it wins
     return status_stage(task, status) if status is not Status.IN_PROGRESS else "queue"
+
+
+def _known(recorded: Sequence[StatusChange], end: datetime) -> tuple[StatusChange, ...]:
+    """The recorded changes known by ``end``, ordered by when they happened."""
+    return tuple(sorted((c for c in recorded if c.at < end), key=changed_at))

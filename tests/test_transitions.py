@@ -289,3 +289,23 @@ def test_memory_store_prune_keeps_the_newest() -> None:
     rec.record(snap(T0 + DAY, task(status=Status.DONE)))
     assert store.prune(T0 + 2 * DAY) == 1 and [r.status for r in store.rows] == [Status.DONE]
     assert [r.status for r in store.transitions(T0 + 3 * DAY, T0 + 4 * DAY)] == [Status.DONE]
+
+
+def test_the_report_store_reads_them(tmp_path: Path) -> None:
+    from kelpie.report.store import ReportStore
+
+    path = _db(tmp_path)
+    store = SqliteLedgerStore(path)
+    rec = TransitionRecorder(store)
+    rec.record(snap(T0 - 2 * DAY, task("b1:1", board="b1"), task("b2:1", board="b2")))
+    rec.record(snap(T0 + TICK, task("b1:1", Status.BLOCKED, T0, board="b1")))
+    store.close()
+    with ReportStore(path) as report:
+        got = report.transitions(T0, T0 + DAY)
+        assert report.transitions_since() == T0 - 2 * DAY
+    # each board's task once before the day, then b1's change inside it
+    assert [(c.task_id, c.status) for c in got] == [
+        ("b1:1", Status.READY),
+        ("b2:1", Status.READY),
+        ("b1:1", Status.BLOCKED),
+    ]

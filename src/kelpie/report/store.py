@@ -30,8 +30,11 @@ from kelpie.core.storage import (
     read_action_days,
     read_host_sleeps,
     read_instruction_tokens,
+    read_oldest_transition,
     read_snoozes,
+    read_transitions,
 )
+from kelpie.core.transitions import StatusChange
 from kelpie.report.fixes import FixEvent, read_fixes
 
 
@@ -123,6 +126,15 @@ class ReportStore:
     def snoozes(self, after: datetime) -> list[Snooze]:
         """Stored snoozes that ended after ``after`` (#176)."""
         return read_snoozes(self._db, after)
+
+    def transitions(self, start: datetime, end: datetime) -> list[StatusChange]:
+        """Task status changes Kelpie recorded (#157) in ``[start, end)``, plus each task's
+        last one before ``start``."""
+        return read_transitions(self._db, start, end)
+
+    def transitions_since(self) -> datetime | None:
+        """When the oldest stored status change was seen (None: none recorded)."""
+        return read_oldest_transition(self._db)
 
     def attribution(self) -> Attribution:
         return self._span_store().attribution()
