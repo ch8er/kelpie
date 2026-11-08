@@ -10,6 +10,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ### Added
 
+- `kelpie run-once --dry-run` prints the actions every loaded rule asks for on one snapshot
+  (built as `kelpie why` builds it: offline, `--refresh` adds GitHub; the open alert states
+  read from the database without writing), with each rule's mode, and exits. Nothing is
+  dispatched or written; `--json` for scripts. Without `--dry-run` it refuses.
 - `/metrics`: `kelpie_role_idle_seconds_total`, idle time per role (agent-seconds its
   agents had no live session and no open task, counted from each tick to the next; a gap
   over 10 minutes, or 3 `[engine] interval`s when longer, is not counted), with a Grafana
