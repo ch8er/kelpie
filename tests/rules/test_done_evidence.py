@@ -149,3 +149,10 @@ def test_evidence_must_postdate_the_last_reopen() -> None:
 def test_build_rejects(config: dict, message: str) -> None:
     with pytest.raises(ValueError, match=message):
         build(config)
+
+
+def test_a_shared_green_ci_is_evidence_for_each_waiter_only() -> None:
+    shared = Condition("ci:X", ConditionKind.CI_STATUS, "X", satisfied=True, task_ids=("T",))
+    assert build(CONFIG).evaluate(done(conditions=(shared,))) == []
+    others = Condition("ci:X", ConditionKind.CI_STATUS, "X", satisfied=True, task_ids=("Y",))
+    assert build(CONFIG).evaluate(done(conditions=(others,)))

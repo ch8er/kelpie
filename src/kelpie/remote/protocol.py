@@ -260,7 +260,10 @@ def _raw_lists(cls: type, data: Any, where: str) -> None:
 
 
 def _is_id(name: str) -> bool:
-    return name in ("id", "assignee", "subtasks", "depends_on") or name.endswith("_id")
+    return name in ("id", "assignee", "subtasks", "depends_on", "task_ids") or name.endswith("_id")
+
+
+MAX_WAITERS = 64  # tasks sharing one condition (Condition.task_ids) an agent may send
 
 
 def _checked[T](obj: T, where: str) -> T:
@@ -272,6 +275,8 @@ def _checked[T](obj: T, where: str) -> T:
         if not f.init:
             continue
         value = getattr(obj, f.name)
+        if f.name == "task_ids" and isinstance(value, tuple) and len(value) > MAX_WAITERS:
+            raise ProtocolError(f"{where}.task_ids: more than {MAX_WAITERS} waiters")
         clean = _value(hints[f.name], value, f"{where}.{f.name}", _is_id(f.name))
         if clean is not value:
             changes[f.name] = clean
@@ -855,6 +860,7 @@ def namespace_snapshot(agent: str, adapter: str, part: Snapshot) -> Snapshot:
             c,
             id=condition_id(agent, c.id),
             task_id=opt(c.task_id),
+            task_ids=tuple(ns(t) for t in c.task_ids),
             params=_condition_params(c.kind, c.params, ns),
         )
         for c in part.conditions

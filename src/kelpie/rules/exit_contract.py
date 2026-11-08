@@ -120,7 +120,7 @@ class Evidence:
         """Evidence of the current completion: since the task was last reopened."""
         if self.condition is not None:
             return any(
-                c.task_id == task.id and c.kind is self.condition and c.satisfied is True
+                c.waits(task.id) and c.kind is self.condition and c.satisfied is True
                 for c in snapshot.conditions
             )
         since = max(task.reopened_at, default=None)

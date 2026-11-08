@@ -24,7 +24,8 @@ def bare_block(task: Task, snapshot: Snapshot) -> bool:
 def linked_conditions(task: Task, snapshot: Snapshot) -> tuple[list[Condition], str | None]:
     """Conditions of the task's current block or wait, and a referenced id Kelpie cannot see.
 
-    The condition named by the block wins. Otherwise conditions linked by ``task_id`` count,
+    The condition named by the block wins. Otherwise conditions the task waits on count (its
+    own, ``task_id``, or one it shares, ``task_ids``),
     except those registered before the task entered its current status (left over from an
     earlier wait). Returns ``([], missing_id)`` when the block names an unknown condition.
     """
@@ -34,8 +35,7 @@ def linked_conditions(task: Task, snapshot: Snapshot) -> tuple[list[Condition], 
     current = [
         c
         for c in snapshot.conditions
-        if c.task_id == task.id
-        and (c.registered_at is None or c.registered_at >= task.status_since)
+        if c.waits(task.id) and (c.registered_at is None or c.registered_at >= task.status_since)
     ]
     return sorted(current, key=lambda c: c.id), None
 
@@ -68,7 +68,7 @@ def _check_task_status(condition: Condition, snapshot: Snapshot) -> Condition:
     valid = (
         isinstance(ref, str)
         and bool(ref)
-        and ref != condition.task_id  # a task cannot wait for itself
+        and ref not in condition.waiters  # a task cannot wait for itself
         and wanted in Status.__members__.values()
     )
     target = snapshot.task(ref) if valid and isinstance(ref, str) else None
@@ -155,7 +155,7 @@ def widen(new: Contribution, last: Contribution, snapshot: Snapshot) -> Contribu
         c.id
         for c in last.conditions
         if c.id not in taken
-        and task_of.get(c.id, c.task_id) not in on_board
+        and not ({task_of[c.id]} if c.id in task_of else set(c.waiters)) & on_board
         and _recent(c, snapshot.now)
     }
     return Contribution(
@@ -195,7 +195,7 @@ def carry_forward(snapshot: Snapshot, last: Contribution) -> Snapshot:
         t.block.condition_id
         for t in tasks
         if t.id in others and t.block is not None and t.block.condition_id
-    } | {c.id for c in conditions if c.task_id in others}
+    } | {c.id for c in conditions if any(w in others for w in c.waiters)}
     inputs = {c.id: c for c in last.inputs}
     links = {link.condition_id: link for link in last.links}
     added: list[Condition] = []
@@ -207,7 +207,7 @@ def carry_forward(snapshot: Snapshot, last: Contribution) -> Snapshot:
             if (
                 counts[old.id] == 1
                 and inputs.get(old.id) == now
-                and (old.id in held or now.task_id in where)
+                and (old.id in held or any(w in where for w in now.waiters))
             ):
                 conditions[at[old.id]] = old
             continue

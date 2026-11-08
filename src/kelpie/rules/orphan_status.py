@@ -624,11 +624,7 @@ class OrphanStatus:
         # A target that finished done was recovered: no loop through it.
         explicit = {x for x in explicit if x not in by_id or by_id[x].status is not Status.DONE}
         waiting = {d.task_id for d in snapshot.dependencies if d.depends_on == task.id}
-        waiting |= {
-            c.task_id
-            for c in snapshot.conditions
-            if c.task_id is not None and _names_task(c, task.id)
-        }
+        waiting |= {w for c in snapshot.conditions if _names_task(c, task.id) for w in c.waiters}
         implicit = {x for x in waiting if x in by_id and not by_id[x].status.is_terminal}
         return sorted(explicit), sorted(implicit)
 

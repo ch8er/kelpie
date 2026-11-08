@@ -312,3 +312,19 @@ def test_waits_in_sessions_are_read_once_over_every_board(
     assert (w.task_id, w.role, w.shape) == ("sign:t_s1", "dev", "sleep")
     assert w.session_id == next(s.id for s in snap.sessions if s.task_id == "sign:t_s1")
     assert snap.skill_loads_counted == ("hermes",)  # the home's skill loads, once
+
+
+def test_shared_condition_waiters_are_namespaced_both_ways(tmp_path: Path) -> None:
+    from kelpie.adapters.hermes.boards import _local_condition, namespace_board
+    from kelpie.core.model import Condition, ConditionKind, Snapshot
+    from kelpie.core.ports import UnsupportedAction
+
+    c = Condition("C", ConditionKind.PR_MERGED, "t1", {"repo": "o/r", "pr": 1}, task_ids=("t2",))
+    part = namespace_board("main", Snapshot(now=datetime.now(UTC), conditions=(c,)), "hermes")
+    assert part.conditions[0].task_id == "main:t1"
+    assert part.conditions[0].task_ids == ("main:t2",)
+    board = HermesAdapter(db_path=tmp_path / "kanban.db", spool=None, board="main")
+    assert _local_condition(board, part.conditions[0]).task_ids == ("t2",)
+    foreign = Condition("C", ConditionKind.PR_MERGED, "main:t1", task_ids=("other:t9",))
+    with pytest.raises(UnsupportedAction):
+        _local_condition(board, foreign)

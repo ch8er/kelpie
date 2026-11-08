@@ -260,7 +260,13 @@ def namespace_board(board: str, part: Snapshot, source: str) -> Snapshot:
         ),
         dependencies=tuple(Dependency(ns(d.task_id), ns(d.depends_on)) for d in part.dependencies),
         conditions=tuple(
-            replace(c, task_id=opt(c.task_id), params=_params(c, ns)) for c in part.conditions
+            replace(
+                c,
+                task_id=opt(c.task_id),
+                task_ids=tuple(ns(t) for t in c.task_ids),
+                params=_params(c, ns),
+            )
+            for c in part.conditions
         ),
         sessions=tuple(
             replace(s, id=ns(s.id), task_id=ns(s.task_id), source=source) for s in part.sessions
@@ -297,4 +303,9 @@ def _local_condition(board: HermesAdapter, c: Condition) -> Condition:
     params = dict(c.params)
     if c.kind in TASK_REF_KINDS and isinstance(params.get("task"), str):
         params["task"] = local(params["task"])
-    return replace(c, task_id=None if c.task_id is None else local(c.task_id), params=params)
+    return replace(
+        c,
+        task_id=None if c.task_id is None else local(c.task_id),
+        task_ids=tuple(local(t) for t in c.task_ids),
+        params=params,
+    )

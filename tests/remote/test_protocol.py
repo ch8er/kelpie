@@ -21,6 +21,7 @@ from kelpie.core.model import (
 )
 from kelpie.remote.protocol import (
     MAX_ID,
+    MAX_WAITERS,
     PLATFORM_ACTIONS,
     AdapterReport,
     Outcome,
@@ -464,3 +465,28 @@ def test_optional_fields_may_still_be_null() -> None:
     )
     (t,) = snap.tasks
     assert (t.owner_id, t.estimate, t.block) == (None, None, None)
+
+
+def _with_condition(**fields: object) -> dict:
+    plain = encode_snapshot(board())
+    (cond,) = plain["conditions"]
+    return {**plain, "conditions": [{**cond, **fields}]}
+
+
+def test_shared_condition_waiters_are_checked_as_ids() -> None:
+    ok = decode_snapshot(_with_condition(task_ids=["t_2b", "t_3c"]))
+    assert ok.conditions[0].task_ids == ("t_2b", "t_3c")
+    for bad in ([""], ["x" * 300], ["a\x00b"], [1]):
+        with pytest.raises(ProtocolError):
+            decode_snapshot(_with_condition(task_ids=bad))
+    with pytest.raises(ProtocolError, match="waiters"):
+        decode_snapshot(_with_condition(task_ids=[f"t{i}" for i in range(MAX_WAITERS + 1)]))
+
+
+def test_a_list_field_is_never_null() -> None:
+    with pytest.raises(ProtocolError):
+        decode_snapshot(_with_condition(task_ids=None))
+    plain = encode_snapshot(board())
+    task = {**plain["tasks"][0], "subtasks": None}
+    with pytest.raises(ProtocolError):
+        decode_snapshot({**plain, "tasks": [task, *plain["tasks"][1:]]})

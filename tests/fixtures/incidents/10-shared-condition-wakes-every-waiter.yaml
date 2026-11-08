@@ -1,0 +1,45 @@
+id: "10-shared-condition-wakes-every-waiter"
+incident: 10
+title: "One condition several tasks wait on wakes each of them"
+description: >
+  Three tasks wait for the same pull request to land. The fact is one condition, shared:
+  registered by T-1021 and waited on by T-1022 and T-1023 too (task_ids). Once it holds,
+  each waiter is woken. A fourth waiting task with its own, still pending condition on
+  another PR is not woken by it, and a done task listed as a waiter is not woken either.
+  Its registered_at is when its last waiter joined.
+rule: wait_condition
+snapshot:
+  now: "2026-03-02T18:00:00+00:00"
+  owners:
+    - {id: agent-dev-1, role: developer}
+  tasks:
+    - {id: T-1021, title: "Migrate billing", status: waiting, status_since: "2026-03-02T16:00:00+00:00", owner_id: agent-dev-1}
+    - {id: T-1022, title: "Migrate invoices", status: waiting, status_since: "2026-03-02T16:10:00+00:00", owner_id: agent-dev-1}
+    - {id: T-1023, title: "Migrate reports", status: waiting, status_since: "2026-03-02T16:20:00+00:00", owner_id: agent-dev-1}
+    - {id: T-1024, title: "Migrate exports", status: waiting, status_since: "2026-03-02T16:30:00+00:00", owner_id: agent-dev-1}
+    - {id: T-1025, title: "Old migration", status: done, status_since: "2026-03-02T15:00:00+00:00", owner_id: agent-dev-1}
+    # Waits too, on nothing registered, and is no waiter of C-1021: not woken by it.
+    - {id: T-1026, title: "Migrate audit log", status: waiting, status_since: "2026-03-02T16:40:00+00:00", owner_id: agent-dev-1}
+    # Listed as a waiter, but entered its current wait after the condition's last join:
+    # C-1021 is left over from an earlier wait of its, not evidence for this one.
+    - {id: T-1027, title: "Migrate settings", status: waiting, status_since: "2026-03-02T17:00:00+00:00", owner_id: agent-dev-1}
+  conditions:
+    - id: C-1021
+      kind: pr_merged
+      task_id: T-1021
+      task_ids: [T-1022, T-1023, T-1025, T-1027]
+      params: {repo: example/repo, pr: 210}
+      satisfied: true
+      satisfied_at: "2026-03-02T17:40:00+00:00"
+      checked_at: "2026-03-02T17:58:00+00:00"
+      registered_at: "2026-03-02T16:20:00+00:00"  # when its last waiter joined
+    - {id: C-1024, kind: pr_merged, task_id: T-1024, params: {repo: example/repo, pr: 211}, satisfied: false, checked_at: "2026-03-02T17:58:00+00:00"}
+expected_actions:
+  - {kind: wake, task_id: T-1021, params: {conditions: [C-1021]}}
+  - {kind: wake, task_id: T-1022, params: {conditions: [C-1021]}}
+  - {kind: wake, task_id: T-1023, params: {conditions: [C-1021]}}
+not_expected_actions:
+  - {kind: wake, task_id: T-1024}
+  - {kind: wake, task_id: T-1025}
+  - {kind: wake, task_id: T-1026}
+  - {kind: wake, task_id: T-1027}

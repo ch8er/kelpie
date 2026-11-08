@@ -315,6 +315,13 @@ carry out actions outside the platform (cancel a CI build). They live in
 | Action connector | `ActionConnector`: `name`, `actions` (the `ActionKind`s it executes), `execute(action) -> ActionResult` | Passed to the engine as an executor |
 | Data source | `ResourceReader.read(now)`, `ProviderReader.read(now)`, or a snapshot step that adds `builds` | Called during snapshot assembly |
 
+**Who waits, and on what.** A condition belongs to the task that registered it
+(`task_id`); other tasks waiting on the same fact are listed in `task_ids` (one PR several
+tasks wait to land is one condition: rules see it for each of them, `Condition.waiters`),
+and then `registered_at` is when the last of them joined. `Condition.target` says what it
+waits on, typed: a pull request (`pr_merged`, `ci_status` with `repo` and `pr` in params),
+a task (`human_task`, `task_status` with `task`) or a person (`person`).
+
 **Condition results.** Return an updated copy of the condition:
 
 | Field | Meaning |
