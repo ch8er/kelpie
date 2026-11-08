@@ -48,8 +48,6 @@ from typing import Any
 
 OUTAGE = "outage"  # the middle part of every outage's state id
 _OUTAGE_ID = re.compile(rf"[a-z][a-z0-9_]*:{OUTAGE}:[0-9a-f]{{12}}")
-# Rule 9's outages: failing CI jobs, and CI_NOT_STARTED_STATE.
-OUTAGE_STATE_PREFIX = "ci_economy:outage:"
 FOLDED_UNDER = "folded_under"  # param of a folded alert: the state id of its incident
 MAX_BUILDS = 20  # failing build ids an outage's params list, newest first
 

@@ -86,7 +86,6 @@ MAX_LINKS = 20  # issues one pull request may close
 MAX_TITLE = 300
 MAX_LABELS = 100
 MAX_LABEL = 50
-MAX_BRANCH = 255
 MAX_NUMBER = 10**9
 MAX_COMMENT = 60_000  # characters of a comment (GitHub's limit is 65536)
 TRUSTED = frozenset({"OWNER", "MEMBER", "COLLABORATOR"})  # GitHub's author_association
