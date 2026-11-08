@@ -138,6 +138,7 @@ def test_a_block_missing_from_the_snapshot_is_not_unblocked(
     a = make(board, exe)
     blocked(board, "t2")
     board.update("t1", status="blocked")
+    board.event("t1", "blocked", NOW, {"reason": "blocked after the snapshot"})
     with pytest.raises(HermesError, match="not blocked in the last snapshot"):
         a.unblock("t1", "met")
     with pytest.raises(HermesError, match="not blocked in the last snapshot"):
@@ -263,7 +264,9 @@ def test_other_statuses_are_not_reassigned(
     assert argv(log) == []
 
 
-@pytest.mark.parametrize("owner", ["alice", "kelpie", "none", "-", "", "--force", "dev 2", "a/b"])
+@pytest.mark.parametrize(
+    "owner", ["alice", "kelpie", "none", "-", "", "--force", "dev 2", "a/b", "dev.2"]
+)
 def test_people_kelpie_and_non_profile_names_are_refused(
     board: Board, cli: tuple[str, Path], owner: str
 ) -> None:
@@ -333,3 +336,27 @@ def test_reassign_on_a_named_board(board: Board, cli: tuple[str, Path]) -> None:
     boards = HermesBoards(boards=(a,))
     boards.reassign("main:t1", "reviewer-2", "orphan")
     assert row(board) == ("review", "reviewer-2")
+
+
+def test_an_owner_picked_since_the_snapshot_is_not_overridden(
+    board: Board, cli: tuple[str, Path]
+) -> None:
+    exe, log = cli
+    board.task("t1", "review", NOW - timedelta(hours=4), assignee=None)
+    a = make(board, exe)
+    board.update("t1", assignee="reviewer-3")  # a person picked a reviewer meanwhile
+    with pytest.raises(HermesError, match="assigned to reviewer-3 since the snapshot"):
+        a.reassign("t1", "reviewer-2", "orphan")
+    assert argv(log) == [] and row(board) == ("review", "reviewer-3")
+
+
+def test_a_circuit_breaker_park_is_not_unblocked(board: Board, cli: tuple[str, Path]) -> None:
+    exe, log = cli
+    board.task("t1", "blocked", NOW - timedelta(hours=3), assignee="dev-1", failures=3)
+    board.event("t1", "blocked", NOW - timedelta(hours=2), {"reason": "an older block"})
+    board.event("t1", "unblocked", NOW - timedelta(hours=1, minutes=30))
+    board.event("t1", "gave_up", NOW - timedelta(hours=1), {"failures": 3, "error": "ci #4"})
+    a = make(board, exe)
+    with pytest.raises(UnsupportedAction, match="circuit breaker"):
+        a.unblock("t1", "met")
+    assert argv(log) == [] and row(board)[0] == "blocked"

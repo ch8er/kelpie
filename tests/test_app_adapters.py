@@ -402,10 +402,10 @@ def test_act_mode_for_stop_only_rules_is_allowed_with_hermes(tmp_path: Path) -> 
     mixed = EngineConfig.from_mapping(
         {
             "dry_run": False,
-            "rules": {"loop_breaker": {"mode": "act"}, "stale_blocks": {"mode": "act"}},
+            "rules": {"loop_breaker": {"mode": "act"}, "checkpoints": {"mode": "act"}},
         }
     )
-    with pytest.raises(ConfigError, match=r"\['stale_blocks'\]"):
+    with pytest.raises(ConfigError, match=r"\['checkpoints'\]"):
         build_app(Settings(engine=mixed, db_path=None, hermes=hermes))
 
 
@@ -423,21 +423,26 @@ def test_status_shows_spool_age(tmp_path: Path) -> None:
 
 def test_act_allow_list_matches_what_hermes_carries_out() -> None:
     """Rules allowed to act on Hermes emit only what the adapter carries out (stop, wait,
-    wake of a parked task, comment) and alerts."""
+    wake of a parked task, comment, unblock, reassign) and alerts, plus orphan_status's
+    close, which becomes an alert at runtime (a gap, not a refusal)."""
     import importlib
 
     from kelpie.app import HERMES_ACT_RULES
 
-    carried_out = {"ALERT", "ESCALATE", "STOP", "WAIT", "WAKE", "COMMENT"}
+    carried_out = {"ALERT", "ESCALATE", "STOP", "WAIT", "WAKE", "COMMENT", "UNBLOCK", "REASSIGN"}
     assert {
         "loop_breaker",
         "wait_condition",
         "conflict_warning",
         "dispatch_gate",
+        "stale_blocks",
+        "orphan_status",
     } == HERMES_ACT_RULES
     for name in HERMES_ACT_RULES:
         source = Path(importlib.import_module(f"kelpie.rules.{name}").__file__ or "").read_text()
         kinds = set(re.findall(r"ActionKind\.(\w+)", source))
+        if name == "orphan_status":
+            kinds.discard("CLOSE")
         assert kinds <= carried_out, (name, kinds - carried_out)
 
 
@@ -609,8 +614,9 @@ def test_what_keeps_a_rule_from_acting_is_said_plainly(tmp_path: Path) -> None:
 
     hermes = load_settings(write(tmp_path, FARMS["hermes"]))
     found = {r: b.reason for r, b in act_blockers(hermes, build_adapters(hermes)).items()}
-    assert found["stale_blocks"] == "Hermes can't clear blocks yet"
-    assert found["orphan_status"] == "Hermes can't close tasks or reassign tasks yet"
+    assert "stale_blocks" not in found
+    assert found["orphan_status"] == "Hermes can't close tasks yet"
+    assert found["checkpoints"] == "Hermes can't make WIP commits yet"
     assert found["exit_contract"] == "Hermes requeues only tasks Kelpie parked"
     assert found["ci_economy"] == (
         "Kelpie cancels no builds and proposes no CI changes: no CI connector is configured "

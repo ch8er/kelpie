@@ -310,11 +310,14 @@ Rule 4 (`stale_blocks`) clears a block whose condition is met with
 `hermes kanban unblock --reason=<reason> -- <task>`: Hermes returns the task to the phase it
 was blocked in (`ready`, or `review` when it was blocked in review; `todo` while a parent is
 open) and records the reason as an `UNBLOCK:` comment signed `kelpie`. Kelpie clears only the
-block its snapshot showed: the task's latest status event and block event must be unchanged
-since, so a task blocked again for another reason is not unblocked (the rule decides again on
-the next tick), and a task that is no longer blocked is left alone. A block that carries
-Kelpie's stop marker, whether it verifies or not, waits for a person and is never cleared
-(`UnsupportedAction`: a person is told instead), and nor is a task in any other status
+block the adapter's latest snapshot showed: the task's latest status event and block event
+must be unchanged since, so a task blocked again for another reason is not unblocked (the
+rule decides again on the next tick), and a task that is no longer blocked is left alone. On
+a `kelpie agent` host the agent may have read the board again between the hub's decision and
+the action, so there the check is against that newer read. A block that carries Kelpie's stop
+marker, whether it verifies or not, waits for a person and is never cleared
+(`UnsupportedAction`: a person is told instead), nor is a block Hermes' circuit breaker set
+(no block event of its own; unblocking would reset its failure count), nor a task in any other status
 (`scheduled` is a park; only Kelpie's own parks are woken, by `requeue`). Like every unblock,
 it pages chats subscribed to the task, and an agent that blocks the same task again with the
 same kind sends it to `triage` (Hermes' unblock-loop breaker).
@@ -322,7 +325,8 @@ same kind sends it to `triage` (Hermes' unblock-loop breaker).
 Rule 3 (`orphan_status`) hands a task nobody runs to an idle agent of its role with
 `hermes kanban assign -- <task> <profile>`, then says why in a comment signed `kelpie`. Only a
 `todo`, `ready` or `review` task that no run claims, with the status and run Kelpie's snapshot
-showed, and only to a profile name (lowercased, as Hermes stores it) that is not one of
+showed and nobody assigned since, and only to a profile name (lowercased, as Hermes
+stores it) that is not one of
 `human_owners` nor Kelpie's `author`. A running task changes hands on Hermes only by reclaiming
 its run (`hermes kanban reassign --reclaim`), which ends its worker: Kelpie leaves that to a
 person (`UnsupportedAction`), as it does `triage` and `scheduled` cards. Assigning the task to

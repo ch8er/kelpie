@@ -262,7 +262,7 @@ REASSIGN_STATUSES = ("todo", "ready", "review")
 # What ``hermes kanban assign`` reads as "unassign" (``_none_profile``), and the shape of a
 # profile name Kelpie hands a task to (Hermes lowercases them).
 UNASSIGN_WORDS = ("none", "-", "null")
-_PROFILE = re.compile(r"^[a-z0-9][a-z0-9_.-]{0,63}$")
+_PROFILE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")  # Hermes' PROFILE_ID_RE
 
 STATUS_MAP: Mapping[str, Status] = {
     "triage": Status.BACKLOG,
@@ -730,6 +730,11 @@ class HermesAdapter:
     _blocks: dict[str, tuple[object, ...]] = field(
         default_factory=dict, init=False, repr=False, compare=False
     )
+    # The assignee (lowercased) of each task in the latest snapshot: a reassignment never
+    # overrides an owner someone picked since
+    _assignees: dict[str, str | None] = field(
+        default_factory=dict, init=False, repr=False, compare=False
+    )
 
     def __post_init__(self) -> None:
         self.db_path = Path(self.db_path).expanduser()
@@ -1147,8 +1152,11 @@ class HermesAdapter:
         owners: set[str] = set()
         known: dict[str, sqlite3.Row] = {}
         waits: list[Condition] = []
-        self._seen = {}
-        self._blocks = {}
+        # Built here, published together at the end: an action on another thread (kelpie
+        # agent) never reads a half-built one.
+        seen: dict[str, tuple[str, int | None]] = {}
+        marks: dict[str, tuple[object, ...]] = {}
+        assignees: dict[str, str | None] = {}
         for row in rows:
             status = STATUS_MAP.get(row["status"])
             if status is None:
@@ -1175,8 +1183,8 @@ class HermesAdapter:
                     since=at if current is not None and at is not None else since,
                     kelpie=KelpieMark.STOP if stop is not None else None,
                 )
-                self._blocks[row["id"]] = _block_mark(event, found)
-            self._seen[row["id"]] = (row["status"], _run_id(_col(row, "current_run_id")))
+                marks[row["id"]] = _block_mark(event, found)
+            seen[row["id"]] = (row["status"], _run_id(_col(row, "current_run_id")))
             park = parks.get(row["id"])
             wait = _park_conditions(row["id"], park, key, self._park_window)
             if wait is None and row["status"] == "scheduled" and has_marker(_park_reason(park)):
@@ -1205,6 +1213,7 @@ class HermesAdapter:
                         for cid, kind, params in wait
                     )
             assignee = (row["assignee"] or "").strip() or None
+            assignees[row["id"]] = assignee.casefold() if assignee else None
             if assignee:
                 owners.add(assignee)
             # The assignee only routes a task (its role, ``assignee``); the profile of a live
@@ -1239,6 +1248,7 @@ class HermesAdapter:
                     reopened_at=reopens.get(row["id"], ()),
                 )
             )
+        self._seen, self._blocks, self._assignees = seen, marks, assignees
         return tuple(tasks), owners, known, tuple(waits)
 
     def _human(self, name: object) -> bool:
@@ -1851,9 +1861,11 @@ class HermesAdapter:
 
     # --- unblock and reassign -------------------------------------------------------------
 
-    def _block_state(self, task_id: str) -> tuple[str, tuple[object, ...], object] | None:
-        """Hermes' status of a task, what identifies its block (:func:`_block_mark`) and the
-        reason of its current block event, or ``None`` for an unknown task."""
+    def _block_state(self, task_id: str) -> tuple[str, tuple[object, ...], object, bool] | None:
+        """Hermes' status of a task, what identifies its block (:func:`_block_mark`), the
+        reason of its latest block event and whether that event is the current block (at or
+        after the latest status change, as the snapshot reads it), or ``None`` for an unknown
+        task."""
         with self._connect() as conn:
             row = conn.execute("SELECT status FROM tasks WHERE id = ?", (task_id,)).fetchone()
             if row is None:
@@ -1870,23 +1882,28 @@ class HermesAdapter:
                 latest.format(op="IN", kinds=_in_clause(BLOCK_EVENTS)), (task_id, *BLOCK_EVENTS)
             ).fetchone()
         reason = _payload(block["payload"]).get("reason") if block is not None else None
-        return str(row["status"]), _block_mark(event, block), reason
+        current = block is not None and (
+            event is None or (block["created_at"] or 0) >= (event["created_at"] or 0)
+        )
+        return str(row["status"]), _block_mark(event, block), reason, current
 
     def unblock(self, task_id: str, reason: str) -> None:
         """Clear a block with ``hermes kanban unblock``: Hermes returns the task to the phase
         it was blocked in (``ready``, ``review``; ``todo`` while a parent is open), with the
         reason as an ``UNBLOCK:`` comment signed ``author``.
 
-        Only the block the last snapshot showed: a task unblocked since is left alone (a
-        no-op), one blocked again since, or not in that snapshot, is an error
-        (:class:`HermesError`, the rule decides again). A block that carries Kelpie's stop
-        marker, verified or not, waits for a person and is never cleared
-        (``UnsupportedAction``), nor is a task in any other status (``scheduled`` is a park:
-        ``requeue`` wakes Kelpie's own)."""
+        Only the block the adapter's latest snapshot showed: a task unblocked since is left
+        alone (a no-op), one blocked again since, or not in that snapshot, is an error
+        (:class:`HermesError`, the rule decides again). On ``kelpie agent`` the adapter may
+        have taken a newer snapshot than the one the hub decided on. A block that carries
+        Kelpie's stop marker, verified or not, waits for a person and is never cleared
+        (``UnsupportedAction``), nor is a block without a block event of its own (Hermes'
+        circuit breaker: unblocking resets its failure count), nor a task in any other status
+        (``scheduled`` is a park: ``requeue`` wakes Kelpie's own)."""
         state = self._block_state(task_id)
         if state is None:
             raise HermesError(f"unknown Hermes task: {task_id}")
-        status, mark, block_reason = state
+        status, mark, block_reason, current = state
         seen = self._blocks.get(task_id)
         if status != "blocked":
             if seen is not None:
@@ -1899,6 +1916,11 @@ class HermesAdapter:
             raise UnsupportedAction(
                 f"Hermes task {task_id} was stopped by Kelpie and waits for a person; "
                 "unblock it by hand"
+            )
+        if not current:
+            raise UnsupportedAction(
+                f"Hermes task {task_id} has no block event of its own (Hermes' circuit breaker "
+                "parked it, or the block is older than its status); unblock it by hand"
             )
         if seen is None:
             raise HermesError(f"task {task_id} was not blocked in the last snapshot; not unblocked")
@@ -1943,6 +1965,11 @@ class HermesAdapter:
             raise HermesError(
                 f"task {task_id} moved since the snapshot ({seen[0]} run {seen[1]} -> "
                 f"{status} run {run}); not reassigned"
+            )
+        if (before := self._assignees.get(task_id)) != assignee and assignee != profile:
+            raise HermesError(
+                f"task {task_id} was assigned to {assignee or 'nobody'} since the snapshot "
+                f"(was {before or 'nobody'}); not reassigned"
             )
         if status not in REASSIGN_STATUSES or run is not None:
             raise UnsupportedAction(

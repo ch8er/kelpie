@@ -313,8 +313,7 @@ def test_a_cancel_is_announced_as_done(farm: Farm) -> None:
 
 def test_stale_block_is_cleared_through_the_hermes_cli(farm: Farm) -> None:
     """Incident 15 in act mode: the PR merged, so Kelpie runs ``hermes kanban unblock`` for
-    that task only; the block still waiting on an open PR stays, and so does Kelpie's own
-    stop."""
+    that task only; the block still waiting on an open PR stays."""
     gh = farm.github
     gh.pull(REPO, 57, merged_at=farm.ago(minutes=25), state="closed")
     gh.pull(REPO, 58)
