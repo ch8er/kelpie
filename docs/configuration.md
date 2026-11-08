@@ -495,6 +495,9 @@ forecasts the CI minutes quota, and reports a CI outage as one incident. Needs b
 | `queued_after` | `"30m"` | duration, > 0 | CI jobs not starting: a build still queued this long while no runner on the farm takes work is a sign, as is a job the CI refused (no runner, no step) that used to run, or a whole run refused; signs of `outage_min_prs` change requests within `outage_window` → one outage. |
 | `toolchain_window` | `"6h"` | duration, > 0 | A toolchain change on a host (`[resources.prometheus] toolchain_metric`) is named in an outage's alert as its likely cause (incident 20) when it happened at most this long before the outage began, or up to 15 minutes after. A change spans from the old version's last sighting to the new one's first, and the alert gives that span ("between … and … UTC") when it is longer than 15 minutes. Text only: it changes no action. |
 | `not_started_mode` | `"observe"` | `"observe"` or `"rule"` | A new check: its outage is only logged until set to `"rule"` (then it follows the rule's mode and folds the tasks' own alerts). |
+| `fail_fast_checks` | `[]` (off) | list of globs | Fail fast: the workflows that are cheap required checks (e.g. `["lint", "rules"]`). When the newest finished build of one failed on a change request's commit, at a job that started, and no build of it runs there, the expensive builds of that commit are doomed. |
+| `fail_fast_cancel` | `["*"]` | list of globs | The workflows to cancel on such a commit (e.g. `["ios-*", "macos"]`); the checks themselves never. |
+| `fail_fast_mode` | `"observe"` | `"observe"` or `"rule"` | A new check: its `cancel_build` is only logged until set to `"rule"` (then it follows the rule's mode). |
 
 Waste categories, each build counted once in this order: superseded, already verified
 commit, docs-only, draft, WIP commit.
@@ -592,6 +595,19 @@ waiting tasks, saying which: check the CI's billing and spending limits or a pro
 rule (refused), or that runners are up (queued). The "Resolved" notice names the first
 build that ran a job refused since the outage began. Builds are dated by when they
 started. Observe-only until `not_started_mode = "rule"`.
+
+Fail fast: with `fail_fast_checks` set, a queued or running build of a change request
+(a build that names its PR) whose commit already failed a cheap required check gets
+`cancel_build`, routed to the CI connector that reported it (`params.cause` is
+`fail_fast`, with `failed_check`, `check_workflow` and `failed_job`): the PR cannot merge
+with that check red, and the fix push builds everything again. The check counts as failed
+when its newest finished build on that commit failed at a job that started (a job the CI
+refused, or a build whose jobs the connector did not read, is no verdict on the code), and
+no build of it is running there (a re-run may still pass). Held builds (an approval, a
+concurrency group) and builds the superseded cancel already covers are left alone; once
+per build. Observe-only until `fail_fast_mode = "rule"`. The GitHub connector carries out
+only superseded cancels for now and refuses every fail-fast cancel, even of a run that
+is also superseded (a person is told in `act`).
 
 ### 10. loop_breaker
 

@@ -259,7 +259,7 @@ The rules:
 | `ping_pong` | review rounds past a limit |
 | `bottlenecks` | idle agents with ready work, forgotten holds, human tasks on the critical path |
 | `resources` | disk, memory, load, provider quotas and logins, before they stop agents |
-| `ci_economy` | wasted and superseded CI builds, CI quota burn |
+| `ci_economy` | wasted, superseded and doomed (fail fast) CI builds, CI quota burn |
 | `loop_breaker` | identical tool calls, error streaks, token budgets |
 | `no_progress` | tokens spent with no status change, commit or artifact |
 | `conflict_warning` | two live tasks editing the same files |

@@ -29,6 +29,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
   reads one cause instead of each block again; a task joining the storm no longer
   re-announces the digest. A storm's "resolved" notice says how many of its tasks were
   unblocked ("Block storm over: 5 of 7 tasks unblocked") and which are still blocked.
+- Rule 9 fails fast (`ci_economy`, observe by default): when a cheap required check
+  (`fail_fast_checks`) already failed on a pull request's commit, the queued or running
+  expensive builds of that commit (`fail_fast_cancel`, e.g. a macOS build) get
+  `cancel_build`, since the fix push builds them again. A refused job or a re-run in
+  progress is no verdict. Only logged until `fail_fast_mode = "rule"`; the GitHub connector
+  does not carry out this cancel yet.
 - Rule `unanswered_asks` (P1, #297, observe by default): an agent's `@question` to another
   agent in a task comment is an obligation until the recipient (or a person) answers.
   Kelpie reminds only while the recipient is idle, at most once per step (`steps`, default

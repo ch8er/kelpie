@@ -157,7 +157,7 @@ P0 is the MVP; P1 and P2 rules are backlog.
 | 6 | Bottlenecks | Role utilization and critical path → alert with a rebalancing suggestion; idle with ready work, holds with an owner and an expiry, human tasks on the critical path | 9, 10, 14, 16 |
 | 7 | Resources | Disk, memory, processes, heavy-task concurrency, LLM provider quotas and auth health → alert before the agents stop | 3, 4, 6 |
 | 8 | Daily report | "Cost of chaos" plus before/after verification of every fix | all |
-| 9 | CI economy | Finds wasted builds (drafts/WIP, superseded, docs-only, already verified commit), cancels superseded ones, forecasts quota burn; proposing a better CI config PR is P1 | 5 |
+| 9 | CI economy | Finds wasted builds (drafts/WIP, superseded, docs-only, already verified commit), cancels superseded ones and, opt-in, expensive builds on a head whose cheap required check already failed (fail fast), forecasts quota burn; proposing a better CI config PR is P1 | 5 |
 | 10 | Loop and budget breaker | N identical consecutive tool calls (same tool and arguments hash; default 8 in 10 min), 5 tool errors in a row, or a per-agent daily/nightly token budget exceeded → stop the run through the adapter and alert | field |
 | 11 | Activity without progress | Tokens spent with no status change, commit or artifact → alert with recommendations (longer heartbeat interval, cheaper maintenance model, bounded sessions with a handoff file) | field |
 | – | Return causes (P1) | Root-cause analysis of task returns from traces → recommendation | 7 |
