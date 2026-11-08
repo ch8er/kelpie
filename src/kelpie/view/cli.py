@@ -19,7 +19,7 @@ from kelpie.app import App, Settings, build_adapters, utc_now
 from kelpie.core.farmview import FarmView, build_view, from_dict, to_dict
 from kelpie.traces.config import is_loopback
 from kelpie.view.read import read_stored
-from kelpie.view.service import PATH, ViewServer, ViewService, ViewSource
+from kelpie.view.service import PATH, TodayFigures, ViewServer, ViewService, ViewSource
 from kelpie.view.text import render
 
 MAX_BODY = 8 * 1024 * 1024
@@ -45,6 +45,7 @@ def local_view(settings: Settings, clock: Callable[[], datetime] = utc_now) -> F
         stored.entries,
         stored=stored.statuses,
         problems=problems + stored.problems,
+        long_after=settings.view.long_after,
     )
 
 
@@ -136,9 +137,14 @@ def run(
     return render(view), err, 0
 
 
-def view_service(app: App, clock: Callable[[], datetime] = utc_now) -> ViewService | None:
-    """``[view]``'s listener for ``kelpie serve``, or None when it is off. OSError when the
-    address cannot be bound."""
+def view_service(
+    app: App,
+    clock: Callable[[], datetime] = utc_now,
+    today: TodayFigures | None = None,
+) -> ViewService | None:
+    """``[view]``'s listener for ``kelpie serve``, or None when it is off. ``today``: what
+    computes today's figures (``kelpie.report.today``; the CLI passes it, so this package
+    never imports the report). OSError when the address cannot be bound."""
     settings = app.settings
     if not settings.view.enabled:
         return None
@@ -148,6 +154,8 @@ def view_service(app: App, clock: Callable[[], datetime] = utc_now) -> ViewServi
         settings.db_path,
         states=app.engine.state_store,
         store=app.store,
+        long_after=settings.view.long_after,
+        today=today,
     )
     server = ViewServer(settings.view, source, settings.view.token(), settings.server)
     return ViewService(server)

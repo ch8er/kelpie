@@ -2343,17 +2343,27 @@ minute per address. See [security.md](security.md#listeners).
 
 A read-only farm view that `kelpie serve` serves on a listener of its own, apart from the
 main port (so OTLP ingest can be opened to agents while the view stays on loopback). **Off
-by default.** `GET /v1/farm` returns the view `kelpie status --json` prints: tasks per
-status (per board), waiting conditions, open alerts and the last actions per rule, built
-from the control loop's last tick and the database read read-only (at most once every 2s).
-There is no write endpoint: every other method gets 405.
+by default.** Built from the control loop's last tick and the database read read-only (at
+most once every 2s):
+
+- `GET /`: a small page for a phone (no script, reloads every minute): today's cost of
+  chaos and spend so far (the daily report's figures for the day in progress, computed
+  every 5 minutes off the request path, never with the LLM section), then per board the
+  open tasks by attention (needs you: a person holds it or rule 13 waits on one; stuck or
+  blocked: blocked, or an open alert about it; running long: in progress past
+  `long_after`; the rest), oldest first, then the open alerts.
+- `GET /v1/farm`: the same view as JSON (`kelpie status --json` prints the same shape).
+- `GET /manifest.webmanifest`: lets a phone add the page to its home screen.
+
+There is no write endpoint: every other method gets 405, and the page has no form or button.
 
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `enabled` | `false` | Start the listener with `kelpie serve`. |
 | `host` | `127.0.0.1` | Bind address. Off loopback a token is required: `kelpie serve` refuses to start without a strong one (16+ characters, 6+ different), and `kelpie doctor` warns. |
 | `port` | `9465` | Port. |
-| `token_env` | `KELPIE_VIEW_TOKEN` | Variable holding the bearer token. When set, every request needs `Authorization: Bearer <token>`, on loopback too. |
+| `token_env` | `KELPIE_VIEW_TOKEN` | Variable holding the token. When set, every request needs it, on loopback too: `Authorization: Bearer <token>` (scripts), or as the password of the browser's sign-in prompt (HTTP Basic; any user name). |
+| `long_after` | `2h` | A task in progress this long is "running long" on the page. |
 
 `kelpie status --server` reads it (`--server URL` for another address; the token comes
 from the same variable). Keep it on loopback, or on a private network you choose, behind

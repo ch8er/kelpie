@@ -413,7 +413,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     from kelpie.view.cli import view_service
 
     try:
-        view = view_service(app)
+        today = None
+        if settings.view.enabled:
+            from kelpie.report.today import today_figures
+
+            today = today_figures(settings)
+        view = view_service(app, today=today)
     except OSError as exc:
         app.close()
         locks.release()
