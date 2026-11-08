@@ -108,7 +108,11 @@ def board(now: datetime = NOW) -> Snapshot:
         ),
         owners=(Owner("dev-1", "dev"), Owner("alice", "pm", OwnerKind.HUMAN)),
         dependencies=(Dependency("t_2b", "t_1a"),),
-        conditions=(Condition("c1", ConditionKind.TASK_STATUS, "t_1a", {"task": "t_2b"}),),
+        conditions=(
+            Condition(
+                "c1", ConditionKind.TASK_STATUS, "t_1a", {"task": "t_2b"}, task_ids=("t_3c",)
+            ),
+        ),
         sessions=(Session("s1", "t_1a", "dev-1", now),),
         spans=(
             Span(
@@ -143,6 +147,7 @@ def test_every_id_is_namespaced() -> None:
         "laptop:t_1a",
         {"task": "laptop:t_2b"},
     )
+    assert cond.task_ids == ("laptop:t_3c",)  # a shared condition's waiters too
     session = part.sessions[0]
     assert (session.id, session.task_id, session.owner_id, session.source) == (
         "laptop:s1",

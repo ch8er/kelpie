@@ -149,7 +149,7 @@ Writing the 13 incident fixtures forced several facts into free text or `params`
 the ones rules actually need to typed fields before implementing those rules.
 
 **Acceptance criteria**
-- [ ] `Condition` can be shared by several tasks and references what it waits on (task, person, PR) (today one `task_id`; the target is in untyped `params`)
+- [x] `Condition` can be shared by several tasks and references what it waits on (task, person, PR) (`Condition.task_ids` and `waiters`, read by the rules and the condition linkage; `Condition.target`, typed from params, #397; the farm view, the report's waits and stored history still count the registering task only)
 - [x] `Return` records its cause category (#110, #174); `Task` has `repo` and `branch`, and a PR links to tasks through `PullRequest.task_ids` (#90, #103)
 - [ ] `Return` records its conflicting files (still in `params`)
 - [x] Tasks and owners can be tied to a host (`Task.host`, `Owner.host`, #127)

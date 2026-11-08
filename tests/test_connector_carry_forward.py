@@ -490,3 +490,24 @@ def test_metrics_render_the_failure_streak() -> None:
     assert failing_seconds(metrics, "github") == "0"
     metrics.connector_failed("github", T0)  # the clock stepped back
     assert failing_seconds(metrics, "github") == "0"
+
+
+def test_a_shared_condition_is_carried_only_while_no_waiter_could_be_gated() -> None:
+    """A condition several tasks wait on: carried for its waiting tasks, never once one of
+    them is ready (it would gate it), and kept by ``widen`` while any waiter is on the
+    board."""
+    since = T0 - timedelta(hours=1)
+    w1, w2 = (Task(t, "t", Status.WAITING, since) for t in ("W-1", "W-2"))
+    given = Condition("C-1", HUMAN, "W-1", {"task": "H-1"}, registered_at=since, task_ids=("W-2",))
+    checked = replace(given, satisfied=False, checked_at=T0)
+    last = Contribution((checked,), (given,), ())
+    later = T0 + M
+    both = carry_forward(Snapshot(now=later, tasks=(w1, w2), conditions=(given,)), last)
+    assert both.conditions == (checked,)
+    # The second waiter is ready now: the condition gates it, so it is not carried.
+    ready = replace(w2, status=Status.READY)
+    out = carry_forward(Snapshot(now=later, tasks=(w1, ready), conditions=(given,)), last)
+    assert out.conditions == (given,)
+    # A shared waiter still on a partial board keeps it out of widen's carry-over.
+    assert widen(Contribution(), last, Snapshot(now=later, tasks=(w2,))) == Contribution()
+    assert widen(Contribution(), last, Snapshot(now=later)).conditions == (checked,)

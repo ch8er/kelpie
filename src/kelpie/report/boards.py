@@ -105,7 +105,7 @@ def split_inputs(inputs: ReportInputs) -> dict[str, ReportInputs]:
             tasks=tuple(t for t in inputs.tasks if board_prefix(t) == p),
             sessions=tuple(s for s in inputs.sessions if session_board.get(s.id) == p),
             dependencies=tuple(d for d in inputs.dependencies if mine(d.task_id)),
-            conditions=tuple(c for c in inputs.conditions if mine(c.task_id)),
+            conditions=tuple(c for c in inputs.conditions if any(mine(w) for w in c.waiters)),
             snoozes=tuple(s for s in inputs.snoozes if mine(s.task_id)),
             actions=tuple(e for e in inputs.actions if _entry_board(e, by_session) == p),
             states=tuple(

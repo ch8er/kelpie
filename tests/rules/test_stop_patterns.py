@@ -1,6 +1,7 @@
 """Rule 3's stop patterns (orphan_status) and the blocker graph they share with `kelpie why`."""
 
 import re
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -497,3 +498,16 @@ def test_build_stop_pattern_config() -> None:
 def test_bad_stop_pattern_config(config: dict[str, object]) -> None:
     with pytest.raises(ValueError):
         build(config)
+
+
+def test_a_shared_condition_links_every_waiter_to_its_target() -> None:
+    # R2 and R3 both wait for R1 through one shared condition; R1 recovers T.
+    shared = replace(cond("w", ConditionKind.TASK_STATUS, "R2", task="R1"), task_ids=("R3",))
+    original = task("T", Status.BLOCKED, block=Block("stuck", NOW - 300 * M))
+    tasks = (original, rec("R1", target="T"), rec("R2"), rec("R3"))
+    # A staged plan (the waiters wait for R1, they do not recover it): no loop.
+    assert evaluate(*tasks, conditions=(shared,), rule=TITLES) == []
+    # A shared waiter of a task that recovers it is a cycle, as an own waiter would be.
+    loop = replace(cond("w", ConditionKind.TASK_STATUS, None, task="R1"), task_ids=("R1",))
+    [alert] = evaluate(original, rec("R1", target="T"), conditions=(loop,), rule=TITLES)
+    assert alert.params["cycle"] is True

@@ -88,9 +88,42 @@ class ConditionKind(StrEnum):
     CUSTOM = "custom"
 
 
+class TargetKind(StrEnum):
+    """What a condition waits on."""
+
+    TASK = "task"  # another task reaching a status (a human's task, a parent)
+    PERSON = "person"  # a person's answer or approval
+    PR = "pr"  # a pull request: merged, or its checks green
+
+
+@dataclass(frozen=True, slots=True)
+class ConditionTarget:
+    """What a condition waits on: a task id, a person (an owner id) or a pull request
+    (``owner/repo#N``)."""
+
+    kind: TargetKind
+    ref: str
+
+
+# Kinds whose ``params`` name a pull request (``repo`` and ``pr``), and kinds whose
+# ``params.task`` names the task waited on.
+_PR_KINDS = frozenset({ConditionKind.PR_MERGED, ConditionKind.CI_STATUS})
+_TASK_KINDS = frozenset({ConditionKind.HUMAN_TASK, ConditionKind.TASK_STATUS})
+
+
 @dataclass(frozen=True, slots=True)
 class Condition:
-    """An external fact a task waits for. Connectors evaluate it, rules react to it."""
+    """An external fact one or more tasks wait for. Connectors evaluate it, rules react to
+    it.
+
+    ``task_id`` is the task that registered it; ``task_ids`` other tasks that wait on the
+    same fact (a shared condition: one PR several tasks wait to land). :attr:`waiters` is
+    all of them; ``registered_at`` then is when the last of them joined (a task counts a
+    condition registered before its current status as left over from an earlier wait). A
+    producer that shares a condition removes a waiter from ``task_ids`` as soon as it no
+    longer waits on it (woken, unblocked, moved on): a waiter still listed would read a later
+    join as a current wait of its own.
+    :attr:`target` is what it waits on, typed, read from ``params``."""
 
     id: str
     kind: ConditionKind
@@ -103,6 +136,39 @@ class Condition:
     # When the condition was registered. Connectors should set it so that a task waiting
     # again is not woken by a condition left over from its previous wait.
     registered_at: datetime | None = None
+    task_ids: tuple[str, ...] = ()  # other tasks waiting on the same fact (shared)
+
+    @property
+    def waiters(self) -> tuple[str, ...]:
+        """Every task that waits on it: ``task_id`` first, then ``task_ids``, once each."""
+        first = (self.task_id,) if self.task_id else ()
+        return tuple(dict.fromkeys((*first, *(t for t in self.task_ids if t))))
+
+    def waits(self, task_id: str) -> bool:
+        """Whether ``task_id`` waits on it."""
+        return bool(task_id) and (task_id == self.task_id or task_id in self.task_ids)
+
+    @property
+    def target(self) -> ConditionTarget | None:
+        """What it waits on, from ``params``: the pull request of a ``pr_merged`` or
+        ``ci_status`` condition (``repo`` and ``pr``), the task of a ``human_task`` or
+        ``task_status`` one (``task``), a person (``person``, any kind; it names who the
+        wait is on even when the params also name a PR); None when the params do not say."""
+        p = self.params
+        person = p.get("person")
+        if isinstance(person, str) and person.strip():
+            return ConditionTarget(TargetKind.PERSON, person.strip())
+        if self.kind in _PR_KINDS:
+            repo, pr = p.get("repo"), p.get("pr")
+            number = str(pr).removeprefix("#") if isinstance(pr, int | str) else ""
+            digits = number.isascii() and number.isdecimal()
+            if isinstance(repo, str) and repo and digits and not isinstance(pr, bool):
+                return ConditionTarget(TargetKind.PR, f"{repo}#{number}")
+        if self.kind in _TASK_KINDS:
+            task = p.get("task")
+            if isinstance(task, str) and task:
+                return ConditionTarget(TargetKind.TASK, task)
+        return None
 
 
 class KelpieMark(StrEnum):

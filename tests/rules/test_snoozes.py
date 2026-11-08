@@ -765,3 +765,14 @@ def test_growth_over_ticks_re_alerts_once_and_a_status_toggle_never_does() -> No
     ((changed, reason),) = sent[5]
     assert changed is Transition.CHANGED and "1 more task(s) blocked since its snooze" in reason
     assert sent[6] == []
+
+
+def test_the_work_behind_counts_every_waiter_of_a_shared_condition() -> None:
+    h = Task("H-1", "sign", Status.READY, NOW - 9 * H, role="owner", owner_id="ceo")
+    a1 = blocked("A-1", NOW - 5 * H, "waiting_human: H-1")
+    a2 = blocked("A-2", NOW - 5 * H, "waiting_human: H-1")
+    a3 = Task("A-3", "done", Status.DONE, NOW - 5 * H, role="ops")
+    shared = Condition("C-1", ConditionKind.HUMAN_TASK, "A-1", {"task": "H-1"}, False,
+                       task_ids=("A-2", "A-3"))  # fmt: skip
+    board = snap([h, a1, a2, a3], conditions=[shared])
+    assert behind_count(board, "H-1") == 2  # A-1 and A-2; the done A-3 is no work
