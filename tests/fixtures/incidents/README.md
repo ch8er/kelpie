@@ -204,6 +204,9 @@ Fixture conventions:
 | – | `field-08-host-sleep-sessions-resume.yaml` | `exit_contract` | the host slept 11:24–12:11: no `requeue` for a session silent since 11:23 two minutes after the wake, one beating again, or a review session that ended four minutes before the sleep (six awake minutes: inside the grace period); `requeue` T-F804, ended at 10:30, as on any day |
 | – | `field-08-host-sleep-session-died.yaml` | `exit_contract` | 34 minutes after the wake: one `requeue` T-F812 "ended while the host slept (11:24-12:11 UTC, 47 min)" with `host_slept` and `resume` (branch, commit); nothing for the session that resumed; `requeue` the other host's silent session as on any day (its host did not sleep) |
 | – | `field-08-stall-without-sleep.yaml` | `exit_contract` | negative: the same silence without a clock jump (no `host_sleeps`) → `requeue` T-F821 and the review T-F823 as today, nothing about sleep; nothing for the beating session |
+| – | `field-09-ask-recipient-idle.yaml` | `unanswered_asks` | `info` `alert` T-901: the developer's `@architect-1` question, 3h unanswered, the architect idle (`step: 1`, `delivery: unknown`); nothing for a question answered on the task, one answered on another task naming the asker, or a question that mentions nobody |
+| – | `field-09-ask-recipient-busy.yaml` | `unanswered_asks` | `warning` `alert` T-915 (`step: 2`, `delivery: seen`): the idle reviewer, 5h; nothing while the architect is mid-run, for a blocked task (rule 4's), a question to a person (rule 13's) or a 40-minute-old one |
+| – | `field-09-ask-snoozed.yaml` | `unanswered_asks` | `alert` T-922 whose snooze expired ("snooze expired", `step: 4`); nothing for T-921, snoozed until Thursday though the architect is idle |
 
 ## Adding a fixture
 

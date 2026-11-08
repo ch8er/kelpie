@@ -337,7 +337,16 @@ def test_rule_4_resolve_notice_says_the_block_is_snoozed() -> None:
 # --- who reads snoozes ---------------------------------------------------------------------
 
 RULES = Path(__file__).parents[2] / "src" / "kelpie" / "rules"
-HONOUR = {"needs_you.py", "stale_blocks.py", "_block_storm.py", "wait_condition.py", "_snoozes.py"}
+# unanswered_asks (#297): a person snoozes reminders about an agent's question, as they
+# snooze a human wait; it is no agent-health rule.
+HONOUR = {
+    "needs_you.py",
+    "stale_blocks.py",
+    "_block_storm.py",
+    "wait_condition.py",
+    "unanswered_asks.py",
+    "_snoozes.py",
+}
 SNOOZE_MODULES = {"kelpie.rules._snoozes", "kelpie.core.snooze"}
 
 
@@ -370,10 +379,10 @@ def _reads(node: ast.AST, package: str) -> bool:
 
 
 @pytest.mark.parametrize("path", sorted(RULES.glob("*.py")), ids=lambda p: p.name)
-def test_only_rules_13_4_and_2_read_snoozes(path: Path) -> None:
+def test_only_rules_13_4_and_2_and_asks_read_snoozes(path: Path) -> None:
     """Agent-health rules (loop_breaker, no_progress, exit_contract, orphan_status, ...) never
     honour a snooze, a person's or a marker's: only rules 13, 4 and 2 read them, for their
-    repeat human-wait alerts."""
+    repeat human-wait alerts, and unanswered_asks for its reminders."""
     assert reads_snoozes(path.read_text(encoding="utf-8")) == (path.name in HONOUR), path.name
 
 

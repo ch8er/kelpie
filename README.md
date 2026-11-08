@@ -269,6 +269,7 @@ The rules:
 | `return_causes` | why tasks come back from review |
 | `output_offenders` | commands whose output floods a role's context day after day |
 | `instruction_bloat` | skills and role instructions that only grow, and the facts copied between them |
+| `unanswered_asks` | an agent's question to another agent, unanswered while the other is idle |
 
 The incidents behind each rule, the design and the daily report in full:
 [How Kelpie works](https://github.com/ch8er/kelpie/blob/main/docs/guide.md).

@@ -8,6 +8,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ## [Unreleased]
 
+### Added
+
+- Rule `unanswered_asks` (P1, #297, observe by default): an agent's `@question` to another
+  agent in a task comment is an obligation until the recipient (or a person) answers.
+  Kelpie reminds only while the recipient is idle, at most once per step (`steps`, default
+  1h, 4h, 12h, 24h), stops after `stop_after` (3d), says `delivery: unknown` when it
+  cannot tell the question was seen, and honours snoozes on the asking task. Blocked and
+  waiting tasks and questions to people stay with rules 4, 2 and 13, so nothing is alerted
+  twice.
+
 ## [0.1.0a3] - 2026-11-06
 
 Third alpha: 0.1.0a2 plus the macOS fix for the Hermes plugin (#353), verified on a live

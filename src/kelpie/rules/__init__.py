@@ -161,6 +161,12 @@ PLANNED: tuple[PlannedRule, ...] = (
         "Instruction files that only grow or cross a size -> split recommendation",
         incidents=(21,),
     ),
+    PlannedRule(
+        "unanswered_asks",
+        None,
+        _P1,
+        "An agent's question to another agent, unanswered while it is idle -> reminder",
+    ),
 )
 
 

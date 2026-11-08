@@ -96,6 +96,7 @@ EN: dict[str, str] = {
     # the fallback for an alert that lists several tasks; rule 4 words its own alerts
     "headline.stale_blocks": "Block Kelpie cannot clear",
     "headline.wait_condition": "Waiting task that will not wake",
+    "headline.unanswered_asks": "A question to an agent is unanswered",
 }
 
 RU: dict[str, str] = {
@@ -165,6 +166,7 @@ RU: dict[str, str] = {
     # the fallback for an alert that lists several tasks; rule 4 words its own alerts
     "headline.stale_blocks": "Блок, который Kelpie не может снять",
     "headline.wait_condition": "Ожидание, которое не закончится",
+    "headline.unanswered_asks": "Вопрос агенту остался без ответа",
 }
 
 CATALOG: dict[str, dict[str, str]] = {"en": EN, "ru": RU}
