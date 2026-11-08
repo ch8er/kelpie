@@ -2,9 +2,10 @@
 
 First live run, read only: Kelpie reads your Hermes Kanban board and a spool of tool calls,
 runs its rules in `observe` mode with global dry-run on, and changes nothing. On Hermes only
-four rules can act at all, and only in `act` mode with dry-run off: `loop_breaker` (stops a
-session) and `wait_condition`, `conflict_warning` and `dispatch_gate` (park, wake and comment
-on tasks), plus `ci_economy` through the GitHub CI connector when it may cancel or propose.
+six rules can act at all, and only in `act` mode with dry-run off: `loop_breaker` (stops a
+session), `wait_condition`, `conflict_warning` and `dispatch_gate` (park, wake and comment
+on tasks), `stale_blocks` (unblock) and `orphan_status` (reassign), plus `ci_economy`
+through the GitHub CI connector when it may cancel or propose.
 Any other rule set to `act` makes `kelpie serve` refuse to start on Hermes.
 
 Things marked **unverified** have not been tried against a live Hermes farm.

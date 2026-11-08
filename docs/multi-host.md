@@ -149,8 +149,8 @@ The agent executes **only the action kinds its adapters implement**, through the
 the protocol.
 
 - An adapter declares the kinds it carries out in `actions` (as action connectors do):
-  Hermes `stop`, `wait`, `requeue`/`wake` (of a task Kelpie parked), `comment`; Claude Code
-  `stop`. An adapter without the attribute falls back to the capability protocols it
+  Hermes `stop`, `wait`, `requeue`/`wake` (of a task Kelpie parked), `comment`, `unblock`,
+  `reassign`; Claude Code `stop`. An adapter without the attribute falls back to the capability protocols it
   implements. `[agent] actions = [...]` can narrow the set further. The agent reports the
   set; the server routes nothing else to that adapter (the action becomes "not executed"
   and a human is told, as for `UnsupportedAction` today), and the agent refuses anything

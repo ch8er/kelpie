@@ -352,7 +352,7 @@ board the report is unchanged.
 - **Top 3 recommendations**: output filters for huge tool outputs (RTK first; see
   `[traces.outputs]`), rules that would have fixed part of the chaos in act mode (only rules
   the farm's adapters can carry out, so `kelpie serve` starts with the advice applied; for
-  the others the report says what is missing, such as "Hermes can't clear blocks yet", here
+  the others the report says what is missing, such as "Hermes can't make WIP commits yet", here
   and under "Would have done in act mode"), and fixed remedies for the largest causes,
   ranked by dollars (hours count when `hour_usd` is set). Remedies and the biggest wait's
   suggestion check what the farm already has (`kelpie.report.farm`, from config: approvers
@@ -585,9 +585,10 @@ Step by step for a first live run with `kelpie doctor`: on a Hermes farm,
 
 To watch a Hermes farm (observe mode), add the section below to `kelpie.toml`
 and install the hooks plugin on the Hermes host; see
-[`src/kelpie/adapters/hermes/README.md`](../src/kelpie/adapters/hermes/README.md). Hermes
-can carry out only `stop` (rule 10 in `act` mode) for now: it blocks the running task
-through the Hermes CLI. Other rules cannot change the board yet.
+[`src/kelpie/adapters/hermes/README.md`](../src/kelpie/adapters/hermes/README.md). Through
+the Hermes CLI, Hermes carries out stops (rule 10), parks and wakes (rules 2, 12 and the
+dispatch gate), comments, unblocks (rule 4) and reassignments (rule 3), each only in `act`
+mode; WIP commits it cannot make yet.
 
 ```toml
 [adapters.hermes]
