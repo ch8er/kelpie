@@ -133,6 +133,11 @@ def test_on_loopback_only_a_loopback_host_is_served(
     assert _request(listener, "GET", PATH, {"Host": host})[0] == code
 
 
+@pytest.mark.parametrize("path", ["/", "/manifest.webmanifest", PATH])
+def test_every_path_checks_the_host(listener: ViewServer, path: str) -> None:
+    assert _request(listener, "GET", path, {"Host": "attacker.example:9465"})[0] == 421
+
+
 @pytest.mark.parametrize(
     ("configured", "header", "ok"),
     [
@@ -150,11 +155,6 @@ def test_on_loopback_only_a_loopback_host_is_served(
         ("127.0.0.1", "10.0.0.5:9465", False),
     ],
 )
-@pytest.mark.parametrize("path", ["/", "/manifest.webmanifest", PATH])
-def test_every_path_checks_the_host(listener: ViewServer, path: str) -> None:
-    assert _request(listener, "GET", path, {"Host": "attacker.example:9465"})[0] == 421
-
-
 def test_host_check_table(configured: str, header: str, ok: bool) -> None:
     assert _loopback_host(header, configured) is ok
 
