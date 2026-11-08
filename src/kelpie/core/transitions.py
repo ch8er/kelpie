@@ -19,8 +19,15 @@ status (the previous tick in this process, else the previous record), and ``at``
 that saw the new one. :func:`changed_at` places the change at the board's own
 ``status_since`` when that falls inside ``(after, at]``, else at ``at``.
 
+Each run of the recorder also keeps a *watch*: from its first tick to its latest one
+(one row per run, updated every tick). A recorded status is evidence only while Kelpie was
+watching (or, for a change, from the board's own ``status_since`` to the tick that saw
+it): across a downtime the report falls back to inference instead of carrying the last
+record forward.
+
 A task missing from a snapshot (a board not read this tick, a task archived) records
-nothing: absence is not a status.
+nothing: absence is not a status. Task ids are assumed unique across adapters, as
+everywhere in Kelpie (several boards or hosts prefix them).
 """
 
 from __future__ import annotations
@@ -123,14 +130,23 @@ class MemoryTransitionStore:
 
     rows: list[StatusChange] = field(default_factory=list)
 
+    watches: dict[datetime, datetime] = field(default_factory=dict)  # started -> until
+
     def last_statuses(self) -> Mapping[str, StatusChange]:
         out: dict[str, StatusChange] = {}
         for row in self.rows:
             out[row.task_id] = row
         return out
 
-    def record_transitions(self, changes: Sequence[StatusChange]) -> None:
+    def record_tick(
+        self, changes: Sequence[StatusChange], watch_start: datetime, now: datetime
+    ) -> None:
         self.rows.extend(changes)
+        self.watches[watch_start] = now
+
+    def watched(self, start: datetime, end: datetime) -> list[tuple[datetime, datetime]]:
+        """Watches that overlap ``[start, end)``, oldest first."""
+        return sorted((a, b) for a, b in self.watches.items() if a < end and b >= start)
 
     def transitions(self, start: datetime, end: datetime) -> list[StatusChange]:
         """Rows in ``[start, end)``, plus each task's newest row before ``start``."""
@@ -143,12 +159,24 @@ class MemoryTransitionStore:
                 inside.append(row)
         return [*before.values(), *inside]
 
-    def prune(self, before: datetime) -> int:
-        """Drop rows older than ``before``, but never a task's newest row."""
-        newest = {id(r) for r in self.last_statuses().values()}
-        kept = [r for r in self.rows if r.at >= before or id(r) in newest]
+    def prune(self, before: datetime, max_rows: int | None = None) -> int:
+        """Drop rows older than ``before`` except each task's newest one before it, then
+        the oldest rows beyond ``max_rows`` (rows that are not a task's newest first);
+        watches that ended before ``before`` go too."""
+        newest_before: dict[str, int] = {}
+        for i, r in enumerate(self.rows):
+            if r.at < before:
+                newest_before[r.task_id] = i
+        keep = set(newest_before.values())
+        kept = [r for i, r in enumerate(self.rows) if r.at >= before or i in keep]
+        if max_rows is not None and len(kept) > max_rows:
+            newest = {id(r) for r in {r.task_id: r for r in kept}.values()}
+            order = sorted(range(len(kept)), key=lambda i: (id(kept[i]) in newest, kept[i].at))
+            drop = set(order[: len(kept) - max_rows])
+            kept = [r for i, r in enumerate(kept) if i not in drop]
         gone = len(self.rows) - len(kept)
         self.rows = kept
+        self.watches = {a: b for a, b in self.watches.items() if b >= before}
         return gone
 
 
@@ -163,6 +191,7 @@ class TransitionRecorder:
 
     store: TransitionStore
     _last: dict[str, StatusChange] | None = field(default=None, init=False)
+    _watch_start: datetime | None = field(default=None, init=False)
     _seen: dict[str, datetime] = field(default_factory=dict, init=False)
     failures: int = field(default=0, init=False)
 
@@ -173,8 +202,9 @@ class TransitionRecorder:
             if self._last is None:
                 self._last = dict(self.store.last_statuses())
             changes = observe(self._last, snapshot.tasks, snapshot.now, self._seen)
-            if changes:
-                self.store.record_transitions(changes)
+            if self._watch_start is None:
+                self._watch_start = snapshot.now
+            self.store.record_tick(changes, self._watch_start, snapshot.now)
         except Exception:
             self.failures += 1
             log.exception("recording task status transitions failed")
@@ -184,6 +214,11 @@ class TransitionRecorder:
         for t in snapshot.tasks:
             self._seen[t.id] = snapshot.now
         return changes
+
+
+def watching(at: datetime, watched: Sequence[tuple[datetime, datetime]]) -> bool:
+    """Whether Kelpie was recording at ``at``: within a watch (first tick to latest)."""
+    return any(a <= at <= b for a, b in watched)
 
 
 def history(changes: Iterable[StatusChange]) -> dict[str, tuple[StatusChange, ...]]:

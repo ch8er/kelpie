@@ -276,7 +276,13 @@ CREATE TABLE ledger_days (
 # changes, never its text. ``at`` is the tick that saw it, ``after_at`` the last time the
 # old status was seen, ``since`` the board's own status_since then. Pruned with the
 # ledger's ``[storage] retention`` and ``max_rows``, keeping each task's status at the cut.
+# ``transition_watches``: one row per recorder run, from its first tick to its latest one
+# (a recorded status is evidence only while Kelpie watched; across a downtime it is not).
 _V12 = """
+CREATE TABLE transition_watches (
+    started_at TEXT PRIMARY KEY,
+    until_at   TEXT NOT NULL
+);
 CREATE TABLE task_transitions (
     id                INTEGER PRIMARY KEY,
     at                TEXT NOT NULL,
@@ -416,16 +422,27 @@ class SqliteLedgerStore:
         with self._lock:
             return read_host_sleeps(self._db, start, end)
 
-    def record_transitions(self, changes: Sequence[StatusChange]) -> None:
-        """Store observed task status changes (#157) in one transaction."""
-        if not changes:
-            return
+    def record_tick(
+        self, changes: Sequence[StatusChange], watch_start: datetime, now: datetime
+    ) -> None:
+        """Store a tick's observed task status changes (#157) and extend the recorder's
+        watch to ``now``, in one transaction."""
         rows = [_transition_row(c) for c in changes]
 
         def write(db: sqlite3.Connection) -> sqlite3.Cursor:
-            return db.executemany(_INSERT_TRANSITION, rows)
+            if rows:
+                db.executemany(_INSERT_TRANSITION, rows)
+            return db.execute(
+                "INSERT INTO transition_watches (started_at, until_at) VALUES (?, ?)"
+                " ON CONFLICT (started_at) DO UPDATE SET until_at = excluded.until_at",
+                (_ts(watch_start), _ts(now)),
+            )
 
         self._write(write)
+
+    def watched(self, start: datetime, end: datetime) -> list[tuple[datetime, datetime]]:
+        with self._lock:
+            return read_watches(self._db, start, end)
 
     def last_statuses(self) -> dict[str, StatusChange]:
         """The newest stored transition per task id."""
@@ -1555,10 +1572,17 @@ def read_transitions(db: sqlite3.Connection, start: datetime, end: datetime) -> 
     return [status_change(r) for r in rows]
 
 
-def read_oldest_transition(db: sqlite3.Connection) -> datetime | None:
-    """When Kelpie's oldest stored transition was seen (None: none recorded)."""
-    at = db.execute("SELECT MIN(at) FROM task_transitions").fetchone()[0]
-    return None if at is None else datetime.fromisoformat(at)
+def read_watches(
+    db: sqlite3.Connection, start: datetime, end: datetime
+) -> list[tuple[datetime, datetime]]:
+    """When the transition recorder watched (#157), the runs that overlap ``[start, end)``,
+    oldest first: ``(first tick, latest tick)``."""
+    rows = db.execute(
+        "SELECT started_at, until_at FROM transition_watches WHERE started_at < ? AND"
+        " until_at >= ? ORDER BY started_at",
+        (_ts(end), _ts(start)),
+    ).fetchall()
+    return [(datetime.fromisoformat(a), datetime.fromisoformat(b)) for a, b in rows]
 
 
 def read_host_sleeps(db: sqlite3.Connection, start: datetime, end: datetime) -> list[HostSleep]:
@@ -1694,7 +1718,8 @@ class SqliteLedgerPruner:
         """Delete observed task status transitions (#157) seen more than ``retention``
         before ``now``, except each task's newest one before that cut (its status at the
         cut, and what a restart compares with); then, while more than ``max_rows`` are
-        left, the oldest seen at least ``keep`` before ``now``. Returns the rows deleted."""
+        left, the oldest seen at least ``keep`` before ``now`` (rows that are not a task's
+        newest first). Watches that ended before the cut go too. Returns the transitions deleted."""
         cut = _ts(now - retention)
         deleted = self._delete(
             "DELETE FROM task_transitions WHERE id IN (SELECT id FROM task_transitions"
@@ -1702,6 +1727,11 @@ class SqliteLedgerPruner:
             " (SELECT MAX(id) FROM task_transitions WHERE at < ? GROUP BY task_id)"
             " ORDER BY at LIMIT ?)",
             (cut, cut),
+        )
+        self._delete(  # watches that ended before the cut (not counted)
+            "DELETE FROM transition_watches WHERE started_at IN (SELECT started_at FROM"
+            " transition_watches WHERE until_at < ? LIMIT ?)",
+            (cut,),
         )
         floor = _ts(now - keep)
         excess = self._count_transitions() - max(0, max_rows)
@@ -1712,7 +1742,8 @@ class SqliteLedgerPruner:
                 with self._db:
                     n = self._db.execute(
                         "DELETE FROM task_transitions WHERE id IN (SELECT id FROM"
-                        " task_transitions WHERE at < ? ORDER BY at, id LIMIT ?)",
+                        " task_transitions WHERE at < ? ORDER BY id IN (SELECT MAX(id) FROM"
+                        " task_transitions GROUP BY task_id), at, id LIMIT ?)",
                         (floor, min(self._batch, excess)),
                     ).rowcount
             if self._on_batch is not None and n:

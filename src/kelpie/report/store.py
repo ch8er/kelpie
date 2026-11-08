@@ -30,9 +30,9 @@ from kelpie.core.storage import (
     read_action_days,
     read_host_sleeps,
     read_instruction_tokens,
-    read_oldest_transition,
     read_snoozes,
     read_transitions,
+    read_watches,
 )
 from kelpie.core.transitions import StatusChange
 from kelpie.report.fixes import FixEvent, read_fixes
@@ -132,9 +132,9 @@ class ReportStore:
         last one before ``start``."""
         return read_transitions(self._db, start, end)
 
-    def transitions_since(self) -> datetime | None:
-        """When the oldest stored status change was seen (None: none recorded)."""
-        return read_oldest_transition(self._db)
+    def watched(self, start: datetime, end: datetime) -> list[tuple[datetime, datetime]]:
+        """When Kelpie's transition recorder watched the boards, overlapping the range."""
+        return read_watches(self._db, start, end)
 
     def attribution(self) -> Attribution:
         return self._span_store().attribution()

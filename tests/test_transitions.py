@@ -137,10 +137,10 @@ def test_recorder_in_the_engine_tick() -> None:
 class _Broken(MemoryTransitionStore):
     fail = True
 
-    def record_transitions(self, changes: object) -> None:
+    def record_tick(self, changes: object, watch_start: datetime, now: datetime) -> None:
         if self.fail:
             raise sqlite3.OperationalError("disk I/O error")
-        super().record_transitions(changes)  # type: ignore[arg-type]
+        super().record_tick(changes, watch_start, now)  # type: ignore[arg-type]
 
 
 def test_a_failing_store_never_stops_the_tick_and_catches_up() -> None:
@@ -282,6 +282,43 @@ def test_row_cap_drops_the_oldest_outside_keep(tmp_path: Path) -> None:
     pruner.close()
 
 
+def test_each_run_is_one_watch(tmp_path: Path) -> None:
+    path = _db(tmp_path)
+    store = SqliteLedgerStore(path)
+    rec = TransitionRecorder(store)
+    for i in range(3):
+        rec.record(snap(T0 + i * TICK, task()))
+    store.close()
+    store = SqliteLedgerStore(path)  # restarted after a 5h downtime
+    rec = TransitionRecorder(store)
+    rec.record(snap(T0 + timedelta(hours=5), task()))
+    assert store.watched(T0 - DAY, T0 + DAY) == [
+        (T0, T0 + 2 * TICK),
+        (T0 + timedelta(hours=5), T0 + timedelta(hours=5)),
+    ]
+    store.close()
+    pruner = SqliteLedgerPruner(path)
+    pruner.prune_transitions(T0 + 40 * DAY, 30 * DAY, 1_000_000, DAY)
+    pruner.close()
+    again = SqliteLedgerStore(path)
+    assert again.watched(T0 - DAY, T0 + 50 * DAY) == []  # watches go with retention
+    again.close()
+
+
+def test_row_cap_drops_history_before_a_tasks_last_row(tmp_path: Path) -> None:
+    path = _db(tmp_path)
+    store = SqliteLedgerStore(path)
+    rec = TransitionRecorder(store)
+    rec.record(snap(T0, task("still")))  # never changes: its only row is its newest
+    for i, st in enumerate((Status.READY, Status.REVIEW, Status.DONE)):
+        rec.record(snap(T0 + (i + 1) * TICK, task("busy", st)))
+    store.close()
+    pruner = SqliteLedgerPruner(path)
+    assert pruner.prune_transitions(T0 + 3 * DAY, 30 * DAY, 2, DAY) == 2
+    pruner.close()
+    assert _rows(path) == [("still", "ready"), ("busy", "done")]
+
+
 def test_memory_store_prune_keeps_the_newest() -> None:
     store = MemoryTransitionStore()
     rec = TransitionRecorder(store)
@@ -289,6 +326,11 @@ def test_memory_store_prune_keeps_the_newest() -> None:
     rec.record(snap(T0 + DAY, task(status=Status.DONE)))
     assert store.prune(T0 + 2 * DAY) == 1 and [r.status for r in store.rows] == [Status.DONE]
     assert [r.status for r in store.transitions(T0 + 3 * DAY, T0 + 4 * DAY)] == [Status.DONE]
+    assert store.watches == {}  # the run ended before the cut
+    for i in range(4):
+        rec.record(snap(T0 + 3 * DAY + i * TICK, task(f"n{i}")))
+    assert store.prune(T0, max_rows=3) == 2  # the cap: the oldest go first
+    assert [r.task_id for r in store.rows] == ["n1", "n2", "n3"]
 
 
 def test_the_report_store_reads_them(tmp_path: Path) -> None:
@@ -302,7 +344,9 @@ def test_the_report_store_reads_them(tmp_path: Path) -> None:
     store.close()
     with ReportStore(path) as report:
         got = report.transitions(T0, T0 + DAY)
-        assert report.transitions_since() == T0 - 2 * DAY
+        # one recorder run, from its first tick to its latest
+        assert report.watched(T0, T0 + DAY) == [(T0 - 2 * DAY, T0 + TICK)]
+        assert report.watched(T0 + TICK + timedelta(seconds=1), T0 + DAY) == []
     # each board's task once before the day, then b1's change inside it
     assert [(c.task_id, c.status) for c in got] == [
         ("b1:1", Status.READY),

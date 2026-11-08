@@ -399,11 +399,11 @@ class ReportInputs:
     # The platforms' own usage records (``Snapshot.usage``, #271): which task and role a
     # session worked for, when the spans name only the session (#197 items 6 and 7).
     usage: Sequence[SessionUsage] = ()
-    # Task status changes Kelpie recorded (#157): those seen within the loaded history and
-    # each task's last one before it; ``transitions_since`` is when the oldest stored one
-    # was seen (None: nothing recorded). Stages use them where the board keeps no history.
+    # Task status changes Kelpie recorded (#157): those seen within the day and each task's
+    # last one before it; ``watched`` when the recorder ran, overlapping the day. Stages use
+    # them where the board keeps no history, only while Kelpie watched.
     transitions: Sequence[StatusChange] = ()
-    transitions_since: datetime | None = None
+    watched: Sequence[tuple[datetime, datetime]] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -719,6 +719,7 @@ def _boards(
             roles,
             causes[0].split,
             recorded_history(inputs.transitions),
+            inputs.watched,
         )
         return biggest_wait(per_role, part.tasks, causes[0], inputs.farm)
 
@@ -838,6 +839,7 @@ def _biggest_wait(
         roles,
         causes.split,
         recorded_history(inputs.transitions),
+        inputs.watched,
     )
     explained = sum(
         r.waits.get(c, 0.0)

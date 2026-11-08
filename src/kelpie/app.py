@@ -2185,7 +2185,7 @@ def build_ledger_retention(
             states.prune_closed(now - kept.retention) if isinstance(states, MemoryStateStore) else 0
         )
         if isinstance(transitions, MemoryTransitionStore):
-            transitions.prune(now - kept.retention)
+            transitions.prune(now - kept.retention, kept.max_rows)
         return gone, closed
 
     # in the control loop's thread: the in-memory stores are not thread-safe

@@ -258,8 +258,11 @@ class TransitionStore(Protocol):
         """The newest stored change per task id (what a restart compares with)."""
         ...
 
-    def record_transitions(self, changes: Sequence[StatusChange]) -> None:
-        """Store ``changes``; raise when they cannot be stored."""
+    def record_tick(
+        self, changes: Sequence[StatusChange], watch_start: datetime, now: datetime
+    ) -> None:
+        """Store a tick's ``changes`` (often none) and extend the recorder's watch that
+        began at ``watch_start`` to ``now``, in one write; raise when it cannot be stored."""
         ...
 
 

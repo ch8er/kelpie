@@ -8,6 +8,9 @@ The day is 2026-03-02 (UTC), one developer:
 - R2: ready at midnight, blocked at 02:00 (between sessions, none ran), moved to in
   progress at 08:00 with a session 08-09 that leaves it done. Inferred, nothing before
   08:00 is known; recorded: queue 0-2, waiting 2-8.
+
+Kelpie watched the whole day (``WATCHED``) unless a test says otherwise: a record is
+evidence only while it watched.
 """
 
 from __future__ import annotations
@@ -51,7 +54,13 @@ RECORDED = (
 )
 
 
-def _dev(recorded: tuple[StatusChange, ...] | None) -> dict[str, float]:
+WATCHED = ((at(-1), at(24)),)
+
+
+def _dev(
+    recorded: tuple[StatusChange, ...] | None,
+    watched: tuple[tuple[datetime, datetime], ...] = WATCHED,
+) -> dict[str, float]:
     found = throughput(
         TASKS,
         SESSIONS,
@@ -60,6 +69,7 @@ def _dev(recorded: tuple[StatusChange, ...] | None) -> dict[str, float]:
         START,
         END,
         history=None if recorded is None else history(recorded),
+        watched=watched,
     )
     [dev] = found
     return dict(dev.stages)
@@ -74,8 +84,25 @@ def test_recorded_changes_fill_the_gaps() -> None:
     stages = _dev(RECORDED)
     # R1 adds 05:00-10:00 in the queue; R2 adds 0-2 queue and 2-8 waiting (blocked)
     assert stages == pytest.approx({"working": 2, "review": 13, "queue": 5 + 2, "waiting": 6})
-    [dev] = throughput(TASKS, SESSIONS, OWNERS, (), START, END, history=history(RECORDED))
+    [dev] = throughput(
+        TASKS, SESSIONS, OWNERS, (), START, END, history=history(RECORDED), watched=WATCHED
+    )
     assert dev.recorded == ("R1", "R2")
+
+
+def test_a_record_is_not_carried_across_a_downtime() -> None:
+    # kelpie serve last saw R2 ready three days ago and was down since: nothing is known
+    old = (StatusChange(at(-72), "R2", Status.READY, at(-80)),)
+    assert _dev(old, watched=((at(-80), at(-72)),)) == _dev(None)
+    [dev] = throughput(TASKS, SESSIONS, OWNERS, (), START, END, history=history(old), watched=())
+    assert dev.recorded == ()
+
+
+def test_only_the_watched_part_of_the_day_is_recorded() -> None:
+    # watching from 06:00 on: R1's 05-06 is the board's own status_since (its first
+    # sighting), R2 counts as blocked from 06:00 only (02-06 unwatched: not known)
+    stages = _dev(RECORDED, watched=((at(6), at(24)),))
+    assert stages == pytest.approx({"working": 2, "review": 13, "queue": 5, "waiting": 2})
 
 
 def test_no_record_changes_nothing() -> None:
@@ -97,7 +124,9 @@ def test_a_session_after_the_record_still_wins() -> None:
         Session("S3", "R2", "dev-1", at(3), ended_at=at(4), final_status=Status.READY),
     )
     rec = RECORDED[2:4]  # only up to "blocked"
-    [dev] = throughput(TASKS, sessions, OWNERS, (), START, END, history=history(rec))
+    [dev] = throughput(
+        TASKS, sessions, OWNERS, (), START, END, history=history(rec), watched=WATCHED
+    )
     # R2: queue 0-2, waiting 2-3, working 3-4 and 8-9, queue 4-8; R1 inferred
     assert dev.stages == pytest.approx(
         {"working": 1 + 1 + 1, "review": 13, "queue": 2 + 4, "waiting": 1}
@@ -117,10 +146,16 @@ def _markdown(**kw: object) -> str:
 
 
 def test_the_report_says_which_source_it_used() -> None:
-    recorded = _markdown(transitions=RECORDED, transitions_since=at(-1))
-    assert "Kelpie's own record for 2 of 2 task(s) (recorded since 2026-03-01 23:00" in recorded
+    recorded = _markdown(transitions=RECORDED, watched=((at(-1), at(12)),))
+    assert (
+        "Kelpie's own record for 2 of 2 task(s) (it watched the boards 12.0 of the day's 24 h"
+        in recorded
+    )
     assert "| developer | 2.0 | 7.0 | 13.0 | 6.0 | 0.0 |" in recorded
     inferred = _markdown()
-    assert "Kelpie recorded no status change for these tasks yet" in inferred
+    assert "No status change Kelpie recorded decided a stage here" in inferred
+    # recorded, but never watched today: inferred, and said so
+    unwatched = _markdown(transitions=RECORDED[2:])
+    assert "No status change Kelpie recorded decided a stage here" in unwatched
     assert "Kelpie's own record for" not in inferred
     assert "Before/after verification of fixes still infers stages" in inferred

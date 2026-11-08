@@ -418,3 +418,28 @@ def test_throughput_is_never_credited_to_one_fix_of_a_group() -> None:
     assert v.together
     assert not any(c.metric.name.startswith("tasks done per hour") for c in v.own)
     assert any(m.name.startswith("tasks done per hour") for m in v.metrics)
+
+
+def test_verification_ignores_recorded_transitions() -> None:
+    """Before/after infers stages on both sides (#157): a record that would change the
+    throughput section's stages leaves the verification as it was."""
+    from kelpie.core.transitions import StatusChange
+
+    case = queue_runs_out()
+    # Q recorded blocked long before the fix, watched throughout
+    recorded = (
+        StatusChange(F - 23 * H, "Q", Status.READY, F - 23 * H),
+        StatusChange(F - 20 * H, "Q", Status.BLOCKED, F - 20 * H, previous=Status.READY),
+    )
+    plain = done_per_hour(build_report(inputs(fixes=(DEV_FIX,), **case)))
+    with_record = done_per_hour(
+        build_report(
+            inputs(
+                fixes=(DEV_FIX,),
+                transitions=recorded,
+                watched=((F - 30 * H, F + 30 * H),),
+                **case,
+            )
+        )
+    )
+    assert with_record == plain

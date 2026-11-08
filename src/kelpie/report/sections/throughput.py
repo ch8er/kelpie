@@ -13,7 +13,7 @@ from kelpie.report.attribution import CallOwners, call_owners
 from kelpie.report.daily import wait_causes
 from kelpie.report.rework import rework_tokens
 from kelpie.report.sections import Section, SectionContext, Spend, register_section
-from kelpie.report.throughput import RoleThroughput, throughput
+from kelpie.report.throughput import RoleThroughput, throughput, union_hours
 from kelpie.report.waits import WAIT_CAUSES
 
 TITLE = "Farm throughput"
@@ -115,6 +115,7 @@ def throughput_section(ctx: SectionContext) -> Section | None:
         ctx.roles,
         wait_causes(inputs, ctx.start, ctx.end).split,  # as the report's biggest wait
         history(inputs.transitions),
+        inputs.watched,
     )
     if not roles:
         return None
@@ -221,22 +222,26 @@ def throughput_section(ctx: SectionContext) -> Section | None:
 
 def _stage_source(roles: list[RoleThroughput], ctx: SectionContext) -> str:
     """Where the stages came from (#157): the status changes Kelpie recorded, for how many
-    of the tasks with stage time, and since when; inference for the rest."""
+    of the tasks with stage time, and how long it watched within the day; inference for the
+    rest."""
     active = {t for r in roles for t in r.active}
     recorded = {t for r in roles for t in r.recorded}
-    since = ctx.inputs.transitions_since
-    if recorded and since is not None:
-        when = since.astimezone(ctx.inputs.tz).strftime("%Y-%m-%d %H:%M")
+    watched = union_hours(
+        [(max(a, ctx.start), min(b, ctx.end)) for a, b in ctx.inputs.watched if b > ctx.start]
+    )
+    day = (ctx.end - ctx.start).total_seconds() / 3600
+    if recorded:
         source = (
             f"Status changes come from Kelpie's own record for {len(recorded)} of "
-            f"{len(active)} task(s) (recorded since {when}; a change is known to within a "
-            "tick, and to within the gap while `kelpie serve` was down, where the board's own "
-            "`status_since` is used when it falls inside it). For the other tasks, and before "
-            "recording started, they are inferred: "
+            f"{len(active)} task(s) (it watched the boards {watched:.1f} of the day's "
+            f"{day:.0f} h; a change is known to within a tick, and one made while "
+            "`kelpie serve` was down is placed at the board's own `status_since` when that "
+            "falls inside the gap). For the other tasks, and while Kelpie was not watching, "
+            "they are inferred: "
         )
     else:
         source = (
-            "Kelpie recorded no status change for these tasks yet (`kelpie serve` records "
+            "No status change Kelpie recorded decided a stage here (`kelpie serve` records "
             "them from its first tick on), so status changes are inferred: "
         )
     return (

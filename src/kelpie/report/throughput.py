@@ -16,8 +16,9 @@ every known change; each segment gets one stage, the first that applies:
    conditions);
 4. else the status at that time: the current one from ``status_since`` on (``in_progress``
    without an owner is ``ownerless``); before that the latest of the recorded status
-   (placed at :func:`kelpie.core.transitions.changed_at`) and the status the last session
-   declared at its end (neither: ready). ``ready`` and ``in_progress``
+   (placed at :func:`kelpie.core.transitions.changed_at`, and only while Kelpie watched:
+   :class:`Recorded`) and the status the last session declared at its end (neither:
+   ready). ``ready`` and ``in_progress``
    outside a session are ``queue`` (waiting for an agent), ``review`` and ``accepted`` are
    ``review`` (waiting for a reviewer or a merge), ``blocked`` and ``waiting`` are
    ``waiting``; ``backlog`` and finished statuses are not counted.
@@ -26,9 +27,9 @@ A task is counted from its first known moment within the day (its first session,
 state, recorded status or current status, whichever is earliest). Without a record, when
 it was created is not known, so queue time before its first pickup is left out and the
 queue is a lower bound; a recorded first sighting starts it at the board's
-``status_since`` then. Where nothing was recorded (before recording started, or a task
-retention dropped), a status change between sessions is still placed at the next known
-change. The board only
+``status_since`` then. Where nothing was recorded or Kelpie was not watching (before
+recording started, while ``kelpie serve`` was down, or a task retention dropped), a status
+change between sessions is still placed at the next known change. The board only
 looks back so far (Hermes ``lookback``): older sessions and finished tasks are missing. A
 session without an end or a heartbeat counts as running until the end of the day. Hours
 are task-hours: two tasks in the queue for an hour are two queue hours, and the *mean queue
@@ -61,7 +62,7 @@ from itertools import pairwise
 from kelpie.core.model import Owner, OwnerKind, Session, Status, Task
 from kelpie.core.stages import STAGES, UNKNOWN_ROLE, rework_role, status_stage, task_roles
 from kelpie.core.states import OpenState
-from kelpie.core.transitions import StatusChange, changed_at
+from kelpie.core.transitions import StatusChange, changed_at, watching
 
 OWNERLESS_RULES = frozenset({"orphan_status"})
 WAITING_RULES = frozenset({"wait_condition", "stale_blocks"})
@@ -134,12 +135,14 @@ def throughput(
     session_roles: Mapping[str, str] | None = None,
     wait_cause: WaitSplit | None = None,
     history: Mapping[str, Sequence[StatusChange]] | None = None,
+    watched: Sequence[tuple[datetime, datetime]] = (),
 ) -> list[RoleThroughput]:
     """Throughput per role for the day ``[start, end)``, roles in name order.
     ``session_roles`` names the role of sessions whose owner is not in ``owners``;
     ``wait_cause`` splits a stretch of a task's ``waiting`` stage by what it waited for;
     ``history`` holds the status changes Kelpie recorded per task id, in time order
-    (:func:`kelpie.core.transitions.history`; None: inferred only)."""
+    (:func:`kelpie.core.transitions.history`; None: inferred only), evidence only while
+    Kelpie ``watched`` (its recorder's runs, :class:`Recorded`)."""
     recorded_of = history or {}
     hours = (end - start).total_seconds() / 3600
     roles_of_task = task_roles(tasks, owners)
@@ -164,9 +167,10 @@ def throughput(
         a = acc[role]
         mine = sorted(by_task.get(task.id, ()), key=lambda s: (s.started_at, s.id))
         waiting: list[tuple[datetime, datetime]] = []
-        rec = _known(recorded_of.get(task.id, ()), end)
+        rec = _known(recorded_of.get(task.id, ()), watched, end)
+        used: set[str] = set()
         stages = _task_stages(
-            task, mine, windows, start, end, review_roles, role_of_session, waiting, rec
+            task, mine, windows, start, end, review_roles, role_of_session, waiting, rec, used
         )
         done = task.status is Status.DONE and start <= task.status_since < end
         for stage, h in stages.items():
@@ -180,7 +184,7 @@ def throughput(
             a.completed.append(task.id)
         if stages or done:
             a.active.append(task.id)
-            if rec:
+            if used:
                 a.recorded.append(task.id)
             # Rework: who worked the task within the day (non-review sessions), and for
             # each return the role that redid it (core.stages.rework_role).
@@ -301,6 +305,41 @@ def state_windows(states: Iterable[OpenState]) -> StateWindows:
     return windows
 
 
+@dataclass(frozen=True, slots=True)
+class Recorded:
+    """A task's recorded status changes (#157), ordered by when they happened, and when
+    Kelpie's recorder watched (``(first tick, latest tick)`` per run). A record is evidence
+    only while Kelpie watched, or from the board's own ``status_since`` to the tick that
+    saw it; across a downtime the status is inferred as without a record."""
+
+    changes: tuple[StatusChange, ...] = ()
+    watched: tuple[tuple[datetime, datetime], ...] = ()
+
+    def status_at(self, at: datetime, after: datetime | None = None) -> Status | None:
+        """The recorded status at ``at``, None when no record is evidence for it; a
+        change placed before ``after`` (the last session's end) is not."""
+        seen = [c for c in self.changes if changed_at(c) <= at]
+        if not seen:
+            return None
+        c = seen[-1]
+        if after is not None and changed_at(c) < after:
+            return None
+        if changed_at(c) <= at < c.at or watching(at, self.watched):
+            return c.status
+        return None
+
+    def points(self, end: datetime) -> set[datetime]:
+        """Where a recorded status may start or stop being evidence, before ``end``."""
+        out = {p for c in self.changes if (p := changed_at(c)) < end}
+        out.update(c.at for c in self.changes if c.at < end)
+        if self.changes:
+            out.update(p for w in self.watched for p in w if p < end)
+        return out
+
+
+NO_RECORD = Recorded()
+
+
 def stage_spans(
     task: Task,
     sessions: Sequence[Session],
@@ -309,28 +348,36 @@ def stage_spans(
     end: datetime,
     review_roles: Sequence[str],
     role_of_session: _RoleOf,
-    recorded: Sequence[StatusChange] = (),
+    recorded: Recorded = NO_RECORD,
+    used: set[str] | None = None,
 ) -> list[tuple[str, datetime, datetime]]:
     """The task's stages within ``[start, end)`` as ``(stage, from, to)`` stretches, in time
     order (see the module docs); ``sessions`` are the task's own, ``recorded`` its recorded
-    status changes in time order (none: the status before ``status_since`` is inferred)."""
+    status changes (none: the status before ``status_since`` is inferred). The task's id is
+    added to ``used`` when a recorded status decided a stretch."""
     if task.status.is_terminal and task.status_since < start:
         return []
     points = {end, task.status_since}
-    points.update(p for c in recorded if (p := changed_at(c)) < end)
     for s in sessions:
         points.update((s.started_at, session_end(s, end)))
     for kind in ("ownerless", "waiting"):
         for a, b in windows.get((task.id, kind), ()):
             points.update((a, b))
-    # from the task's first known moment: when it was created is not known
-    first = max(start, min(points))
-    cuts = sorted(p for p in points | {first} if first <= p <= end)
+    extra = recorded.points(end)
+    # from the task's first known moment: when it was created is not known, unless a
+    # record is evidence of its status earlier
+    known = [p for p in sorted(extra) if recorded.status_at(max(p, start)) is not None]
+    first = max(start, min([*points, *known[:1]]))
+    cuts = sorted(p for p in points | extra | {first} if first <= p <= end)
     out = []
     for a, b in pairwise(cuts):
-        stage = _stage_at(task, sessions, windows, a, review_roles, role_of_session, end, recorded)
+        stage, by_record = _stage_of(
+            task, sessions, windows, a, review_roles, role_of_session, end, recorded
+        )
         if stage is not None:
             out.append((stage, a, b))
+            if by_record and used is not None:
+                used.add(task.id)
     return out
 
 
@@ -343,13 +390,14 @@ def _task_stages(
     review_roles: Sequence[str],
     role_of_session: _RoleOf,
     waiting: list[tuple[datetime, datetime]] | None = None,
-    recorded: Sequence[StatusChange] = (),
+    recorded: Recorded = NO_RECORD,
+    used: set[str] | None = None,
 ) -> dict[str, float]:
     """Hours of the task per stage within ``[start, end)`` (see the module docs); the
     stretches in the ``waiting`` stage are appended to ``waiting``."""
     out: Counter[str] = Counter()
     spans = stage_spans(
-        task, sessions, windows, start, end, review_roles, role_of_session, recorded
+        task, sessions, windows, start, end, review_roles, role_of_session, recorded, used
     )
     for stage, a, b in spans:
         out[stage] += (b - a).total_seconds() / 3600
@@ -366,28 +414,50 @@ def _stage_at(
     review_roles: Sequence[str],
     role_of_session: _RoleOf,
     end: datetime,
-    recorded: Sequence[StatusChange] = (),
+    recorded: Recorded = NO_RECORD,
 ) -> str | None:
     """The task's stage from ``at`` until the next known change."""
+    return _stage_of(task, sessions, windows, at, review_roles, role_of_session, end, recorded)[0]
+
+
+def _stage_of(
+    task: Task,
+    sessions: Sequence[Session],
+    windows: Mapping[tuple[str, str], Sequence[tuple[datetime, datetime]]],
+    at: datetime,
+    review_roles: Sequence[str],
+    role_of_session: _RoleOf,
+    end: datetime,
+    recorded: Recorded,
+) -> tuple[str | None, bool]:
+    """The task's stage from ``at`` until the next known change, and whether a recorded
+    status decided it."""
     if task.status.is_terminal and at >= task.status_since:
-        return None
+        return None, False
     for s in sessions:
         if s.started_at <= at < session_end(s, end):
-            return "review" if role_of_session(s) in review_roles else "working"
+            return ("review" if role_of_session(s) in review_roles else "working"), False
     for kind in ("ownerless", "waiting"):
         if any(a <= at < b for a, b in windows.get((task.id, kind), ())):
-            return kind
+            return kind, False
     if at >= task.status_since:
-        return status_stage(task, task.status)
+        return status_stage(task, task.status), False
     before = [s for s in sessions if session_end(s, end) <= at]
     last = max(before, key=lambda s: (session_end(s, end), s.id)) if before else None
     status = last.final_status if last and last.final_status else Status.READY
-    seen = [c for c in recorded if changed_at(c) <= at]
-    if seen and (last is None or changed_at(seen[-1]) >= session_end(last, end)):
-        status = seen[-1].status  # recorded after the last session's end: it wins
-    return status_stage(task, status) if status is not Status.IN_PROGRESS else "queue"
+    # a recorded status after the last session's end wins (only while it is evidence)
+    found = recorded.status_at(at, None if last is None else session_end(last, end))
+    if found is not None:
+        status = found
+    stage = status_stage(task, status) if status is not Status.IN_PROGRESS else "queue"
+    return stage, found is not None
 
 
-def _known(recorded: Sequence[StatusChange], end: datetime) -> tuple[StatusChange, ...]:
+def _known(
+    recorded: Sequence[StatusChange],
+    watched: Sequence[tuple[datetime, datetime]],
+    end: datetime,
+) -> Recorded:
     """The recorded changes known by ``end``, ordered by when they happened."""
-    return tuple(sorted((c for c in recorded if c.at < end), key=changed_at))
+    changes = tuple(sorted((c for c in recorded if c.at < end), key=changed_at))
+    return Recorded(changes, tuple(watched)) if changes else NO_RECORD

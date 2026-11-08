@@ -886,7 +886,8 @@ What retention keeps and drops:
   the task's status at the cut (a report can tell what status a task had when its day
   began, and a restart compares with it). Past `max_rows`, the oldest go first, those
   newest rows included, never within the ledger's own windows; a task whose last row went
-  that way is recorded again as a first sighting, never as a transition.
+  that way is recorded again as a first sighting, never as a transition; other rows go
+  before a task's newest. When the recorder watched goes with `retention` too.
 - Spans have their own `[traces] retention` and `max_rows`.
 
 ### Observed task status transitions
@@ -900,8 +901,12 @@ status was seen. A task seen for the first time gets a row with the board's `sta
 as its start. Nothing is written to the board, no text is stored, and a task missing from a
 tick records nothing. The last record per task is read back at start, so a restart invents
 no transition; a change during the downtime is known only to within the gap (the board's
-`status_since` places it when it falls inside). On a multi-host farm the hub records the
-merged boards. Rules never read these rows; the daily report does ([report](#report)).
+`status_since` places it when it falls inside). Each run of `kelpie serve` also keeps
+when it watched (first tick to latest): the report treats a recorded status as known only
+while Kelpie watched, and infers the rest as before, so a downtime is never filled with the
+last status seen. On a multi-host farm the hub records the merged boards. Rules never read
+these rows; the daily report's stages do ([report](#report)). Task ids are assumed unique
+across adapters, as everywhere in Kelpie.
 
 ## [snooze]
 

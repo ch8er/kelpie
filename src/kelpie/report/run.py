@@ -102,7 +102,7 @@ def load_inputs(sources: ReportSources, day: date, board: Snapshot) -> ReportInp
     tokens: list[TokenRow] = []
     sleeps: list[HostSleep] = []
     transitions: list[StatusChange] = []
-    recorded_since: datetime | None = None
+    watched: list[tuple[datetime, datetime]] = []
     if sources.db_path is not None and sources.db_path.exists():
         with ReportStore(sources.db_path) as store:
             actions = store.actions(history, end)
@@ -115,7 +115,7 @@ def load_inputs(sources: ReportSources, day: date, board: Snapshot) -> ReportInp
             tokens = store.instruction_tokens(history, end)
             sleeps = store.host_sleeps(history, end)
             transitions = store.transitions(start, end)
-            recorded_since = store.transitions_since()
+            watched = store.watched(start, end)
     # Hook spans (platforms without OTLP) live in the adapters, not in the store; the same
     # call reported both ways is kept once.
     merged = merge_hook_spans(
@@ -161,7 +161,7 @@ def load_inputs(sources: ReportSources, day: date, board: Snapshot) -> ReportInp
         host_sleeps=sleeps,
         usage=board.usage,
         transitions=transitions,
-        transitions_since=recorded_since,
+        watched=watched,
         agents=frozenset(a for t in board.tasks if (a := source_agent(t.source)) is not None),
     )
 
