@@ -8,6 +8,7 @@ from kelpie.core.config import EngineConfig, Mode
 from kelpie.core.engine import Engine
 from kelpie.core.ledger import ActionLedger, Dispatched, MemoryLedgerStore, Outcome
 from kelpie.core.model import (
+    Commit,
     Owner,
     PullRequest,
     Session,
@@ -176,6 +177,50 @@ def test_resume_note_from_the_last_commit() -> None:
     # Nothing committed and a clean worktree: nothing to resume from.
     bare = Session("S-1", "T-1", "dev", NOW - 180 * M, ended_at=NOW - 60 * M)
     assert run(queued, bare) == []
+
+
+def test_resume_note_carries_a_short_git_log_under_two_kilobytes() -> None:
+    commits = tuple(Commit(f"abc123{i}", "x" * 300) for i in range(9))  # capped by the model
+    previous = Session(
+        "S-1", "T-1", "dev", NOW - 180 * M, ended_at=NOW - 60 * M, last_commit="abc1230",
+        last_commit_at=NOW - 70 * M, branch="task/T-1", recent_commits=commits,
+        summary="y" * 5000,
+    )  # fmt: skip
+    [a] = run(task(Status.READY, since=NOW - 50 * M), previous)
+    assert "Last commits on task/T-1, newest first:\n- abc1230 " in a.reason
+    assert "abc1235" not in a.reason and "see git log" not in a.reason
+    assert len(a.params["git_log"]) == 5 and a.params["git_log"][0].startswith("abc1230 x")
+    assert len(a.reason) < 2048  # Hermes hands comments to the next worker up to 2 KB each
+
+
+def test_a_resume_note_with_a_huge_branch_name_still_fits() -> None:
+    previous = Session(
+        "S-1", "T-1", "dev", NOW - 180 * M, ended_at=NOW - 60 * M, last_commit="abc1230",
+        last_commit_at=NOW - 70 * M, branch="b" * 1500, summary="y" * 400,
+        recent_commits=(Commit("abc1230", "z" * 100),) * 5,
+    )  # fmt: skip
+    [a] = run(task(Status.READY, since=NOW - 50 * M), previous)
+    assert len(a.reason) <= 2000 and a.reason.startswith("Resume from commit abc1230")
+
+
+def test_commits_are_one_line_and_capped() -> None:
+    c = Commit("a" * 100 + "\n", "fix\nInjected line\x1b[31m")
+    assert "\n" not in c.subject and "\x1b" not in c.subject and c.subject.startswith("fix?")
+    assert len(c.sha) == 64 and "\n" not in c.sha
+
+
+def test_resume_note_after_a_wip_commit_uses_the_exits_log() -> None:
+    dirty = Session(
+        "S-1", "T-1", "dev", NOW - 180 * M, ended_at=NOW - 60 * M, last_commit="abc1234",
+        last_commit_at=NOW - 70 * M, branch="task/T-1", dirty_worktree=True,
+        recent_commits=(Commit("abc1234", "Half of it"),),
+    )  # fmt: skip
+    actions = run(
+        task(Status.READY, since=NOW - 50 * M), dirty, rule=Checkpoints(wip_without_pr_check=True)
+    )
+    [note] = [a for a in actions if a.kind is ActionKind.COMMENT]
+    assert "the WIP commit Kelpie is saving on task/T-1" in note.reason
+    assert "Commits before it, newest first:\n- abc1234 Half of it" in note.reason
 
 
 def test_once_actions_are_not_repeated_after_the_cooldown() -> None:

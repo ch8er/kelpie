@@ -9,7 +9,8 @@ module asks git only things that do not need them, and switches off what it can:
   ``status --porcelain=v2 -z`` with every listed driver emptied, ``cat-file commit <oid>`` (no
   gpg, no filters, unlike ``log``), and, with base refs, ``rev-parse --verify`` per ref,
   ``merge-base --all`` and ``diff-tree -r --name-only`` per merge-base (plumbing that compares
-  trees by object id: no textconv, no external diff, no filters), so 3 + refs + 1 + bases;
+  trees by object id: no textconv, no external diff, no filters), so 3 + refs + 1 + bases,
+  plus up to ``LOG_COMMITS`` - 1 more ``cat-file commit`` for the short git log;
 - ``-c`` overrides on every call: no fsmonitor, no global attributes file, no hooks, no
   submodule recursion; ``--attr-source=<empty tree>`` where git supports it (2.40+), so the
   worktree's ``.gitattributes`` is not read;
@@ -23,6 +24,19 @@ module asks git only things that do not need them, and switches off what it can:
 
 Any failure leaves the fields ``None`` and says why in ``GitState.problem``. Nothing here
 raises. ``last_commit`` is the first ``ABBREV`` hex digits of the ``HEAD`` object id.
+
+``log`` is a short git log of ``HEAD``: up to ``LOG_COMMITS`` commits along first parents,
+newest first, each its abbreviated id and the first line of its message, read with
+``cat-file commit`` (one call per commit beyond ``HEAD``, never ``git log``, which can run
+gpg). When the base refs were read it lists only commits since the task's branch last met
+the base: none when ``HEAD`` is a merge-base itself (the branch is the base, or was merged
+into it), the walk stops before a merge-base, and it ends at a commit that merged a
+merge-base in (a branch that pulled in the base is not walked past that merge, into the
+base's own history). Without base refs, or when none resolves, it is the last
+``LOG_COMMITS`` commits. It is
+skipped when less than one ``timeout`` of the snapshot's git budget is left, so it never
+costs another workspace its ``status``. Each commit object is read up to
+``MAX_COMMIT_CHARS``. Control characters in a subject become ``?``.
 
 ``paths`` are the files the task touches: the uncommitted entries of ``status`` (untracked
 included, a new untracked directory as one ``dir/`` entry; both sides of a rename) plus,
@@ -62,6 +76,9 @@ from pathlib import Path
 from typing import Any
 
 from kelpie.adapters._spool import open_regular
+from kelpie.core.model import MAX_COMMIT_SUBJECT as MAX_SUBJECT
+from kelpie.core.model import MAX_RECENT_COMMITS as LOG_COMMITS
+from kelpie.core.model import capped
 
 log = logging.getLogger(__name__)
 
@@ -100,6 +117,7 @@ MAX_STATUS_CHARS = 8 << 20  # status output read per workspace (beyond: counts a
 MAX_DIFF_CHARS = 2 << 20  # diff-tree output read per merge-base
 MAX_POINTER = 4096  # bytes read of a .git file, commondir or gitdir
 MAX_BASES = 3  # merge-bases compared when the history has several
+MAX_COMMIT_CHARS = 64 << 10  # of a commit object read (headers and subject come first)
 
 _OID = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
 _VERSION = re.compile(r"(\d+)\.(\d+)")
@@ -139,6 +157,8 @@ class GitState:
     paths_truncated: bool = False  # more than MAX_PATHS (or output caps): only the first kept
     paths_partial: bool = False  # committed changes could not be read: uncommitted only
     repo: str | None = None  # the repository's common git directory: same repo, same key
+    # short git log of HEAD, newest first: (abbreviated id, subject); see the module doc
+    log: tuple[tuple[str, str], ...] = ()
     problem: Problem | None = None
 
     @property
@@ -496,13 +516,15 @@ def _read(
     oid, head, changed, paths = _parse_status(out, complete=not truncated)
     committed_at = None
     partial = False
+    history: tuple[tuple[str, str], ...] = ()
     if oid is not None:
-        code, raw, _ = git("cat-file", "commit", oid)
+        code, raw, _ = git("cat-file", "commit", oid, cap=MAX_COMMIT_CHARS)
         committed_at = _committed_at(raw) if code == 0 else None
         refs = [r for r in base_refs if valid_base_ref(r)]
+        bases: list[str] = []
         if refs:
             try:  # optional: a failure here keeps what was read above
-                committed, cut = _branch_paths(git, oid, refs, path)
+                committed, cut, bases = _branch_paths(git, oid, refs, path)
             except _Stop as stop:
                 log.debug("hermes: committed paths of %s not read: %s", path, stop.problem)
                 partial = True
@@ -510,6 +532,12 @@ def _read(
                 partial = committed is None
                 paths |= committed or set()
                 truncated = truncated or cut
+        spare = deadline is None or deadline - time.monotonic() > timeout
+        if code == 0 and spare:
+            try:  # optional too: the log stops where a read fails
+                history = _short_log(git, oid, raw, set(bases))
+            except _Stop as stop:
+                log.debug("hermes: git log of %s not read: %s", path, stop.problem)
     ordered = sorted(_printable(p) for p in paths)
     return GitState(
         last_commit=oid[:ABBREV] if oid else None,
@@ -519,13 +547,51 @@ def _read(
         paths=tuple(ordered[:MAX_PATHS]),
         paths_truncated=truncated or len(ordered) > MAX_PATHS,
         paths_partial=partial,
+        log=history,
     )
 
 
-def _branch_paths(git: Any, oid: str, refs: list[str], path: Path) -> tuple[set[str] | None, bool]:
-    """Files changed between ``oid`` and its merge-bases with ``refs``, and whether output was
-    cut. With several merge-bases (criss-cross histories) only files changed against every
-    one of them count. ``None``: no ref resolves or there is no merge-base (shallow)."""
+def _short_log(git: Any, oid: str, raw: str, bases: set[str]) -> tuple[tuple[str, str], ...]:
+    """Up to LOG_COMMITS commits from ``oid`` (whose raw object is ``raw``) along first
+    parents, stopping before a merge-base in ``bases`` and after a commit that merged one
+    in (see the module doc)."""
+    found: list[tuple[str, str]] = []
+    while oid not in bases:
+        parents, subject = _commit_fields(raw)
+        found.append((oid[:ABBREV], subject))
+        if len(found) >= LOG_COMMITS or not parents or any(p in bases for p in parents[1:]):
+            break
+        code, raw, _ = git("cat-file", "commit", parents[0], cap=MAX_COMMIT_CHARS)
+        if code != 0:
+            break
+        oid = parents[0]
+    return tuple(found)
+
+
+def _commit_fields(raw: str) -> tuple[list[str], str]:
+    """``(parent oids, first one first; subject)`` of a raw commit object: its ``parent``
+    headers, and the first non-empty line of the message, control characters as ``?``,
+    capped. A parent that is not an object id ends the list."""
+    parents: list[str] = []
+    headers, _, message = raw.partition("\n\n")
+    for line in headers.split("\n"):
+        if line.startswith("parent "):
+            value = line.removeprefix("parent ").strip()
+            if not _OID.fullmatch(value):
+                break
+            parents.append(value)
+    subject = next((s.strip() for s in message.split("\n") if s.strip()), "")
+    subject = capped(_printable(subject), MAX_SUBJECT)
+    return parents, subject
+
+
+def _branch_paths(
+    git: Any, oid: str, refs: list[str], path: Path
+) -> tuple[set[str] | None, bool, list[str]]:
+    """Files changed between ``oid`` and its merge-bases with ``refs``, whether output was
+    cut, and the merge-bases. With several merge-bases (criss-cross histories) only files
+    changed against every one of them count. ``None``: no ref resolves or there is no
+    merge-base (shallow)."""
     oids: list[str] = []
     for ref in refs:
         code, out, _ = git(
@@ -541,11 +607,11 @@ def _branch_paths(git: Any, oid: str, refs: list[str], path: Path) -> tuple[set[
             list(refs),
             path,
         )
-        return None, False
+        return None, False, []
     code, out, _ = git("merge-base", "--all", "--end-of-options", oid, *oids)
     bases = [b for b in out.split() if _OID.fullmatch(b)][:MAX_BASES]
     if code != 0 or not bases:
-        return None, False
+        return None, False, []
     common: set[str] | None = None
     cut = False
     for base in bases:
@@ -553,14 +619,14 @@ def _branch_paths(git: Any, oid: str, refs: list[str], path: Path) -> tuple[set[
             "diff-tree", "-r", "--name-only", "--no-renames", "-z", base, oid, cap=MAX_DIFF_CHARS
         )
         if code != 0:
-            return None, False
+            return None, False, bases
         records = out.split("\0")
         if truncated:
             records = records[:-1]  # the last one may be cut short
             cut = True
         found = {r for r in records if r}
         common = found if common is None else common & found
-    return common or set(), cut
+    return common or set(), cut, bases
 
 
 _UNPRINTABLE = re.compile(r"[\x00-\x1f\x7f]")

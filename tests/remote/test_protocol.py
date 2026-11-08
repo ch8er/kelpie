@@ -6,6 +6,7 @@ import pytest
 from kelpie.core.actions import ActionKind
 from kelpie.core.model import (
     Block,
+    Commit,
     Condition,
     ConditionKind,
     Dependency,
@@ -74,7 +75,15 @@ def board() -> Snapshot:
         conditions=(
             Condition("c1", ConditionKind.TASK_STATUS, "t_1a", {"task_id": "t_2b"}, True, NOW),
         ),
-        sessions=(Session("run-1", "t_1a", "coder-1", NOW - timedelta(minutes=5)),),
+        sessions=(
+            Session(
+                "run-1",
+                "t_1a",
+                "coder-1",
+                NOW - timedelta(minutes=5),
+                recent_commits=(Commit("abc1234", "Fix the header"), Commit("def5678")),
+            ),
+        ),
         spans=(Span("tr", "sp", "bash", SpanKind.TOOL, NOW, task_id="t_1a", attributes={"k": 1}),),
     )
 

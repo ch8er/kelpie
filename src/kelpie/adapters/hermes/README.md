@@ -568,6 +568,14 @@ is logged once).
 | `branch` | `tasks.branch_name`, else `# branch.head` of that `status` (a detached `HEAD` gives none) |
 | `last_commit` | `# branch.oid` of that `status`, first 7 hex digits (none before the first commit) |
 | `last_commit_at` | committer time of that commit, from `git cat-file commit <oid>`, in UTC |
+| `recent_commits` | a short git log: up to 5 commits from `HEAD` along first parents, newest first, each its first 7 hex digits and the first line of its message (control characters as `?`, at most 100 characters), read with `git cat-file commit` per commit (each read up to 64 KiB); with `base_refs` it lists only commits since the branch last met the base: none when `HEAD` is a merge-base, and it ends before a merge-base or at a commit that merged one in; skipped when less than one `git_timeout` of the snapshot's git budget is left |
+
+The `checkpoints` rule puts that log, the commit, the branch and the progress note in the
+resume note of a requeued task. Hermes hands the newest 30 comments of a task (2048
+characters each) to the worker it spawns for it, in the worker's context
+(`build_worker_context` in Hermes' `kanban_db_context.py`), so the note reaches the next
+session's prompt while fewer than 30 newer comments exist; it is capped at 2000 characters
+so Hermes does not cut it.
 
 `Task.files` (rule 12, conflict warning) are what the task touches: the uncommitted entries
 of that `status` (both sides of a rename; a new untracked directory as one `dir/` entry)
@@ -592,7 +600,8 @@ objects. Git runs programs named in that config (filter drivers, `core.fsmonitor
 
 - Only these commands per workspace: `git config -z --name-only --get-regexp '^filter\.'`
   (lists filter drivers, runs nothing), the `status` above (with `-z`), `git cat-file commit
-  <oid>` (no `git log`: with `log.showSignature` it runs gpg), and for `Task.files`
+  <oid>` (also for up to 4 parents of `HEAD`, for `recent_commits`; no `git log`: with
+  `log.showSignature` it runs gpg), and for `Task.files`
   `git rev-parse --verify` per base ref, `git merge-base --all` on the oids it printed, and
   `git diff-tree -r --name-only --no-renames -z` per merge-base (plumbing that compares trees
   by object id: no textconv, no external diff, no filters). Ref names are validated (no

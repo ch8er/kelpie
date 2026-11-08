@@ -39,9 +39,13 @@ them, and the next session starts from zero. This rule keeps work recoverable:
   the next ones on that branch;
 - **resume note**: when that exit sends the task back to the queue (it is queued again, or
   rule 1 is about to requeue it), the task gets one comment naming the WIP commit or the
-  last commit and branch, with the progress note, so the next session continues instead
-  of restarting. Not after a session that declared a block or a wait (``blocked``,
-  ``waiting``): whoever unblocks the task sends it back, not a lost session.
+  last commit and branch, a short git log of the branch (``Session.recent_commits``, when
+  the adapter reads it) and the progress note, so the next session continues instead of
+  restarting. The note is capped at 2000 characters (the progress note, then the log, cut
+  first): a platform that hands a task's comments to its next session (Hermes puts the
+  newest 30 in the worker's context, 2048 characters each) passes it on whole. Not after a
+  session that declared a block or a wait (``blocked``, ``waiting``): whoever unblocks the
+  task sends it back, not a lost session.
 
 WIP commits and resume notes are one-off actions (``Action.once``) and are only emitted
 for ``act_within`` (default 24h) after the exit, which must stay shorter than the engine's
@@ -61,7 +65,7 @@ from datetime import timedelta
 from typing import Any
 
 from kelpie.core.actions import Action, ActionKind, Severity
-from kelpie.core.model import Session, Snapshot, SpanKind, Status, Task
+from kelpie.core.model import Commit, Session, Snapshot, SpanKind, Status, Task
 from kelpie.core.serde import parse_duration
 from kelpie.rules import register
 from kelpie.rules._alerts import alert_params
@@ -83,6 +87,8 @@ GAVE_UP_WINDOW = timedelta(hours=1)  # after act_within: the one alert for a dec
 _WIP_CI = ("skip_ci", "draft_pr")
 _OUT_OF_HORIZON = "a PR closed during the session would no longer be listed"
 _NOTE_LIMIT = 500
+# A resume note fits one Hermes worker-context comment (2048 characters), with room to spare.
+_RESUME_LIMIT = 2000
 
 
 @dataclass(frozen=True, slots=True)
@@ -336,17 +342,26 @@ class Checkpoints:
             where = f"commit {session.last_commit}"
             commit = session.last_commit
         branch = session.branch or end.session.branch
+        commits = session.recent_commits or end.session.recent_commits
         if branch:
-            where += f" on {branch} (see git log there for what was done)"
+            where += " on " + branch + ("" if commits else " (see git log there for what was done)")
+        # after a WIP commit, the log ends before it (the commit is not made yet)
+        history = _history(commits, branch, "Commits before it" if commit is None else None)
         note = _note(end.session) or _note(session)
+        text = f"Resume from {where} instead of starting over.{left}"
         yield Action(
             ActionKind.COMMENT,
             NAME,
-            f"Resume from {where} instead of starting over.{left}\n\n{note}".rstrip(),
+            _fit(text, history, note),
             task_id=task.id,
             key=f"resume:{task.id}:{end.session.id}",
             once=True,
-            params={"commit": commit, "branch": branch, "session_id": session.id},
+            params={
+                "commit": commit,
+                "branch": branch,
+                "session_id": session.id,
+                "git_log": [f"{c.sha} {c.subject}".rstrip() for c in commits],
+            },
         )
 
 
@@ -355,6 +370,27 @@ def _committed(session: Session) -> bool:
     if not session.last_commit:
         return False
     return session.last_commit_at is None or session.last_commit_at >= session.started_at
+
+
+def _history(commits: Sequence[Commit], branch: str | None, heading: str | None = None) -> str:
+    """The short git log a resume note carries, newest first; empty without commits."""
+    if not commits:
+        return ""
+    lines = "\n".join(f"- {c.sha} {c.subject}".rstrip() for c in commits)
+    title = heading or ("Last commits" + (f" on {branch}" if branch else ""))
+    return f"{title}, newest first:\n{lines}"
+
+
+def _fit(*parts: str) -> str:
+    """The parts of a resume note in at most ``_RESUME_LIMIT`` characters: the later parts
+    (the progress note, then the git log) are cut first."""
+    kept = [p for p in parts if p]
+    while len(text := "\n\n".join(kept)) > _RESUME_LIMIT and len(kept) > 1:
+        over = len(text) - _RESUME_LIMIT
+        last = kept[-1]
+        kept[-1] = last[: len(last) - over - 1].rstrip() + "…" if len(last) - over > 40 else ""
+        kept = [p for p in kept if p]
+    return text if len(text) <= _RESUME_LIMIT else text[: _RESUME_LIMIT - 1] + "…"
 
 
 def _note(session: Session) -> str:

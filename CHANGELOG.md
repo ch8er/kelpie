@@ -41,6 +41,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
   the database without writing to it; with no adapter, the last statuses `kelpie serve`
   observed). `--json` prints the farm view alone for scripts, `--server [URL]` reads it from
   a running `kelpie serve`. The view model is `kelpie.core.farmview`.
+- Resume notes carry a short git log: `Session.recent_commits` (up to 5 commits, newest
+  first, only commits since the branch last met its base when the base is known), read by
+  the Hermes adapter with `git cat-file commit` per commit (never `git log`; each read
+  capped), and listed by `checkpoints` in the note of a requeued task with the commit,
+  branch and progress note (params `git_log`). The note is capped at 2000 characters:
+  Hermes puts a task's newest comments (2048 characters each) in the next worker's context,
+  so the note reaches its prompt whole.
 - `[view]` (off by default): `kelpie serve` serves the farm view read-only as JSON on a
   listener of its own (`GET /v1/farm`, 127.0.0.1:9466). No write endpoint; with
   `[view] token_env` set every request needs the bearer token, and off loopback `kelpie
