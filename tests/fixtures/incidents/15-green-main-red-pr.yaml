@@ -1,0 +1,150 @@
+id: "15-green-main-red-pr"
+incident: 15
+title: "Main is green, the PR the task waits for is red: the block stays"
+description: >
+  A duty agent unblocked a reviewer's task because CI on main was green, while the PR the
+  task waited for was still red at its head. A condition is bound to the exact target: the
+  repository, the PR number and that PR's head commit. Green CI on main, or on another PR,
+  never satisfies it, and a task waiting for a PR to land waits for pr_merged, not for
+  green CI. Incident 15's block patterns turn such blocks into those conditions; the
+  connector binds each to the PR's head (the snapshot here is what it reports, rebuilt from
+  the raw blocks against a fake GitHub with main green in
+  tests/connectors/test_github_blocks.py), and rule 4 trusts the bound condition. It keeps
+  the block on the red head (alerting once it is overdue), clears the one whose own head
+  turned green, and keeps the merge wait while the PR is open.
+rule: stale_blocks
+config:
+  unblock_grace: "5m"
+  max_condition_age: "15m"
+  max_block: "8h"
+snapshot:
+  now: "2026-03-02T14:00:00+00:00"
+  owners:
+    - {id: reviewer-1, role: reviewer}
+  tasks:
+    # The incident: waits for green CI on #150, whose head is red; main is green.
+    - id: T-1511
+      title: "Review: search index"
+      status: blocked
+      status_since: "2026-03-02T12:00:00+00:00"
+      role: reviewer
+      owner_id: reviewer-1
+      block:
+        reason: "waiting for green CI on example/repo#150"
+        since: "2026-03-02T12:00:00+00:00"
+        condition_id: "block:T-1511:ci_green:example/repo#150"
+    # Its own PR's head turned green: cleared.
+    - id: T-1512
+      title: "Review: rate limiter"
+      status: blocked
+      status_since: "2026-03-02T12:10:00+00:00"
+      role: reviewer
+      owner_id: reviewer-1
+      block:
+        reason: "waiting for green CI on example/repo#151"
+        since: "2026-03-02T12:10:00+00:00"
+        condition_id: "block:T-1512:ci_green:example/repo#151"
+    # Waits for #152 to land: its head and main are green, but the PR is still open.
+    - id: T-1513
+      title: "Review: session store"
+      status: blocked
+      status_since: "2026-03-02T12:20:00+00:00"
+      role: reviewer
+      owner_id: reviewer-1
+      block:
+        reason: "waiting for merge of example/repo#152"
+        since: "2026-03-02T12:20:00+00:00"
+        condition_id: "block:T-1513:pr_merged:example/repo#152"
+    # Waits on the same red head for 9 hours: past max_block, alerted, still not cleared.
+    - id: T-1514
+      title: "Review: search ranking"
+      status: blocked
+      status_since: "2026-03-02T05:00:00+00:00"
+      role: reviewer
+      owner_id: reviewer-1
+      block:
+        reason: "waiting for green CI on example/repo#150"
+        since: "2026-03-02T05:00:00+00:00"
+        condition_id: "block:T-1514:ci_green:example/repo#150"
+  conditions:
+    - id: "block:T-1511:ci_green:example/repo#150"
+      kind: ci_status
+      task_id: T-1511
+      params: {repo: example/repo, pr: 150, source: block_reason, expect: success,
+               head_sha: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", ci_state: failure,
+               ci_source: statuses, pr_state: open}
+      satisfied: false
+      checked_at: "2026-03-02T13:59:00+00:00"
+      registered_at: "2026-03-02T12:00:00+00:00"
+    - id: "block:T-1514:ci_green:example/repo#150"
+      kind: ci_status
+      task_id: T-1514
+      params: {repo: example/repo, pr: 150, source: block_reason, expect: success,
+               head_sha: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", ci_state: failure,
+               ci_source: statuses, pr_state: open}
+      satisfied: false
+      checked_at: "2026-03-02T13:59:00+00:00"
+      registered_at: "2026-03-02T05:00:00+00:00"
+    - id: "block:T-1512:ci_green:example/repo#151"
+      kind: ci_status
+      task_id: T-1512
+      params: {repo: example/repo, pr: 151, source: block_reason, expect: success,
+               head_sha: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", ci_state: success,
+               ci_source: statuses, pr_state: open}
+      satisfied: true
+      satisfied_at: "2026-03-02T13:30:00+00:00"
+      checked_at: "2026-03-02T13:59:00+00:00"
+      registered_at: "2026-03-02T12:10:00+00:00"
+    - id: "block:T-1513:pr_merged:example/repo#152"
+      kind: pr_merged
+      task_id: T-1513
+      params: {repo: example/repo, pr: 152, source: block_reason,
+               head_sha: "cccccccccccccccccccccccccccccccccccccccc", pr_state: open}
+      satisfied: false
+      checked_at: "2026-03-02T13:59:00+00:00"
+      registered_at: "2026-03-02T12:20:00+00:00"
+  pull_requests:
+    - {repo: example/repo, number: 150, title: "T-1500 search index", branch: task/T-1500,
+       head_sha: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
+    - {repo: example/repo, number: 151, title: "T-1510 rate limiter", branch: task/T-1510,
+       head_sha: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}
+    - {repo: example/repo, number: 152, title: "T-1520 session store", branch: task/T-1520,
+       head_sha: "cccccccccccccccccccccccccccccccccccccccc"}
+  builds:
+    # Main is green: it satisfies nothing a task waits for.
+    - {id: B-main, source: github, repo: example/repo, workflow: ci, branch: main,
+       sha: "dddddddddddddddddddddddddddddddddddddddd", event: push, status: success,
+       started_at: "2026-03-02T13:40:00+00:00", finished_at: "2026-03-02T13:50:00+00:00",
+       minutes: 10}
+    # The head of #150 is red.
+    - {id: B-150, source: github, repo: example/repo, workflow: ci, branch: task/T-1500,
+       sha: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", event: pull_request, pr: 150,
+       status: failure, started_at: "2026-03-02T13:20:00+00:00",
+       finished_at: "2026-03-02T13:35:00+00:00", minutes: 15,
+       jobs: [{name: test, conclusion: failure, step: "Run tests"}]}
+    - {id: B-151, source: github, repo: example/repo, workflow: ci, branch: task/T-1510,
+       sha: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", event: pull_request, pr: 151,
+       status: success, started_at: "2026-03-02T13:15:00+00:00",
+       finished_at: "2026-03-02T13:30:00+00:00", minutes: 15}
+    - {id: B-152, source: github, repo: example/repo, workflow: ci, branch: task/T-1520,
+       sha: "cccccccccccccccccccccccccccccccccccccccc", event: pull_request, pr: 152,
+       status: success, started_at: "2026-03-02T13:00:00+00:00",
+       finished_at: "2026-03-02T13:12:00+00:00", minutes: 12}
+expected_actions:
+  - kind: unblock
+    task_id: T-1512
+    reason_contains: "ci_status"
+  - kind: alert
+    task_id: T-1514
+    reason_contains: "limit 8h"
+not_expected_actions:
+  - kind: unblock
+    task_id: T-1514
+  - kind: unblock
+    task_id: T-1511
+  - kind: alert
+    task_id: T-1511
+  - kind: unblock
+    task_id: T-1513
+  - kind: alert
+    task_id: T-1513
