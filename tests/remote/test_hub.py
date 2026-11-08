@@ -18,7 +18,7 @@ import pytest
 from kelpie import net
 from kelpie.core.actions import ActionKind
 from kelpie.core.model import Session, Snapshot, Status, Task
-from kelpie.core.ports import UnsupportedAction
+from kelpie.core.ports import NothingToDo, UnsupportedAction
 from kelpie.remote.agent import Agent, AgentError, tls_context
 from kelpie.remote.config import AgentSettings, HubAgent, HubSettings
 from kelpie.remote.hub import AgentUnavailable, Hub, HubServer, OutOfOrder
@@ -235,6 +235,19 @@ def test_unsupported_and_failing_actions(server: HubServer, clock: Clock) -> Non
     result = agent.execute(encode_action(replace(stop_action(), id="a2")))
     assert result is not None and result.outcome is Outcome.FAILED
     assert result.detail == "RuntimeError (details in the Kelpie log)"  # never the message
+
+
+def test_nothing_to_do_carries_the_adapters_note(server: HubServer, clock: Clock) -> None:
+    @dataclass
+    class AlreadyBoard(BoardAdapter):
+        def comment(self, task_id: str, body: str) -> None:
+            raise NothingToDo(f"task {task_id} already says so")
+
+    agent = agent_for(server, AlreadyBoard(), clock)
+    comment = WireAction("a1", "hermes", ActionKind.COMMENT, "rule", "hi", "t_1a")
+    result = agent.execute(encode_action(comment))
+    assert result is not None and result.outcome is Outcome.NOTHING_TO_DO
+    assert result.detail == "task t_1a already says so"
 
 
 def test_an_action_is_carried_out_once_per_id(server: HubServer, clock: Clock) -> None:

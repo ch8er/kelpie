@@ -32,7 +32,7 @@ from kelpie.connectors.github.connector import GitHubConnector
 from kelpie.core.conditions import check_task_status
 from kelpie.core.executors import wait_conditions
 from kelpie.core.model import Condition, ConditionKind, Snapshot, Status, Task
-from kelpie.core.ports import SupportsWait, UnsupportedAction
+from kelpie.core.ports import NothingToDo, SupportsWait, UnsupportedAction
 from kelpie.rules.dispatch_gate import DispatchGate
 from kelpie.rules.wait_condition import WaitCondition
 from tests.adapters.kanban import Board
@@ -401,7 +401,8 @@ def test_wake_unblocks_only_tasks_kelpie_parked(board: Board, cli: tuple[str, Pa
     assert "https://" not in " ".join(argv) and argv[-2:] == ["--", "t1"]
     with pytest.raises(UnsupportedAction):
         a.requeue("t2", "r")
-    a.requeue("t1", "r")  # already woken: nothing to do, no error
+    with pytest.raises(NothingToDo, match="already woken"):
+        a.requeue("t1", "r")  # already woken: a ledger note, no error
 
 
 def test_a_failed_wake_of_a_task_still_parked_is_an_error(
@@ -557,7 +558,8 @@ def test_wake_of_an_awake_task_is_quiet_and_a_human_wake_keeps_old_conditions(
     a.wait("t1", CONDS, "r")
     board.update("t1", status="ready")  # a human unblocks it in the dashboard
     board.event("t1", "unblocked", datetime.now(UTC) + timedelta(seconds=2))
-    a.requeue("t1", "r")  # nothing to do: no CLI call, no error
+    with pytest.raises(NothingToDo):
+        a.requeue("t1", "r")  # nothing to do: no CLI call, no error
     assert [c["argv"][1] for c in calls(log)] == ["schedule"]  # type: ignore[index]
     snap = a.snapshot(datetime.now(UTC) + timedelta(seconds=3))
     (task,) = snap.tasks
@@ -583,7 +585,8 @@ def test_requeue_after_a_failed_unblock_that_landed_anyway_is_quiet(
         raise HermesCliError("lost the race")
 
     monkeypatch.setattr("kelpie.adapters.hermes.adapter.run_kanban", unblocked_but_failed)
-    a.requeue("t1", "r")  # woken in between: nothing left to do
+    with pytest.raises(NothingToDo, match="woken meanwhile"):
+        a.requeue("t1", "r")  # woken in between: nothing left to do
     assert status(board) == "ready"
 
 
@@ -678,7 +681,8 @@ def test_a_task_moved_out_of_scheduled_by_a_human_counts_as_woken(
     snap = a.snapshot(datetime.now(UTC) + timedelta(seconds=2))
     assert snap.tasks[0].status is Status.BACKLOG
     assert {c.id for c in snap.conditions} == {c.id for c in CONDS}  # kept, not re-derived
-    a.requeue("t1", "r")  # already awake: quiet
+    with pytest.raises(NothingToDo):
+        a.requeue("t1", "r")  # already awake: quiet
     assert [c["argv"][1] for c in calls(log)] == ["schedule"]  # type: ignore[index]
 
 
@@ -770,4 +774,59 @@ def test_an_unusable_key_makes_the_park_an_error(board: Board, cli: tuple[str, P
     a.wait_key.chmod(0o600)
     with pytest.raises(HermesError, match="wait key"):
         a.wait("t1", CONDS, "r")
+    assert calls(log) == []
+
+
+# --- idempotence: a second park, a requeue of a queued task ---------------------------------
+
+
+def test_a_second_park_on_the_same_conditions_is_nothing_to_do(
+    board: Board, cli: tuple[str, Path]
+) -> None:
+    exe, log = cli
+    board.task("t1", "ready", NOW - timedelta(hours=1), assignee="dev-1")
+    a = make(board, exe)
+    a.wait("t1", CONDS, "r")
+    a.snapshot(datetime.now(UTC))
+    with pytest.raises(NothingToDo, match="already parked by Kelpie on"):
+        a.wait("t1", CONDS[:1], "r")  # a subset: what it waits on already
+    with pytest.raises(NothingToDo):
+        a.wait("t1", CONDS, "r")
+    assert len(calls(log)) == 1 and status(board) == "scheduled"
+    other = Condition("dispatch_gate:t1:p2", ConditionKind.TASK_STATUS, "t1", {"task": "p2"})
+    with pytest.raises(UnsupportedAction):  # Hermes cannot schedule a scheduled task
+        a.wait("t1", (other,), "r")
+    assert len(calls(log)) == 1
+
+
+def test_a_park_of_a_task_someone_else_scheduled_is_not_nothing_to_do(
+    board: Board, cli: tuple[str, Path]
+) -> None:
+    exe, log = cli
+    board.task("t1", "scheduled", NOW - timedelta(hours=1), assignee="dev-1")
+    board.event("t1", "scheduled", NOW - timedelta(minutes=30), {"reason": "wait for Monday"})
+    with pytest.raises(UnsupportedAction):
+        make(board, exe).wait("t1", CONDS, "r")
+    assert calls(log) == []
+
+
+@pytest.mark.parametrize("hermes_status", ["ready", "todo"])
+def test_a_requeue_of_a_task_already_in_the_queue_is_nothing_to_do(
+    board: Board, cli: tuple[str, Path], hermes_status: str
+) -> None:
+    exe, log = cli
+    board.task("t1", hermes_status, NOW - timedelta(hours=1), assignee="dev-1")
+    with pytest.raises(NothingToDo, match=f"already in the queue \\({hermes_status}\\)"):
+        make(board, exe).requeue("t1", "r")
+    assert calls(log) == []
+
+
+@pytest.mark.parametrize("hermes_status", ["blocked", "running", "review", "triage", "done"])
+def test_a_requeue_kelpie_cannot_carry_out_still_reaches_a_person(
+    board: Board, cli: tuple[str, Path], hermes_status: str
+) -> None:
+    exe, log = cli
+    board.task("t1", hermes_status, NOW - timedelta(hours=1), assignee="dev-1")
+    with pytest.raises(UnsupportedAction, match="requeue it by hand"):
+        make(board, exe).requeue("t1", "r")
     assert calls(log) == []

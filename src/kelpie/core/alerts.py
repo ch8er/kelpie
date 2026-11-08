@@ -311,6 +311,19 @@ def failure_reason(exc: BaseException) -> str:
     return f"{type(exc).__name__} (details in the Kelpie log)"
 
 
+def nothing_reason(exc: BaseException) -> str | None:
+    """An adapter's note on an action already in effect (``NothingToDo``), as the ledger
+    keeps it: control characters replaced, capped; None when it says nothing."""
+    text = _CONTROL.sub(" ", str(exc)).strip()
+    if not text:
+        return None
+    return text if len(text) <= MAX_FAILURE else text[: MAX_FAILURE - 3] + "..."
+
+
+def nothing_line(note: str | None) -> str:
+    return f"Nothing to do: {note.rstrip('. ')}." if note else "Nothing to do: already in effect."
+
+
 def failed_line(action: Action, reason: str) -> str:
     return f"Failed: could not {intent(action)}: {reason.rstrip('. ')}, needs a human."
 

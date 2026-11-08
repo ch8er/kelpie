@@ -280,6 +280,12 @@ conditions in a signed marker, `[kelpie-wait:v2:...]`, which the adapter reads b
 `scheduled` event; a task parked this way shows as `waiting` on those conditions, and rule 2
 (`wait_condition`) wakes it with `hermes kanban unblock` once they hold. Only a ready task, or
 a running task pinned to the run the rule saw, is parked; only a task Kelpie parked is woken.
+What is already in effect is a no-op with a note in the ledger (`kelpie why`), not an alert: a
+second park of a task Kelpie parked on those conditions, a wake of a task already woken, a
+requeue of a task already in the queue (`ready` or `todo` with no run), an unblock of a task
+no longer blocked, a reassignment to the current assignee. A park on other conditions (Hermes
+cannot schedule a scheduled task) and a requeue of a task that is not queued and not Kelpie's
+park (running, blocked, in review) still reach a person, since Kelpie cannot carry them out.
 
 The marker is signed with a key Kelpie creates on first use (`wait_key`, by default next to
 the ledger database, mode 0600), which signs stops too. Keep it with the ledger (a container's

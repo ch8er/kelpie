@@ -18,6 +18,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
   agents had no live session and no open task, counted from each tick to the next; a gap
   over 10 minutes, or 3 `[engine] interval`s when longer, is not counted), with a Grafana
   panel of idle agent-hours per hour.
+- Idempotent actions: an adapter raises `NothingToDo` (`kelpie.core.ports`) for an action
+  already in effect, and the engine records "nothing to do" with the adapter's note in the
+  ledger instead of a failure or an alert; `kelpie agent` relays the note to the hub. On
+  Hermes: a second park of a task Kelpie parked on those conditions, a wake of a task
+  already woken, a requeue of a task already in the queue, an unblock of a task no longer
+  blocked and a reassignment to the current assignee. A requeue Hermes cannot carry out
+  (a task neither queued nor parked by Kelpie) still reaches a person.
 - The Hermes adapter carries out `unblock` (`hermes kanban unblock`, only the block its
   snapshot showed, never Kelpie's own stop) and `reassign` (`hermes kanban assign` of a
   `todo`, `ready` or `review` task no run claims, to an agent's profile, with a comment

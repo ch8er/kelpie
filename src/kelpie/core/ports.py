@@ -34,6 +34,14 @@ class UnsupportedAction(NotImplementedError):
     are limited by the ledger's cooldown); any other exception is a failure and is retried."""
 
 
+class NothingToDo(Exception):
+    """Raised by an adapter, before any side effect, for an action that is already in
+    effect: a park of a task it already parked on those conditions, a requeue of a task
+    already in the queue, an unblock of a task no longer blocked. The engine records it as
+    nothing to do with this text as the ledger note (``kelpie why``), and nobody is told:
+    it is not a failure, and it is not retried."""
+
+
 class Deferred(Exception):
     """Raised by an executor that cannot take an action now for a reason of its own, not
     the action's (a remote agent busy this tick, or not reporting). The engine neither

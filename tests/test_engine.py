@@ -14,6 +14,7 @@ from kelpie.core.model import ConditionKind, Session, Snapshot, Status, Task
 from kelpie.core.ports import (
     ActionConnector,
     Alerter,
+    NothingToDo,
     PlatformAdapter,
     SupportsReassign,
     SupportsStop,
@@ -125,6 +126,21 @@ def test_task_actions_dispatch_through_adapter(kind: ActionKind, op: str) -> Non
     adapter = FakeAdapter()
     run([act(kind)], adapter)
     assert adapter.calls == [(op, "T-1")]
+
+
+def test_an_action_already_in_effect_is_a_ledger_note_not_a_message() -> None:
+    class Already(FakeAdapter):
+        def unblock(self, task_id: str, reason: str) -> None:
+            raise NothingToDo(f"task {task_id} is no longer blocked (ready)")
+
+    alerter = FakeAlerter()
+    engine = Engine(
+        [Emit([act(ActionKind.UNBLOCK)])], adapters=[Already()], alerter=alerter, config=ACT
+    )
+    (result,) = engine.tick(lambda: Snapshot(now=NOW))
+    assert result.outcome is Outcome.NOTHING_TO_DO
+    assert result.detail == "task T-1 is no longer blocked (ready)"
+    assert alerter.sent == []
 
 
 def test_reassign_uses_capability_when_available() -> None:
