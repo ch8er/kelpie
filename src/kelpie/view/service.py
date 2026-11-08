@@ -77,11 +77,11 @@ class ViewSource:
         problems: list[str] = []
         if snapshot is None:
             problems.append("kelpie serve has not finished a tick yet")
-        if self._db is not None:
+        if self._db is not None:  # its own read-only connection, as kelpie status reads it
             stored = read_stored(self._db, statuses=snapshot is None)
             states, entries, statuses = stored.states, stored.entries, stored.statuses
             problems += stored.problems
-        else:
+        else:  # an in-memory ledger: read across threads, best effort (a stale entry at most)
             states = list(self._states.open_states()) if self._states is not None else []
             entries = list(self._store.since(now - MEMORY_LOOKBACK)) if self._store else []
             statuses = None
@@ -142,7 +142,7 @@ class ViewHandler(GuardedHandler):
         self.close_connection = True
         self._json(405, {"error": "read-only: only GET"}, {"Allow": "GET"})
 
-    do_POST = do_PUT = do_PATCH = do_DELETE = _refuse
+    do_POST = do_PUT = do_PATCH = do_DELETE = do_HEAD = do_OPTIONS = do_TRACE = _refuse
 
     def _json(self, code: int, body: Any, headers: dict[str, str] | None = None) -> None:
         data = (json.dumps(body, ensure_ascii=False) + "\n").encode()

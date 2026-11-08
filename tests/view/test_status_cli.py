@@ -109,3 +109,41 @@ def test_serve_view_serves_the_last_tick(farm: Path) -> None:  # noqa: F811
     finally:
         service.stop()
         app.close()
+
+
+def test_an_older_database_is_reported_not_migrated(
+    farm: Path,  # noqa: F811
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import sqlite3
+
+    _tick(1)
+    db = farm / "kelpie.db"
+    with sqlite3.connect(db) as conn:
+        conn.execute("PRAGMA user_version = 1")
+    assert main(["status", "--json"]) == 0
+    data = json.loads(capsys.readouterr().out)
+    assert any("older than" in p for p in data["problems"]) and data["alerts"] == []
+    with sqlite3.connect(db) as conn:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 1
+
+
+def test_the_view_is_cached_and_reads_an_in_memory_ledger() -> None:
+    from datetime import timedelta
+
+    from kelpie.core.actions import Severity
+    from kelpie.core.ledger import MemoryLedgerStore
+    from kelpie.core.states import MemoryStateStore, OpenState
+    from kelpie.view.service import ViewSource
+
+    states = MemoryStateStore()
+    states.save(OpenState("s", "r", NOW, NOW, NOW, 0, Severity.INFO, "x"))
+    calls = []
+
+    def snap() -> None:
+        calls.append(1)
+
+    source = ViewSource(snap, lambda: NOW + timedelta(minutes=1), None, states, MemoryLedgerStore())
+    first = source.view()
+    assert source.view() is first and len(calls) == 1
+    assert [a.id for a in first.alerts] == ["s"]

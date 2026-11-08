@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import http.client
+import http.server
 import json
 import threading
 from collections.abc import Iterator
@@ -14,9 +15,11 @@ import pytest
 from kelpie.app import ConfigError, Settings, check_exposure
 from kelpie.core.farmview import from_dict
 from kelpie.core.model import Snapshot, Status, Task
-from kelpie.view.cli import fetch_view, run, server_url
+from kelpie.doctor import check_view
+from kelpie.view.cli import fetch_view, plain_http_warning, run, server_url
 from kelpie.view.config import ViewSettings, load_view
 from kelpie.view.service import PATH, ViewServer, ViewSource
+from kelpie.view.text import render
 
 NOW = datetime(2026, 3, 2, 15, tzinfo=UTC)
 TOKEN = "0123456789abcdef0123456789abcdef"
@@ -145,3 +148,119 @@ def test_server_url() -> None:
     assert server_url(settings, "") == f"http://127.0.0.1:9999{PATH}"
     assert server_url(settings, "http://host-a:1/") == f"http://host-a:1{PATH}"
     assert server_url(Settings(view=ViewSettings(host="::1")), "") == f"http://[::1]:9465{PATH}"
+
+
+@pytest.mark.parametrize("method", ["HEAD", "OPTIONS", "TRACE"])
+def test_other_methods_are_refused_too(listener: ViewServer, method: str) -> None:
+    conn = http.client.HTTPConnection("127.0.0.1", listener.server_address[1], timeout=5)
+    try:
+        conn.request(method, PATH)
+        assert conn.getresponse().status == 405
+    finally:
+        conn.close()
+
+
+def test_the_token_never_follows_a_redirect() -> None:
+    seen: list[str | None] = []
+
+    class Target(http.server.BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            seen.append(self.headers.get("Authorization"))
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"{}")
+
+        def log_message(self, *args: object) -> None:
+            pass
+
+    target = http.server.HTTPServer(("127.0.0.1", 0), Target)
+
+    class Redirect(http.server.BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            self.send_response(302)
+            self.send_header("Location", f"http://127.0.0.1:{target.server_address[1]}/x")
+            self.end_headers()
+
+        def log_message(self, *args: object) -> None:
+            pass
+
+    redirect = http.server.HTTPServer(("127.0.0.1", 0), Redirect)
+    servers = [target, redirect]
+    for s in servers:
+        threading.Thread(target=s.serve_forever, daemon=True).start()
+    try:
+        with pytest.raises(OSError, match="redirected"):
+            fetch_view(f"http://127.0.0.1:{redirect.server_address[1]}{PATH}", TOKEN)
+        assert seen == []
+    finally:
+        for s in servers:
+            s.shutdown()
+            s.server_close()
+
+
+def test_plain_http_off_loopback_warns() -> None:
+    assert plain_http_warning("http://host-a:9465/v1/farm", TOKEN)
+    assert plain_http_warning("https://host-a:9465/v1/farm", TOKEN) is None
+    assert plain_http_warning("http://127.0.0.1:9465/v1/farm", TOKEN) is None
+    assert plain_http_warning("http://host-a:9465/v1/farm", None) is None
+
+
+def test_escapes_from_a_server_never_reach_the_terminal() -> None:
+    evil = "\x1b[31mX\x07"
+    data = {
+        "schema_version": 1,
+        "now": NOW.isoformat(),
+        "source": evil,
+        "boards": [evil],
+        "statuses": [{"status": evil, "count": 1, "board": evil}],
+        "waiting_total": 1,
+        "waiting": [
+            {
+                "task_id": evil,
+                "condition_id": evil,
+                "kind": evil,
+                "satisfied": None,
+                "target": evil,
+                "task_status": evil,
+                "board": evil,
+            }
+        ],
+        "alerts_total": 1,
+        "alerts": [
+            {
+                "id": evil,
+                "rule": evil,
+                "severity": evil,
+                "since": NOW.isoformat(),
+                "opened_at": NOW.isoformat(),
+                "summary": evil,
+                "mode": evil,
+                "task_id": evil,
+            }
+        ],
+        "rules": [
+            {
+                "rule": evil,
+                "actions": [
+                    {
+                        "at": NOW.isoformat(),
+                        "kind": evil,
+                        "mode": evil,
+                        "outcome": evil,
+                        "reason": evil,
+                        "task_id": evil,
+                    }
+                ],
+            }
+        ],
+        "problems": [evil],
+    }
+    out = render(from_dict(data))
+    assert "\x1b" not in out and "\x07" not in out
+
+
+def test_doctor_warns_about_an_open_view() -> None:
+    off = Settings(view=ViewSettings(enabled=True, host="0.0.0.0"))
+    assert check_view(off, {}).status == "WARN"
+    assert check_view(off, {"KELPIE_VIEW_TOKEN": TOKEN}).status == "PASS"
+    assert check_view(Settings(view=ViewSettings(enabled=True)), {}).status == "PASS"

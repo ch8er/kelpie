@@ -36,7 +36,7 @@ def _ago(now: datetime, at: datetime | None) -> str:
 
 def _counts(counts: list[StatusCount]) -> str:
     total = sum(c.count for c in counts)
-    parts = ", ".join(f"{c.status} {c.count}" for c in counts)
+    parts = ", ".join(f"{_t(c.status, 40)} {c.count}" for c in counts)
     return f"{total}" + (f" ({parts})" if parts else "")
 
 
@@ -46,7 +46,7 @@ def _t(text: str | None, limit: int = 80) -> str:
 
 def render(view: FarmView) -> str:
     now = view.now
-    source = _SOURCES.get(view.source, view.source)
+    source = _SOURCES.get(view.source) or _t(view.source, 40)
     if view.snapshot_at is not None:
         source += f", {_ago(now, view.snapshot_at)}"
     lines = [f"farm: {source}"]
@@ -62,9 +62,9 @@ def render(view: FarmView) -> str:
         state = "unknown" if w.satisfied is None else "unmet"
         where = f"{_t(w.board, 40)}/" if w.board else ""
         target = f" {_t(w.target)}" if w.target else ""
-        status = f" [{w.task_status}]" if w.task_status else ""
+        status = f" [{_t(w.task_status, 40)}]" if w.task_status else ""
         lines.append(
-            f"  {where}{_t(w.task_id, 60)}{status} {w.kind}{target}: {state}, "
+            f"  {where}{_t(w.task_id, 60)}{status} {_t(w.kind, 40)}{target}: {state}, "
             f"checked {_ago(now, w.checked_at)}"
         )
     _more(lines, view.waiting_total, len(view.waiting))
@@ -72,18 +72,18 @@ def render(view: FarmView) -> str:
     for a in view.alerts:
         task = f" {_t(a.task_id, 60)}" if a.task_id else ""
         lines.append(
-            f"  {a.severity:<8} {a.rule}{task} ({a.mode}, open {_age(now - a.opened_at)}): "
-            f"{_t(a.summary, SUMMARY_CHARS)}"
+            f"  {_t(a.severity, 20):<8} {_t(a.rule, 60)}{task} ({_t(a.mode, 20)}, "
+            f"open {_age(now - a.opened_at)}): {_t(a.summary, SUMMARY_CHARS)}"
         )
     _more(lines, view.alerts_total, len(view.alerts))
     lines += ["", "last actions per rule:"]
     for r in view.rules:
-        lines.append(f"  {r.rule}:")
+        lines.append(f"  {_t(r.rule, 60)}:")
         for e in r.actions:
             task = f" {_t(e.task_id, 60)}" if e.task_id else ""
             lines.append(
-                f"    {_ago(now, e.at):>9} {e.kind} {e.mode}/{e.outcome}{task}: "
-                f"{_t(e.reason, REASON_CHARS)}"
+                f"    {_ago(now, e.at):>9} {_t(e.kind, 30)} {_t(e.mode, 20)}/"
+                f"{_t(e.outcome, 20)}{task}: {_t(e.reason, REASON_CHARS)}"
             )
     if not view.rules:
         lines.append("  (none recorded)")

@@ -2349,7 +2349,7 @@ There is no write endpoint: every other method gets 405.
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `enabled` | `false` | Start the listener with `kelpie serve`. |
-| `host` | `127.0.0.1` | Bind address. Off loopback a token is required: `kelpie serve` refuses to start without a strong one (16+ characters, 6+ different). |
+| `host` | `127.0.0.1` | Bind address. Off loopback a token is required: `kelpie serve` refuses to start without a strong one (16+ characters, 6+ different), and `kelpie doctor` warns. |
 | `port` | `9465` | Port. |
 | `token_env` | `KELPIE_VIEW_TOKEN` | Variable holding the bearer token. When set, every request needs `Authorization: Bearer <token>`, on loopback too. |
 
