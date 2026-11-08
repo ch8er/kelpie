@@ -44,12 +44,13 @@ import re
 import shutil
 import signal
 import subprocess
-import tempfile
 import time
 import unicodedata
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
+
+from kelpie.adapters._spool import write_in_dir
 
 DEFAULT_STOP_DIR = Path("~/.openclaw/kelpie/stop")
 DEFAULT_STOP_TTL = 24 * 3600  # seconds; the plugin's default ``stopTtl``
@@ -93,23 +94,12 @@ def write_marker(
     operator's message under that key lifts the stop."""
     if not SESSION_ID.fullmatch(session_id):
         raise ValueError(f"not an OpenClaw session id: {session_id!r}")
-    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
-    if directory.is_symlink() or not directory.is_dir():
-        raise OSError(f"{directory} is not a plain directory")
     data: dict[str, object] = {"at": at, "reason": clean_reason(reason)}
     if key:
         data["key"] = key[:256]
     body = json.dumps(data).encode()
-    fd, tmp = tempfile.mkstemp(dir=directory, prefix=".stop-", suffix=".tmp")
-    try:
-        with os.fdopen(fd, "wb") as f:
-            f.write(body)
-        target = directory / f"{session_id}.json"
-        os.replace(tmp, target)  # replaces a symlink itself, never its target
-    except BaseException:
-        Path(tmp).unlink(missing_ok=True)
-        raise
-    return target
+    # Relative to a handle on the directory; replaces a symlink itself, never its target.
+    return write_in_dir(directory, f"{session_id}.json", body, prefix=".stop-")
 
 
 def read_marker(directory: Path, session_id: str) -> datetime | None:

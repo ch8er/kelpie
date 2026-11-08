@@ -1193,7 +1193,12 @@ def check_prometheus(url: str | None, environ: Mapping[str, str]) -> Check:
     if parts.scheme not in ("http", "https"):
         return _fail(name, f"{base}: only http and https URLs are supported", fix)
     # Never via a proxy, never following a redirect (the check is about this URL).
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect)
+    opener = urllib.request.build_opener(
+        urllib.request.ProxyHandler({}),
+        _NoRedirect,
+        net.DeadlineHTTPHandler,
+        net.DeadlineHTTPSHandler,
+    )
     answered = False
     try:
         with opener.open(f"{base}/-/ready", timeout=3) as response:

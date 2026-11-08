@@ -13,8 +13,11 @@ The rules it enforces:
 - One deadline for the whole request: a watchdog shuts the connection down at the deadline,
   whether it is in the proxy CONNECT exchange, the TLS handshake, the status line, the
   headers or the body, however slowly the other side drips bytes. Opening the TCP
-  connection is bounded by the time left, per address tried; DNS resolution is not bounded
-  (the stdlib cannot do it cheaply).
+  connection (:func:`connect`) shares that deadline across every resolved address: each
+  address gets only the time still left, so a host with several blackholed addresses
+  cannot stretch it. DNS resolution is not bounded (the stdlib cannot do it cheaply).
+  :func:`create_connection` and the ``Deadline*`` connection and handler classes bring the
+  same connect deadline to clients built on ``http.client`` or ``urllib`` directly.
 - The body is read in small chunks up to a size cap. A 2xx answer over the cap is an error;
   the body of any other status is cut at the cap (the status is what matters there).
 - Header names and values are checked before sending (values must be printable ASCII):
@@ -280,17 +283,101 @@ def request(
 
 
 def _tracked(guard: _Guard, deadline: float) -> Callable[..., socket.socket]:
-    """``socket.create_connection`` with the time left, registered with the watchdog."""
+    """:func:`connect` before the request's deadline, registered with the watchdog."""
 
     def create(address: tuple[str, int], *args: Any, **kwargs: Any) -> socket.socket:
-        left = deadline - time.monotonic()
-        if left <= 0:
-            raise TimeoutError
-        sock = socket.create_connection(address, left)
+        sock = connect(address, deadline)
         guard.track(sock)
         return sock
 
     return create
+
+
+def connect(
+    address: tuple[str, int],
+    deadline: float,
+    source_address: tuple[str, int] | None = None,
+    clock: Callable[[], float] = time.monotonic,
+) -> socket.socket:
+    """A TCP connection to ``address`` (host, port) opened before ``deadline`` (on
+    ``clock``). Like ``socket.create_connection`` it tries each address the host resolves
+    to in turn, but every attempt gets only the time still left, not a whole timeout of its
+    own: a host with several blackholed A/AAAA records cannot take a multiple of the
+    deadline. DNS resolution itself is not bounded. Raises TimeoutError once the deadline
+    has passed, else the last attempt's error. The socket keeps the timeout of its attempt;
+    callers set the one they want for what follows (:func:`create_connection` restores the
+    whole timeout, ``request`` and the GitHub client bound each read by their deadline)."""
+    host, port = address
+    if deadline - clock() <= 0:
+        raise TimeoutError("connect deadline passed")
+    error: OSError | None = None
+    for family, kind, proto, _, sockaddr in socket.getaddrinfo(host, port, 0, socket.SOCK_STREAM):
+        left = deadline - clock()
+        if left <= 0:
+            raise TimeoutError("connect deadline passed")
+        sock = socket.socket(family, kind, proto)
+        try:
+            sock.settimeout(left)
+            if source_address:
+                sock.bind(source_address)
+            sock.connect(sockaddr)
+        except OSError as exc:
+            sock.close()
+            error = exc
+            continue
+        return sock
+    if error is not None:
+        raise error
+    raise OSError(f"no address for {host!r}")
+
+
+def create_connection(
+    address: tuple[str, int], timeout: object = None, source_address: Any = None, **_: Any
+) -> socket.socket:
+    """A drop-in for ``socket.create_connection`` (as ``http.client`` calls it) where
+    ``timeout`` bounds the whole connect, across all addresses (:func:`connect`). Without a
+    numeric timeout it is ``socket.create_connection`` itself."""
+    if isinstance(timeout, bool) or not isinstance(timeout, int | float):
+        if timeout is None:
+            return socket.create_connection(address, None, source_address)
+        return socket.create_connection(address, source_address=source_address)
+    sock = connect(address, time.monotonic() + timeout, source_address)
+    sock.settimeout(timeout)  # as the stdlib: each later operation gets the whole timeout
+    return sock
+
+
+class DeadlineHTTPConnection(http.client.HTTPConnection):
+    """``http.client.HTTPConnection`` whose ``timeout`` bounds the connect as one deadline
+    across all resolved addresses (:func:`create_connection`)."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._create_connection = create_connection
+
+
+class DeadlineHTTPSConnection(http.client.HTTPSConnection):
+    """The https counterpart of :class:`DeadlineHTTPConnection` (through a proxy, the
+    deadline bounds the connect to the proxy)."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._create_connection = create_connection
+
+
+class DeadlineHTTPHandler(urllib.request.HTTPHandler):
+    """A ``urllib`` handler opening :class:`DeadlineHTTPConnection`; pass it (and
+    :class:`DeadlineHTTPSHandler`) to ``build_opener`` in place of the defaults."""
+
+    def http_open(self, req: urllib.request.Request) -> http.client.HTTPResponse:
+        return self.do_open(DeadlineHTTPConnection, req)
+
+
+class DeadlineHTTPSHandler(urllib.request.HTTPSHandler):
+    """The https counterpart of :class:`DeadlineHTTPHandler`; mirrors the stdlib
+    ``HTTPSHandler.https_open`` (Python 3.12 and 3.13), context included."""
+
+    def https_open(self, req: urllib.request.Request) -> http.client.HTTPResponse:
+        return self.do_open(DeadlineHTTPSConnection, req, context=self._context)  # type: ignore[attr-defined]
 
 
 def _read_limited(

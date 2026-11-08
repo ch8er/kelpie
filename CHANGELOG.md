@@ -30,6 +30,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
   `kelpie report` and `kelpie status` of this version ask to run `kelpie serve` once on a
   database not yet migrated (#157).
 
+### Security
+
+- Stop markers of the Claude Code and OpenClaw adapters are written relative to a handle
+  on the stop folder, opened without following a symlink: an agent can no longer swap the
+  folder for a symlink between Kelpie's check and its write (audit L4, #336).
+- Outbound clients (`kelpie.net`, the GitHub client, trace forwarding, the doctor's
+  Prometheus check) share one connect deadline across every resolved address, instead of
+  giving each address the whole remaining time (audit L13, #336).
+
 ## [0.1.0a3] - 2026-11-06
 
 Third alpha: 0.1.0a2 plus the macOS fix for the Hermes plugin (#353), verified on a live

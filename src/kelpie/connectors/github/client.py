@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import base64
 import contextlib
+import functools
 import http.client
 import ipaddress
 import json
@@ -57,7 +58,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
 
-from kelpie import __version__
+from kelpie import __version__, net
 
 DEFAULT_API_URL = "https://api.github.com"
 DEFAULT_TIMEOUT = timedelta(seconds=10)
@@ -426,6 +427,10 @@ class GitHubClient:
         if remaining <= 0:
             raise _Timeout
         conn = self._connection(remaining)
+        # One connect deadline across every address the host resolves to (audit L13).
+        conn._create_connection = functools.partial(  # type: ignore[attr-defined]
+            _connect, deadline=deadline, clock=self.monotonic
+        )
         expired = threading.Event()
         held: list[socket.socket] = []
         watchdog = threading.Timer(remaining, _expire, (conn, held, expired))
@@ -590,6 +595,17 @@ def _expire(
         if sock is not None:
             with contextlib.suppress(OSError):
                 sock.shutdown(socket.SHUT_RDWR)
+
+
+def _connect(
+    address: tuple[str, int],
+    *args: object,
+    deadline: float,
+    clock: Callable[[], float],
+    **kwargs: object,
+) -> socket.socket:
+    """``http.client``'s connect hook: :func:`kelpie.net.connect` before ``deadline``."""
+    return net.connect(address, deadline, clock=clock)
 
 
 def _https_proxy(host: str) -> urllib.parse.SplitResult | None:

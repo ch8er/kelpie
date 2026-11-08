@@ -117,9 +117,26 @@ so it is kept for Kelpie's own user:
   target's mode counts); `chmod 600` them, and `chmod 700` their folder, if other users of
   the machine should not read them. The one exception is the button store, which holds a
   key: it is tightened to 0600 with a warning in the log.
+- Stop markers (the Claude Code and OpenClaw adapters) go into a folder the agents can
+  write to. Kelpie opens that folder once, without following a symlink, and creates the
+  temporary file (`O_EXCL`, `O_NOFOLLOW`, 0600) and renames it into place relative to that
+  handle (audit L4): an agent that swaps the folder for a symlink between the check and the
+  write cannot make Kelpie write elsewhere, and a symlink at the marker's name is replaced,
+  never followed. The folder's parents are trusted: keep them out of the agents' reach if
+  Kelpie runs with more privilege than the agents.
 - Put `kelpie.db` in a folder only Kelpie's user can enter. The container image creates
   `/data` 0700, owned by the `kelpie` user; a named volume takes that mode when it is
   first created, an existing volume or bind mount keeps its own.
+
+## Outbound connections
+
+Every outbound client (the `kelpie.net` requests of the alert channels, Prometheus, LLM
+quota and cost probes, Linear and the hub; the GitHub client; trace forwarding; the
+doctor's Prometheus check) opens its TCP connection against one deadline shared by every
+address the host resolves to (audit L13): each address gets only the time still left, so a
+host with several blackholed A/AAAA records cannot stretch the connect past the timeout.
+DNS resolution itself is not bounded. The `[agent] server` plain-http check resolves the
+hub's name once, at startup.
 
 ## What Kelpie can write to GitHub
 
@@ -422,9 +439,6 @@ or `suggest` ([act-checklist.md](act-checklist.md)), or give them separate farms
 - **M7, what is left:** one acting instance per board is now enforced on one machine
   ([above](#one-acting-instance-per-board)), not across machines for a GitHub repository
   or Linear team, nor across users for those. Run one acting Kelpie per tracker.
-- **Lows L4, L13, L14** ([#336](https://github.com/ch8er/kelpie/issues/336)): stop-marker
-  writes in the Claude Code and OpenClaw adapters are not relative to a directory handle
-  (matters only if Kelpie runs with more privilege than the agents); outbound clients give
-  each resolved address the whole remaining connect time, so a host with several
-  blackholed addresses can exceed the deadline several times; what is left of L14: the
-  Dockerfile pins its base images by tag, not digest.
+- **What is left of L14** ([#336](https://github.com/ch8er/kelpie/issues/336)): the
+  Dockerfile pins its base images by tag, not digest. (L4 and L13 are fixed: [Files Kelpie
+  writes](#files-kelpie-writes), [Outbound connections](#outbound-connections).)

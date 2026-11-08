@@ -75,7 +75,6 @@ import logging
 import os
 import re
 import stat
-import tempfile
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
@@ -867,20 +866,9 @@ def write_marker(directory: Path, session_id: str, reason: str, at: float) -> Pa
     """Write ``<directory>/<session_id>.json`` atomically (mode 0600), replacing an older one."""
     if not hook._SESSION_ID.fullmatch(session_id):
         raise ValueError(f"not a Claude Code session id: {session_id!r}")
-    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
-    if directory.is_symlink() or not directory.is_dir():
-        raise OSError(f"{directory} is not a plain directory")
     body = json.dumps({"at": at, "reason": hook.clean_reason(reason)}).encode()
-    fd, tmp = tempfile.mkstemp(dir=directory, prefix=".stop-", suffix=".tmp")
-    try:
-        with os.fdopen(fd, "wb") as f:
-            f.write(body)
-        target = directory / f"{session_id}.json"
-        os.replace(tmp, target)  # replaces a symlink itself, never its target
-    except BaseException:
-        Path(tmp).unlink(missing_ok=True)
-        raise
-    return target
+    # Relative to a handle on the directory; replaces a symlink itself, never its target.
+    return _spool.write_in_dir(directory, f"{session_id}.json", body, prefix=".stop-")
 
 
 def read_marker(directory: Path, session_id: str) -> datetime | None:
