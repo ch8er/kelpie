@@ -27,9 +27,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
   observed). `--json` prints the farm view alone for scripts, `--server [URL]` reads it from
   a running `kelpie serve`. The view model is `kelpie.core.farmview`.
 - `[view]` (off by default): `kelpie serve` serves the farm view read-only as JSON on a
-  listener of its own (`GET /v1/farm`, 127.0.0.1:9465). No write endpoint; with
+  listener of its own (`GET /v1/farm`, 127.0.0.1:9466). No write endpoint; with
   `[view] token_env` set every request needs the bearer token, and off loopback `kelpie
   serve` refuses to start without a strong one; `kelpie doctor` warns about it first.
+  Its port is 9466, apart from the hub's 9465, and `kelpie serve` refuses to start when two
+  of its listeners (main port, `[hub]`, `[view]`) would share a port.
 - Block storms (rule 4, #229): once `storm_mode = "rule"`, rule 13's "needs you" digest
   folds the person's items of a storm's tasks into one item for the storm, so the person
   reads one cause instead of each block again; a task joining the storm no longer

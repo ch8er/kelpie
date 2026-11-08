@@ -6,6 +6,7 @@ adapters and connectors) and it may read the clock. Rules never do.
 
 from __future__ import annotations
 
+import ipaddress
 import logging
 import os
 import re
@@ -2653,6 +2654,44 @@ def check_exposure(settings: Settings, host: str) -> None:
         settings.traces.check_exposure(host)
     except ValueError as exc:
         raise ConfigError(str(exc)) from exc
+
+
+def _host_key(host: str) -> str:
+    """A host as listeners compare it: IP literals canonical (brackets off), ``localhost``
+    as ``127.0.0.1``, ``""`` for every address (empty, ``0.0.0.0``, ``::``)."""
+    host = host.strip().strip("[]").lower()
+    if host == "localhost":
+        return "127.0.0.1"
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return host  # a name: compared as written; a clash it hides still fails to bind
+    return "" if ip.is_unspecified else str(ip)
+
+
+def _same_address(a: tuple[str, int], b: tuple[str, int]) -> bool:
+    """Whether two listeners would bind one port: same port, and the same host or either on
+    every address (conservative: ``0.0.0.0`` also counts as overlapping IPv6 hosts)."""
+    ha, hb = _host_key(a[0]), _host_key(b[0])
+    return a[1] == b[1] and (ha == hb or ha == "" or hb == "")
+
+
+def check_listeners(settings: Settings, host: str, port: int) -> None:
+    """Refuse to start when two of ``kelpie serve``'s listeners (the main port, ``[hub]``,
+    ``[view]``) would bind the same address: the second would fail to bind after the
+    first had started."""
+    listeners = [("the main port (--port, $KELPIE_PORT)", (host, port))]
+    if settings.hub is not None:
+        listeners.append(("[hub] listen", (settings.hub.host, settings.hub.port)))
+    if settings.view.enabled:
+        listeners.append(("[view]", (settings.view.host, settings.view.port)))
+    for i, (name, address) in enumerate(listeners):
+        for other, other_address in listeners[i + 1 :]:
+            if _same_address(address, other_address):
+                raise ConfigError(
+                    f"{name} and {other} both listen on port {address[1]}: give one of them "
+                    "another port"
+                )
 
 
 def instruction_watch(
