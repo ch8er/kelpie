@@ -22,6 +22,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
   report's "Farm throughput" stages use them where the board keeps no history: queue time
   before a task's first pickup, and status changes between sessions. The section says
   which source it used. Recorded rows follow `[storage] retention` and `max_rows` (#157).
+- `scripts/bootstrap.sh` prepares a fresh checkout or cloud session for the local checks
+  (uv, Python 3.12, `uv sync --frozen`) in one idempotent step; `--check` also runs them.
 
 ### Changed
 

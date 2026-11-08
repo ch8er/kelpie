@@ -98,11 +98,12 @@ Cloud sessions must start working fast. A setup script installs Python 3.12, uv 
 project dependencies so that ruff, import-linter and pytest can run right away.
 
 **Acceptance criteria**
-- [ ] A fresh cloud session is ready to run the local checks from `CLAUDE.md` in under about 5 minutes
-- [ ] Script is idempotent and safe to re-run
-- [ ] Documented in `CONTRIBUTING.md`
+- [x] A fresh cloud session is ready to run the local checks from `CLAUDE.md` in under about 5 minutes
+- [x] Script is idempotent and safe to re-run
+- [x] Documented in `CONTRIBUTING.md`
 
-Not started: there is no setup script; `CONTRIBUTING.md` documents `uv sync` and the checks by hand.
+Delivered: `scripts/bootstrap.sh` (`--check` also runs the checks), documented in
+`CONTRIBUTING.md` ("Development setup"); about 10 s from a fresh clone with an empty uv cache.
 
 ### core: engine loop with configurable interval and dry-run
 labels: P0, week-1, area:core
