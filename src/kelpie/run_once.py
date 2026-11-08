@@ -33,7 +33,7 @@ from kelpie.app import LoadedRules, Settings, load_rules, utc_now
 from kelpie.core.actions import Action
 from kelpie.core.config import Mode
 from kelpie.core.model import Snapshot
-from kelpie.core.storage import SchemaOutdated, open_readonly
+from kelpie.core.storage import SchemaOutdated, open_readonly, read_open_states
 from kelpie.why import read_snapshot
 
 SCHEMA_VERSION = 1
@@ -49,8 +49,7 @@ def open_state_ids(db: Path | None) -> tuple[tuple[str, ...], list[str]]:
     except (SchemaOutdated, RuntimeError, sqlite3.Error) as exc:
         return (), [f"open alert states left out: {exc}"]
     try:
-        rows = conn.execute("SELECT id FROM states WHERE closed_at IS NULL ORDER BY id")
-        return tuple(r[0] for r in rows.fetchall()), []
+        return tuple(s.id for s in read_open_states(conn)), []
     except sqlite3.Error as exc:
         return (), [f"open alert states left out: {exc}"]
     finally:
