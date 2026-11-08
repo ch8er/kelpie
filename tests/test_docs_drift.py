@@ -29,7 +29,7 @@ def doc_files() -> list[Path]:
 def blocks(text: str, langs: str) -> list[tuple[int, str]]:
     """(first line number, body) of each fenced block in one of ``langs``."""
     found = []
-    for m in re.finditer(rf"^```(?:{langs})\n(.*?)^```", text, re.S | re.M):
+    for m in re.finditer(rf"^[ \t]*```(?:{langs})\n(.*?)^[ \t]*```", text, re.S | re.M):
         found.append((text[: m.start()].count("\n") + 2, m.group(1)))
     return found
 
@@ -90,7 +90,7 @@ def _options(p: argparse.ArgumentParser) -> set[str]:
 
 # `kelpie` in command position: at the start, after a shell separator, `uv run`, `sudo -u
 # X` or `docker compose exec <service>`; not `chown kelpie` or a path.
-_START = r"(?:^|&&|;|\||\$\(|\()\s*(?:sudo -u \S+ )?(?:uv run |docker compose exec \S+ )?"
+_START = r"(?:^(?:\$\s)?|&&|;|\||\$\(|\()\s*(?:sudo -u \S+ )?(?:uv run |docker compose exec \S+ )?"
 _COMMAND = re.compile(_START + r"kelpie(\s.*)$")
 _INLINE = re.compile(r"`(?:uv run )?kelpie(\s[^`\n]+)`")
 
@@ -111,41 +111,55 @@ def commands() -> list[tuple[str, str]]:
     return found
 
 
+_ANY = "<placeholder>"
+
+# Lines that show a command failing on purpose.
+COUNTER_EXAMPLES = {" status --config x.toml"}
+
+
 def check(args: str, top: argparse.ArgumentParser) -> str | None:
     """Why ``kelpie <args>`` would not parse, or None. Placeholders (``<x>``, ``[x]``,
-    ``...``) and everything after a shell separator or comment are ignored."""
+    ``...``) and everything after a shell separator or comment are ignored. Options are
+    checked against the parser they belong to: global ones only before the subcommand."""
     args = re.split(r"\s(?:#|\||&&|;|>|2>|&$)", " " + args)[0]
-    args = re.sub(r"\[[^\]]*\]|<[^>]*>|\.\.\.", " ", args)
+    args = re.sub(r"\[[^\]]*\]|\.\.\.", " ", args)
+    args = re.sub(r"<[^>]*>", f" {_ANY} ", args)  # a value or a command, unknown
     try:
         words = shlex.split(args)
     except ValueError:
         words = args.split()
-    p, path, known = top, ["kelpie"], _options(top)
-    for word in words:
+    p, path = top, ["kelpie"]
+    i = 0
+    while i < len(words):
+        word = words[i]
+        i += 1
+        if word == _ANY:
+            continue
         if word.startswith("-"):
             name = word.split("=", 1)[0]
-            if name not in known:
+            if name not in _options(p):
                 return f"unknown option {name} for {' '.join(path)}"
+            if p is top and name in cli._GLOBAL_VALUES and "=" not in word:
+                i += 1  # its value
             continue
         subs = _subcommands(p)
         if not subs:
             continue  # a positional argument
         if word not in subs:
-            if path == ["kelpie"] and words[words.index(word) - 1 : words.index(word)] == [
-                "--config"
-            ]:
-                continue  # --config's value
             return f"unknown subcommand {word!r} of {' '.join(path)}"
         p = subs[word]
         path.append(word)
-        known = known | _options(p)
     return None
 
 
 def test_commands_in_docs_parse(parser: argparse.ArgumentParser) -> None:
     found = commands()
     assert len(found) > 100  # the extraction still finds the docs' commands
-    bad = [f"{where}: kelpie{args}: {why}" for where, args in found if (why := check(args, parser))]
+    bad = [
+        f"{where}: kelpie{args}: {why}"
+        for where, args in found
+        if args not in COUNTER_EXAMPLES and (why := check(args, parser))
+    ]
     assert not bad, "\n".join(bad)
 
 
@@ -154,6 +168,8 @@ def test_the_checker_catches_drift(parser: argparse.ArgumentParser) -> None:
     assert check(" --config /etc/kelpie.toml report --send", parser) is None
     assert check(" traces rotate-token --grace 0s", parser) is None
     assert check(" [--config PATH] <command>", parser) is None
+    assert check(" --log-level DEBUG serve", parser) is None
+    assert check(" status --config x.toml", parser) is not None  # global after the command
     assert check(" doctr", parser) is not None
     assert check(" report --sned", parser) is not None
     assert check(" traces rotate", parser) is not None

@@ -655,7 +655,8 @@ def check_spans(
     if newest is None:
         return _skip(
             name,
-            f"no span has arrived in {path}; OTLP is optional (each quickstart's traces step)",
+            f"no span has arrived in {path}; OTLP is optional "
+            "(Hermes quickstart step 4, Claude Code step 5)",
         )
     age = now - datetime.fromisoformat(newest)
     if age > FRESH:  # spans used to arrive and stopped

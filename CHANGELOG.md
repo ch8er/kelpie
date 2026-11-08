@@ -32,8 +32,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ### Fixed
 
-- Docs: the Hermes quickstart names the four rules that can act on Hermes (it said only
-  `stop` existed), the OpenClaw quickstart's doctor legend includes WARN, the multi-host
+- Docs: the Hermes quickstart names the rules that can act on Hermes (it said only `stop`
+  existed), the OpenClaw quickstart's doctor legend includes WARN, the multi-host
   check says when `kelpie_agent_up` turns 1, and the Hermes README's `human_decisions`
   example loads on its own. `kelpie doctor`'s OTLP hint no longer points at the Hermes
   quickstart's step number. A test now loads every TOML example in the docs and parses
