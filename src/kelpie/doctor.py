@@ -1484,6 +1484,21 @@ def _boards_of(adapter: HermesAdapter | HermesBoards) -> list[HermesAdapter]:
     return list(adapter.boards) if isinstance(adapter, HermesBoards) else [adapter]
 
 
+def check_view(settings: Settings, environ: Mapping[str, str] = os.environ) -> Check:
+    """``[view]``: off loopback the read-only farm view needs a strong token (serve
+    refuses to start without one; this says so before it does)."""
+    view = settings.view
+    where = f"{view.host}:{view.port}"
+    if (problem := view.exposure_problem(environ)) is not None:
+        return _warn(
+            "farm view",
+            problem,
+            f'export ${view.token_env} with a random token, or set [view] host = "127.0.0.1"',
+        )
+    token = "token required" if view.token(environ) else "no token, loopback only"
+    return _pass("farm view", f"read-only on {where} ({token})")
+
+
 def run_checks(
     config: Path | None,
     prometheus: str | None = None,
@@ -1565,6 +1580,8 @@ def run_checks(
     ]
     checks.append(check_spans(settings, at, total, " or ".join(exporters) or "your exporter"))
     checks.append(check_traces_token(settings, environ))
+    if settings.view.enabled:  # only when on, so the output of others stays as it was
+        checks.append(check_view(settings, environ))
     checks.append(check_traces_scopes(settings, loaded, environ))
     checks.append(check_private_files(settings))
     checks.append(check_database(settings, at))

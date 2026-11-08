@@ -40,6 +40,7 @@ configure what exists.
 - [[report]](#report), [report sections](#report-sections)
 - [[agent]](#agent) and [[hub]](#hub): multi-host
 - [[server]](#server): connection guards of every listener
+- [[view]](#view): the read-only farm view listener (off by default)
 - [Checks across sections](#checks-across-sections)
 
 ## How the config is read
@@ -89,6 +90,7 @@ configure what exists.
 | `KELPIE_DB` | all commands | Database path; overrides `[storage] path`. |
 | `KELPIE_HOST`, `KELPIE_PORT` | `kelpie serve` | Bind address and port (default `127.0.0.1`, `9464`). |
 | `KELPIE_LOG_LEVEL` | all commands | Log level (default `INFO`). |
+| `KELPIE_VIEW_TOKEN` | `kelpie serve`, `kelpie status --server` | The farm view's bearer token (the default `[view] token_env`). |
 | `KELPIE_TRACES_TOKEN` | `kelpie serve` | OTLP bearer token (the default `[traces] token_env`). |
 | `KELPIE_TRACES_ALLOW_UNAUTHENTICATED` | `kelpie serve` | `1`, `true`, `yes` or `on`: same as `[traces] allow_unauthenticated = true`. |
 | `KELPIE_PROMETHEUS_TOKEN` | `kelpie serve` | Prometheus bearer token (the default `[resources.prometheus] token_env`). |
@@ -2337,10 +2339,33 @@ hub; both are checked against `Content-Length` before the body is read, and agai
 gzip. One request per connection. Refused and cut connections are logged at most once a
 minute per address. See [security.md](security.md#listeners).
 
+## [view]
+
+A read-only farm view that `kelpie serve` serves on a listener of its own, apart from the
+main port (so OTLP ingest can be opened to agents while the view stays on loopback). **Off
+by default.** `GET /v1/farm` returns the view `kelpie status --json` prints: tasks per
+status (per board), waiting conditions, open alerts and the last actions per rule, built
+from the control loop's last tick and the database read read-only (at most once every 2s).
+There is no write endpoint: every other method gets 405.
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `enabled` | `false` | Start the listener with `kelpie serve`. |
+| `host` | `127.0.0.1` | Bind address. Off loopback a token is required: `kelpie serve` refuses to start without a strong one (16+ characters, 6+ different), and `kelpie doctor` warns. |
+| `port` | `9465` | Port. |
+| `token_env` | `KELPIE_VIEW_TOKEN` | Variable holding the bearer token. When set, every request needs `Authorization: Bearer <token>`, on loopback too. |
+
+`kelpie status --server` reads it (`--server URL` for another address; the token comes
+from the same variable). Keep it on loopback, or on a private network you choose, behind
+the token; Kelpie opens nothing to the internet by itself. See
+[security.md](security.md#farm-view).
+
 ## Checks across sections
 
 Kelpie refuses to start when:
 
+- `[view]` is enabled on an address off loopback without a strong token in its
+  `token_env`.
 - `[[budgets]]` exist but `[traces] enabled = false`; a budget `window` exceeds
   `[traces] retention`; a `usd` budget exists without `[prices]` while
   `[spend] default_prices = false`.

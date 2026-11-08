@@ -135,7 +135,22 @@ def main(argv: Sequence[str] | None = None) -> int:
     serve = sub.add_parser("serve", help="run the control loop and HTTP endpoints")
     serve.add_argument("--host", default=os.environ.get("KELPIE_HOST", "127.0.0.1"))
     serve.add_argument("--port", type=int, default=int(os.environ.get("KELPIE_PORT", "9464")))
-    sub.add_parser("status", help="show the rules kelpie serve would load, with their mode")
+    status = sub.add_parser(
+        "status",
+        help="show the rules kelpie serve would load, with their mode, and the farm: tasks per "
+        "status, waiting conditions, open alerts and the last actions per rule (read-only)",
+    )
+    status.add_argument(
+        "--json", action="store_true", help="only the farm view, as JSON (for scripts)"
+    )
+    status.add_argument(
+        "--server",
+        nargs="?",
+        const="",
+        metavar="URL",
+        help="only the farm view, from a running kelpie serve's [view] listener (default: the "
+        "configured [view] address; the token from [view] token_env)",
+    )
     report = sub.add_parser("report", help='the daily "cost of chaos" report as Markdown')
     report.add_argument("--date", help="YYYY-MM-DD (default: yesterday in [report] timezone)")
     report.add_argument(
@@ -350,7 +365,17 @@ def main(argv: Sequence[str] | None = None) -> int:
             return run_selftest(settings, lambda line: print(line, flush=True), keep=args.keep)
         if args.command == "agent":
             return _agent(settings)
+        if args.command == "status" and (args.json or args.server is not None):
+            from kelpie.view.cli import run as run_view
+
+            out, err, code = run_view(settings, args.json, args.server)
+            sys.stdout.write(out)
+            sys.stderr.write(err)
+            return code
         if args.command == "status":
+            from kelpie.view.cli import local_view
+            from kelpie.view.text import render as render_view
+
             rules = load_rules(settings.engine)
             adapters = build_adapters(settings)
             budgets = read_budgets(settings, adapters)
@@ -359,6 +384,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             sys.stdout.write(
                 render_status(settings, rules, adapters, budgets, unpriced=unpriced, models=models)
             )
+            sys.stdout.write("\n" + render_view(local_view(settings)))
             return 0
         load_rules(settings.engine)  # rule errors first: they are the likelier mistake
         check_exposure(settings, args.host)
@@ -384,6 +410,21 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if (schedule := report_schedule(settings, app.alerts)) is not None:
         app.services.append(schedule)  # [report] at: started with the loop, stopped first
+    from kelpie.view.cli import view_service
+
+    try:
+        view = view_service(app)
+    except OSError as exc:
+        app.close()
+        locks.release()
+        print(
+            f"kelpie: cannot start: [view] cannot listen on {settings.view.host}:"
+            f"{settings.view.port}: {exc}",
+            file=sys.stderr,
+        )
+        return 2
+    if view is not None:
+        app.services.append(view)  # [view]: the read-only farm view, off by default
 
     from kelpie.server import serve as run
 
