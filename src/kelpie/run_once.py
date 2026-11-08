@@ -2,17 +2,20 @@
 
 The snapshot is built as ``kelpie why`` builds it (:func:`kelpie.why.read_snapshot`): the
 platform adapters, the connector steps that read only the board, and the span store opened
-read-only; ``--refresh`` adds the network connectors (GitHub), as one tick of ``kelpie
-serve`` would. The open alert states are read from the database without writing to it, so
-rules that keep a state open on a lower bar (hysteresis) see what serve sees. Every loaded
-rule is evaluated (rules are pure) and its actions are printed with the mode the rule runs
-in; nothing is dispatched, nothing is written: no ledger entry, no alert state, no action
-on a board. The engine's ledger would hold back some of these (cooldowns, alerts sent on
-transitions only), so serve does not necessarily act on all of them on its next tick.
+read-only; ``--refresh`` adds the network connectors (GitHub). It is not all of what a tick
+of ``kelpie serve`` sees: host resources (Prometheus), provider quotas, instruction files,
+cost reports, a hub's remote boards and host sleeps are left out, and a note names the ones
+configured, so rules reading them may differ from serve. The open alert states are read from
+the database without writing to it, so rules that keep a state open on a lower bar
+(hysteresis) see what serve sees. Every loaded rule is evaluated (rules are pure) and its
+actions are printed with the mode the rule runs in; nothing is dispatched, nothing is
+written: no ledger entry, no alert state, no action on a board. The engine's ledger would
+hold back some of these (cooldowns, alerts sent on transitions only), so serve does not
+necessarily act on all of them on its next tick.
 
 Only ``--dry-run`` exists: running the actions once is ``kelpie serve``'s job. Exit codes:
-0; 2 without ``--dry-run`` or on a config error; 3 when a platform adapter failed to read its
-board (the actions printed lack its tasks).
+0; 2 without ``--dry-run`` or on a config error; 3 when the list is incomplete: a platform
+adapter failed to read its board or a rule raised.
 """
 
 from __future__ import annotations
@@ -29,6 +32,7 @@ from kelpie.alerts.render import one_line
 from kelpie.app import LoadedRules, Settings, load_rules, utc_now
 from kelpie.core.actions import Action
 from kelpie.core.config import Mode
+from kelpie.core.model import Snapshot
 from kelpie.core.storage import SchemaOutdated, open_readonly
 from kelpie.why import read_snapshot
 
@@ -53,7 +57,9 @@ def open_state_ids(db: Path | None) -> tuple[tuple[str, ...], list[str]]:
         conn.close()
 
 
-def evaluate(loaded: LoadedRules, snapshot: Any) -> tuple[list[tuple[Action, Mode]], list[str]]:
+def evaluate(
+    loaded: LoadedRules, snapshot: Snapshot
+) -> tuple[list[tuple[Action, Mode]], list[str]]:
     """Every loaded rule's actions with the mode they run in. A rule that raises is skipped
     and named, as the engine skips it."""
     modes = {s.name: s.mode for s in loaded.statuses}
@@ -66,10 +72,29 @@ def evaluate(loaded: LoadedRules, snapshot: Any) -> tuple[list[tuple[Action, Mod
             problems.append(f"rule {rule.name} failed: {type(exc).__name__}: {exc}")
             continue
         for a in actions:
-            found.append(
-                (a, Mode.OBSERVE if a.observe_only else modes.get(rule.name, Mode.OBSERVE))
-            )
+            found.append((a, Mode.OBSERVE if a.observe_only else modes.get(a.rule, Mode.OBSERVE)))
     return found, problems
+
+
+def left_out(settings: Settings) -> list[str]:
+    """Configured sources a tick of serve reads that this snapshot does not."""
+    gone = [
+        name
+        for name, on in (
+            ("host resources (Prometheus)", settings.resources.prometheus is not None),
+            ("provider quotas", settings.llm_quotas is not None),
+            ("instruction files", settings.instructions.enabled),
+            ("cost reports", settings.cost_reports is not None),
+            ("the hub's remote boards", settings.hub is not None),
+        )
+        if on
+    ]
+    if not gone:
+        return []
+    return [
+        f"not read here, unlike a serve tick: {', '.join(gone)}; rules reading them may "
+        "differ (host sleeps are not applied either)"
+    ]
 
 
 def _mode(mode: Mode, dry_run: bool) -> str:
@@ -127,8 +152,14 @@ def run(
     ids, state_problems = open_state_ids(settings.db_path)
     snapshot = replace(read.snapshot, open_states=ids)
     found, rule_problems = evaluate(loaded, snapshot)
-    problems = [*read.adapter_failures, *read.problems, *state_problems, *rule_problems]
-    code = 3 if read.adapter_failures else 0
+    problems = [
+        *read.adapter_failures,
+        *read.problems,
+        *state_problems,
+        *rule_problems,
+        *left_out(settings),
+    ]
+    code = 3 if read.adapter_failures or rule_problems else 0
     counts = {
         "tasks": len(snapshot.tasks),
         "sessions": len(snapshot.sessions),

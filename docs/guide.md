@@ -209,6 +209,8 @@ farm throughput metrics from traces.
   `kelpie run-once --dry-run` evaluates every rule on the same kind of snapshot and prints
   all their actions with each rule's mode (`--json`, `--refresh`); it dispatches and writes
   nothing, and serve's ledger may hold some of them back (cooldowns, transitions only).
+  Sources only serve reads (Prometheus, provider quotas, instruction files, cost reports, a
+  hub's boards, host sleeps) are left out, and a note names the configured ones.
 - **Farm throughput** (`kelpie.report.throughput`): per role, tasks completed per hour,
   hand-offs per hour, utilization, mean and current queue length, rework rate and cost per
   completed task, plus task-hours by stage (working, queue, review, waiting for conditions,

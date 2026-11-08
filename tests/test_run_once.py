@@ -92,5 +92,82 @@ def test_a_failing_rule_is_named_not_fatal(
         raise RuntimeError("bug")
 
     monkeypatch.setattr(ExitContract, "evaluate", boom)
-    assert main(["run-once", "--dry-run"]) == 0
+    assert main(["run-once", "--dry-run"]) == 3  # the list is incomplete
     assert "rule exit_contract failed: RuntimeError: bug" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    ("mode", "dry_run", "shown"),
+    [
+        ("act", "true", "act (dry-run)"),
+        ("suggest", "true", "suggest (dry-run)"),
+        ("suggest", "false", "suggest "),
+    ],
+)
+def test_the_rule_mode_is_shown(farm: Path, mode: str, dry_run: str, shown: str) -> None:  # noqa: F811
+    config = farm / "kelpie.toml"
+    text = config.read_text().replace("dry_run = true", f"dry_run = {dry_run}")
+    text = text.replace(
+        "[engine.rules.exit_contract]\n", f'[engine.rules.exit_contract]\nmode = "{mode}"\n'
+    )
+    config.write_text(text)
+    out, _, code = run(load_settings(find_config(None)), True, clock=lambda: NOW)
+    assert code == 0
+    line = next(x for x in out.splitlines() if "exit_contract" in x and "t_stale" in x)
+    assert shown in line
+
+
+def test_observe_only_and_escaping() -> None:
+    from types import SimpleNamespace
+
+    from kelpie.core.actions import Action, ActionKind
+    from kelpie.core.config import Mode
+    from kelpie.core.model import Snapshot
+    from kelpie.run_once import evaluate
+
+    class Rule:
+        name = "stub"
+
+        def evaluate(self, snapshot: Snapshot) -> list[Action]:
+            return [
+                Action(ActionKind.ALERT, "stub", "\x1b[31mred\x1b[0m\nline @everyone", "T-1\x07"),
+                Action(ActionKind.ALERT, "stub", "new check", observe_only=True),
+            ]
+
+    status = SimpleNamespace(name="stub", mode=Mode.ACT)
+    loaded = SimpleNamespace(rules=[Rule()], statuses=[status])
+    found, problems = evaluate(loaded, Snapshot(now=NOW))  # type: ignore[arg-type]
+    assert not problems and [m for _, m in found] == [Mode.ACT, Mode.OBSERVE]
+    from kelpie.alerts.render import one_line
+
+    shown = one_line(found[0][0].reason, 160) + one_line(found[0][0].task_id or "", 60)
+    assert "\x1b" not in shown and "\n" not in shown and "\x07" not in shown
+
+
+def test_an_unreadable_state_db_is_a_note(farm: Path) -> None:  # noqa: F811
+    import sqlite3
+
+    db = farm / "kelpie.db"
+    with sqlite3.connect(db) as conn:
+        conn.execute("PRAGMA user_version = 1")
+    out, _, code = run(load_settings(find_config(None)), True, clock=lambda: NOW)
+    assert code == 0 and "open alert states left out" in out
+    with sqlite3.connect(db) as conn:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 1
+
+
+def test_an_adapter_failure_exits_3(farm: Path) -> None:  # noqa: F811
+    (farm / "kanban.db").write_bytes(b"not a database")
+    _, _, code = run(load_settings(find_config(None)), True, clock=lambda: NOW)
+    assert code == 3
+
+
+def test_sources_only_serve_reads_are_named() -> None:
+    from dataclasses import replace
+
+    from kelpie.app import Settings
+    from kelpie.run_once import left_out
+
+    assert left_out(Settings()) == []
+    (note,) = left_out(replace(Settings(), hub=object(), llm_quotas=object()))  # type: ignore[arg-type]
+    assert "provider quotas, the hub's remote boards" in note
