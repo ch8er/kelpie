@@ -285,8 +285,8 @@ labels: P0, week-1, area:rules
 A restarted task continues from the last commit instead of starting from zero.
 
 **Acceptance criteria**
-- [ ] Requeued tasks carry the last commit reference, the progress note and a short git log (commit, branch and note done, #14, #136; no git log)
-- [ ] The adapter passes them into the next session's prompt (today a `comment` on the task the next agent has to read)
+- [x] Requeued tasks carry the last commit reference, the progress note and a short git log (commit, branch and note, #14, #136; the git log from `Session.recent_commits`, #382)
+- [x] The adapter passes them into the next session's prompt (on Hermes through the comment itself: Hermes puts a task's newest 30 comments, 2048 characters each, in the context of the worker it spawns, and the note is capped at 2000 characters, #382; it drops out of that context once 30 newer comments exist; platforms with no such channel keep the comment)
 - [x] Restarts from zero are counted (input for the daily report and token optimization)
 - [x] New fixture `16-checkpoint-resume-from-commit.yaml` (`rule: checkpoints`, `incident: null`)
 

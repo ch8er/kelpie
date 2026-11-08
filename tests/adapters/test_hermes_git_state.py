@@ -1149,3 +1149,90 @@ def test_a_fifo_commondir_or_gitdir_does_not_block(repo: Path, tmp_path: Path, n
     os.mkfifo(gitdir / name, 0o600)
     state = _within(lambda: read_git_state(linked, 1.0))
     assert state.problem is Problem.LAYOUT
+
+
+# --- short git log ------------------------------------------------------------------------
+
+
+def log_commit(repo: Path, name: str, message: str) -> None:
+    (repo / name).write_text(name + "\n")
+    git(repo, "add", name)
+    git(repo, "commit", "-q", "-m", message, date=COMMITTED_AT)
+
+
+def test_the_log_lists_the_task_branch_commits_newest_first(repo: Path) -> None:
+    log_commit(repo, "b.txt", "main moves on")
+    git(repo, "checkout", "-q", "-b", "task/t_1", "HEAD~1")
+    log_commit(repo, "c.txt", "Add exporter\n\nlonger body that is not the subject")
+    log_commit(repo, "d.txt", "Escape headers")
+    state = read_git_state(repo, 5.0, base_refs=("main",))
+    assert [subject for _, subject in state.log] == ["Escape headers", "Add exporter"]
+    assert state.log[0][0] == state.last_commit
+    assert all(len(sha) == gs.ABBREV for sha, _ in state.log)
+
+
+def test_without_base_refs_the_log_is_capped(repo: Path) -> None:
+    for i in range(gs.LOG_COMMITS + 2):
+        log_commit(repo, f"f{i}.txt", f"step {i}")
+    state = read_git_state(repo, 5.0)
+    assert [s for _, s in state.log] == [f"step {i}" for i in range(6, 1, -1)]
+
+
+def test_the_log_stops_at_the_root_and_cleans_subjects(repo: Path) -> None:
+    log_commit(repo, "b.txt", "tab\there " + "x" * 300)
+    state = read_git_state(repo, 5.0)
+    (newest, root) = state.log
+    assert root[1] == "first"
+    assert "\t" not in newest[1] and newest[1].startswith("tab?here ")
+    assert len(newest[1]) == gs.MAX_SUBJECT and newest[1].endswith("…")
+
+
+def test_a_repository_without_commits_has_no_log(tmp_path: Path) -> None:
+    path = tmp_path / "empty"
+    path.mkdir()
+    git(path, "init", "-q", "-b", "main")
+    assert read_git_state(path, 5.0).log == ()
+
+
+def test_sessions_carry_the_log_as_recent_commits(board: Board, repo: Path) -> None:
+    log_commit(repo, "b.txt", "second")
+    live_task(board, repo)
+    board.run("t_1", "dev", ago(hours=1))
+    s = only(board, base_refs=())
+    assert [c.subject for c in s.recent_commits] == ["second", "first"]
+    first = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "--short=7", "HEAD~1"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert s.recent_commits[0].sha == s.last_commit and s.recent_commits[1].sha == first
+
+
+def test_a_branch_that_is_the_base_has_no_log_of_its_own(repo: Path) -> None:
+    log_commit(repo, "b.txt", "main moves on")
+    assert read_git_state(repo, 5.0, base_refs=("main",)).log == ()
+
+
+def test_the_log_ends_at_a_merge_of_the_base(repo: Path) -> None:
+    git(repo, "checkout", "-q", "-b", "task/t_1")
+    log_commit(repo, "c.txt", "task one")
+    git(repo, "checkout", "-q", "main")
+    log_commit(repo, "b.txt", "main moves on")
+    git(repo, "checkout", "-q", "task/t_1")
+    git(repo, "merge", "-q", "--no-edit", "-m", "Merge main into task", "main")
+    log_commit(repo, "d.txt", "task two")
+    subjects = [s for _, s in read_git_state(repo, 5.0, base_refs=("main",)).log]
+    assert subjects == ["task two", "Merge main into task"]
+    assert "main moves on" not in subjects and "first" not in subjects
+
+
+def test_a_huge_commit_message_is_read_only_in_part(repo: Path) -> None:
+    (repo / "b.txt").write_text("b\n")
+    git(repo, "add", "b.txt")
+    message = repo.parent / "message.txt"
+    message.write_text("big one\n\n" + "z" * (gs.MAX_COMMIT_CHARS * 2))
+    git(repo, "commit", "-q", "-F", str(message))
+    state = read_git_state(repo, 5.0)
+    assert [s for _, s in state.log] == ["big one", "first"]
+    assert state.last_commit_at is not None

@@ -6,6 +6,7 @@ read-only input; they never mutate it and never perform I/O.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
@@ -269,6 +270,26 @@ class Artifact:
     at: datetime
 
 
+MAX_COMMIT_SUBJECT = 100  # characters of a commit subject kept
+MAX_COMMIT_SHA = 64  # characters of a commit id kept (a full SHA-256 id)
+MAX_RECENT_COMMITS = 5  # commits of a session's short git log
+_LINE_BREAKS = re.compile(r"[\x00-\x1f\x7f]")
+
+
+@dataclass(frozen=True, slots=True)
+class Commit:
+    """One commit of a short git log: its abbreviated id and the first line of its message
+    (agent text: one line, control characters as ``?``, capped)."""
+
+    sha: str
+    subject: str = ""
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "sha", capped(_LINE_BREAKS.sub("?", self.sha), MAX_COMMIT_SHA))
+        subject = _LINE_BREAKS.sub("?", self.subject)
+        object.__setattr__(self, "subject", capped(subject, MAX_COMMIT_SUBJECT))
+
+
 @dataclass(frozen=True, slots=True)
 class Session:
     """One agent run against one task, from start to exit."""
@@ -287,6 +308,10 @@ class Session:
     last_commit_at: datetime | None = None
     last_commit: str | None = None  # ref (sha) of the last commit on the task branch
     branch: str | None = None
+    # A short git log of the task branch, newest first, from ``last_commit`` back (at most
+    # MAX_RECENT_COMMITS, only the task's own commits when the adapter knows where the
+    # branch started), if the adapter knows it
+    recent_commits: tuple[Commit, ...] = ()
     dirty_worktree: bool = False
     changed_files: int | None = None  # uncommitted changed files, if the adapter knows
     summary: str | None = None  # the agent's own progress note, if it left one
@@ -300,6 +325,8 @@ class Session:
 
     def __post_init__(self) -> None:
         _cap(self, "exit_reason", "summary")
+        if len(self.recent_commits) > MAX_RECENT_COMMITS:
+            object.__setattr__(self, "recent_commits", self.recent_commits[:MAX_RECENT_COMMITS])
 
 
 # Lower bounds of the buckets a wait inside a session is kept in (SessionWait.waited).

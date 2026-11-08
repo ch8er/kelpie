@@ -5,8 +5,9 @@ description: >
   Foundation rule (checkpoints). A task went back to the queue after its session died; that
   session had committed work and left a clean worktree. The next session should continue
   from the last commit, so the task gets one comment with the commit, branch and progress
-  note. A queued task whose previous session committed nothing, and a queued task that was
-  never worked on, get nothing.
+  note, and a short git log of the branch when the adapter read one. A queued task whose
+  previous session committed nothing, and a queued task that was never worked on, get
+  nothing.
 rule: checkpoints
 snapshot:
   now: "2026-03-02T16:00:00+00:00"
@@ -16,14 +17,30 @@ snapshot:
     - {id: T-1601, title: "Implement CSV export", status: ready, status_since: "2026-03-02T15:10:00+00:00"}
     - {id: T-1602, title: "Spike: caching", status: ready, status_since: "2026-03-02T15:10:00+00:00"}
     - {id: T-1603, title: "New task", status: ready, status_since: "2026-03-02T09:00:00+00:00"}
+    - {id: T-1604, title: "Rate limiter", status: ready, status_since: "2026-03-02T15:10:00+00:00"}
   sessions:
     - {id: S-1601, task_id: T-1601, owner_id: agent-dev-1, started_at: "2026-03-02T13:00:00+00:00", ended_at: "2026-03-02T15:00:00+00:00", last_commit_at: "2026-03-02T14:58:00+00:00", last_commit: "a1b2c3d", branch: "task/T-1601", summary: "Exporter done; header escaping still failing in test_quotes."}
     - {id: S-1602, task_id: T-1602, owner_id: agent-dev-1, started_at: "2026-03-02T13:00:00+00:00", ended_at: "2026-03-02T15:00:00+00:00"}
+    - id: S-1604
+      task_id: T-1604
+      owner_id: agent-dev-1
+      started_at: "2026-03-02T13:00:00+00:00"
+      ended_at: "2026-03-02T15:00:00+00:00"
+      last_commit_at: "2026-03-02T14:40:00+00:00"
+      last_commit: "e4f5a6b"
+      branch: "task/T-1604"
+      recent_commits:
+        - {sha: e4f5a6b, subject: "Count requests per key"}
+        - {sha: 9c8d7e6, subject: "Add limiter skeleton"}
 expected_actions:
   - kind: comment
     task_id: T-1601
     reason_contains: "Resume from commit a1b2c3d on task/T-1601"
     params: {commit: a1b2c3d}
+  - kind: comment
+    task_id: T-1604
+    reason_contains: "Last commits on task/T-1604, newest first:\n- e4f5a6b Count requests per key\n- 9c8d7e6 Add limiter skeleton"
+    params: {commit: e4f5a6b, git_log: ["e4f5a6b Count requests per key", "9c8d7e6 Add limiter skeleton"]}
 not_expected_actions:
   - {kind: comment, task_id: T-1602}
   - {kind: comment, task_id: T-1603}
