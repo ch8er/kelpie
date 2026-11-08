@@ -317,7 +317,8 @@ def fresh(
     now: datetime,
     max_age: timedelta = DEFAULT_MAX_CONDITION_AGE,
 ) -> bool:
-    """Whether the condition was checked after ``since`` and recently enough to act on."""
+    """Whether the condition was checked at or after ``since`` and recently enough to act
+    on."""
     checked = condition.checked_at
     return checked is not None and checked >= since and now - checked <= max_age
 

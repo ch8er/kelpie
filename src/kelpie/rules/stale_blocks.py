@@ -6,11 +6,11 @@ block depends on holds, the block is stale: Kelpie clears it instead of letting 
 sit for hours.
 
 Kelpie only clears a block on *fresh* evidence: every linked condition must have been
-checked after the block was set and within ``max_condition_age``. Data from before the block
-(CI was green for the previous commit) or from a connector that stopped polling never
-clears a block. A grace period, counted from when the last condition was met but never
-from before the block started, avoids racing an agent or the platform that is about to
-clear the block itself.
+checked at or after the moment the block was set and within ``max_condition_age``. Data
+from before the block (CI was green for the previous commit) or from a connector that
+stopped polling never clears a block. A grace period, counted from when the last condition
+was met but never from before the block started, avoids racing an agent or the platform
+that is about to clear the block itself.
 
 Conditions are linked by the shared rule semantics (``kelpie.rules._tasks``). So that no
 block sits unnoticed, Kelpie alerts on blocks it cannot clear: no visible condition after
