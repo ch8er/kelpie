@@ -58,10 +58,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 - A design note in `docs/security.md` for answering an agent's question from the chat
   (#300): threat model, guards and the rejected presses. Proposed only; nothing is
   implemented and Telegram buttons still only snooze.
-
 - Incident fixture `15-green-main-red-pr.yaml`: with main green and the awaited PR's head
   red, rule 4 keeps the block; a task waiting for a PR to merge stays blocked while the PR
   is open, whatever CI says.
+
 ### Changed
 
 - **The database schema is now 12**: `kelpie serve` migrates an older database at start.
