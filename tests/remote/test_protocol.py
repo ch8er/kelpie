@@ -329,6 +329,13 @@ def task(**kw: object) -> dict[str, object]:
         {"tasks": [task(estimate=-5)]},
         {"tasks": [task(id="t\ud800")]},
         {"tasks": [task(), task()]},
+        # null only where the model allows it (#385): rules read the rest unguarded
+        {"tasks": [task(title=None)]},
+        {"tasks": [task(status_since=None)]},
+        {"tasks": [task(files=[None])]},
+        {"sessions": [{"id": "s", "task_id": "t", "owner_id": None, "started_at": None}]},
+        {"conditions": [{"id": "c", "kind": "custom", "params": []}]},
+        {"conditions": [{"id": "c", "kind": "custom", "params": "abc"}]},
         {"conditions": [{"id": "c", "kind": "custom", "params": {"a": float("nan")}}]},
         {
             "conditions": [
@@ -435,3 +442,16 @@ def test_a_report_carries_the_hosts_sleeps() -> None:
     ):
         with pytest.raises(ProtocolError):
             decode_report({**body, "sleeps": bad})
+
+
+def test_now_must_not_be_null() -> None:
+    with pytest.raises(ProtocolError):
+        decode_snapshot({"now": None})
+
+
+def test_optional_fields_may_still_be_null() -> None:
+    snap = decode_snapshot(
+        {"now": NOW.isoformat(), "tasks": [task(owner_id=None, estimate=None, block=None)]}
+    )
+    (t,) = snap.tasks
+    assert (t.owner_id, t.estimate, t.block) == (None, None, None)
