@@ -1874,9 +1874,3 @@ def read_action_days(db: sqlite3.Connection, start: date, end: date) -> list[Act
         )
         for r in rows
     ]
-
-
-def read_oldest_action(db: sqlite3.Connection) -> datetime | None:
-    """The oldest raw ledger row's time (None: no row)."""
-    at = db.execute("SELECT MIN(at) FROM actions").fetchone()[0]
-    return None if at is None else datetime.fromisoformat(at)

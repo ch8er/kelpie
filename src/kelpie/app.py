@@ -1137,11 +1137,6 @@ def sleep_watch(
     return SleepWatch(min_gap=config.host_sleep_min_gap, agent=agent)
 
 
-def empty_snapshot(clock: Callable[[], datetime] = utc_now) -> Callable[[], Snapshot]:
-    """Snapshot source without adapters: just the current time."""
-    return lambda: Snapshot(now=clock())
-
-
 def merged_snapshot(
     adapters: Sequence[PlatformAdapter],
     metrics: Metrics,

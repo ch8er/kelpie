@@ -76,14 +76,6 @@ class SnoozeSettings:
     marker_max_days: int = DEFAULT_MARKER_MAX_DAYS
     tz: tzinfo = UTC
 
-    @property
-    def max_ahead(self) -> timedelta:
-        return timedelta(days=self.max_days)
-
-    @property
-    def marker_max(self) -> timedelta:
-        return timedelta(days=self.marker_max_days)
-
 
 def _days(raw: Mapping[str, Any], key: str, default: int, top: int) -> int:
     value = raw.get(key, default)
