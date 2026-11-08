@@ -774,6 +774,11 @@ class GitHubCI:
         build_id = action.params.get("build_id")
         if not isinstance(build_id, str):
             return ActionResult.REFUSED
+        if action.params.get("cause") == "fail_fast":
+            # Rule 9's fail-fast cancel is not carried out yet: only superseded runs are
+            # cancel targets here, even when the doomed run is also superseded.
+            log.info("cancel_build %s refused: fail-fast cancels are not supported yet", build_id)
+            return ActionResult.REFUSED
         if build_id in self._cancelled:
             return ActionResult.NOTHING_TO_DO  # already cancelled by Kelpie
         target = self._targets.get(build_id)

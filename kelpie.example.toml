@@ -245,6 +245,11 @@ once_attempts = 3         # ...and given up after this many failed attempts
 # quota_period = "30d"           # without a usage reading: warn if the burn over this
 #                                # period would exceed the quota
 # max_reading_age = "1h"
+# fail_fast_checks = []          # cheap required checks (workflow globs), e.g. ["lint"]:
+#                                # when one failed on a PR's commit, cancel_build for that
+#                                # commit's builds of fail_fast_cancel workflows
+# fail_fast_cancel = ["*"]       # e.g. ["ios-*", "macos"]
+# fail_fast_mode = "observe"     # "rule": the cancels follow the rule's mode
 
 [storage]
 path = "kelpie.db"        # action ledger (SQLite); ":memory:" keeps it in memory.

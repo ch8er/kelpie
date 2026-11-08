@@ -1,0 +1,90 @@
+id: "05-fail-fast"
+incident: 5
+title: "Expensive builds keep running on a head whose cheap required check failed"
+description: >
+  A fast rules check failed on a pull request's head within two minutes, while the
+  mobile build of the same commit sat queued for a macOS runner and then ran for most of
+  an hour. Its result could not matter: the PR cannot merge with a red required check, and
+  the fix push builds everything again. Rule 9 cancels the doomed expensive build through
+  the CI connector that reported it; until fail_fast_mode is "rule" this is only logged.
+rule: ci_economy
+config:
+  waste_min_minutes: 1000
+  fail_fast_checks: ["lint", "rules"]
+  fail_fast_cancel: ["ios-*"]
+  fail_fast_mode: rule
+snapshot:
+  now: "2026-03-03T12:00:00+00:00"
+  builds:
+    # PR #41: the rules check failed at a step that ran; the iOS build of the same commit
+    # is queued and the UI tests are running: both are doomed.
+    - {id: F-1, source: ci, repo: example/repo, workflow: rules, branch: task/T-541,
+       sha: "aaaa111", event: pull_request, pr: 41, status: failure,
+       started_at: "2026-03-03T11:40:00+00:00", finished_at: "2026-03-03T11:42:00+00:00",
+       minutes: 2, jobs: [{name: check, conclusion: failure, step: "Run rules"}]}
+    - {id: F-2, source: ci, repo: example/repo, workflow: ios-build, branch: task/T-541,
+       sha: "aaaa111", event: pull_request, pr: 41, status: queued,
+       started_at: "2026-03-03T11:40:00+00:00"}
+    - {id: F-3, source: ci, repo: example/repo, workflow: ios-ui-tests, branch: task/T-541,
+       sha: "aaaa111", event: pull_request, pr: 41, status: running,
+       started_at: "2026-03-03T11:41:00+00:00", minutes: 18}
+    # Same PR, a workflow outside fail_fast_cancel (a cheap docs preview): left alone.
+    - {id: F-4, source: ci, repo: example/repo, workflow: preview, branch: task/T-541,
+       sha: "aaaa111", event: pull_request, pr: 41, status: running,
+       started_at: "2026-03-03T11:41:00+00:00", minutes: 1}
+    # PR #42: its lint failed, but a re-run of lint is running: it may still pass.
+    - {id: F-5, source: ci, repo: example/repo, workflow: lint, branch: task/T-542,
+       sha: "bbbb222", event: pull_request, pr: 42, status: failure,
+       started_at: "2026-03-03T11:30:00+00:00", finished_at: "2026-03-03T11:31:00+00:00",
+       minutes: 1, jobs: [{name: lint, conclusion: failure, step: "ruff"}]}
+    - {id: F-6, source: ci, repo: example/repo, workflow: lint, branch: task/T-542,
+       sha: "bbbb222", event: pull_request, pr: 42, status: running,
+       started_at: "2026-03-03T11:50:00+00:00"}
+    - {id: F-7, source: ci, repo: example/repo, workflow: ios-build, branch: task/T-542,
+       sha: "bbbb222", event: pull_request, pr: 42, status: running,
+       started_at: "2026-03-03T11:30:00+00:00", minutes: 25}
+    # PR #43: the rules check failed earlier but passed on a re-run since: not doomed.
+    - {id: F-8, source: ci, repo: example/repo, workflow: rules, branch: task/T-543,
+       sha: "cccc333", event: pull_request, pr: 43, status: failure,
+       started_at: "2026-03-03T11:00:00+00:00", finished_at: "2026-03-03T11:02:00+00:00",
+       minutes: 2, jobs: [{name: check, conclusion: failure, step: "Run rules"}]}
+    - {id: F-9, source: ci, repo: example/repo, workflow: rules, branch: task/T-543,
+       sha: "cccc333", event: pull_request, pr: 43, status: success,
+       started_at: "2026-03-03T11:10:00+00:00", finished_at: "2026-03-03T11:12:00+00:00",
+       minutes: 2}
+    - {id: F-10, source: ci, repo: example/repo, workflow: ios-build, branch: task/T-543,
+       sha: "cccc333", event: pull_request, pr: 43, status: running,
+       started_at: "2026-03-03T11:00:00+00:00", minutes: 50}
+    # PR #44: the CI refused the rules job (no runner, no step): not the code's verdict.
+    - {id: F-11, source: ci, repo: example/repo, workflow: rules, branch: task/T-544,
+       sha: "dddd444", event: pull_request, pr: 44, status: failure,
+       started_at: "2026-03-03T11:45:00+00:00", finished_at: "2026-03-03T11:45:00+00:00",
+       jobs: [{name: check, conclusion: failure, started: false}]}
+    - {id: F-12, source: ci, repo: example/repo, workflow: ios-build, branch: task/T-544,
+       sha: "dddd444", event: pull_request, pr: 44, status: queued,
+       started_at: "2026-03-03T11:45:00+00:00"}
+    # PR #41's previous commit: an iOS build of another head is not doomed by this one.
+    - {id: F-13, source: ci, repo: example/repo, workflow: ios-build, branch: task/T-541,
+       sha: "aaaa000", event: pull_request, pr: 41, status: running,
+       started_at: "2026-03-03T11:20:00+00:00", minutes: 30}
+expected_actions:
+  - kind: cancel_build
+    executor: ci
+    reason_contains: "rules already failed"
+    params: {build_id: F-2, cause: fail_fast, failed_check: F-1, failed_job: check, pr: 41}
+  - kind: cancel_build
+    executor: ci
+    params: {build_id: F-3, cause: fail_fast, failed_check: F-1}
+not_expected_actions:
+  - kind: cancel_build
+    params: {build_id: F-1}
+  - kind: cancel_build
+    params: {build_id: F-4}
+  - kind: cancel_build
+    params: {build_id: F-7}
+  - kind: cancel_build
+    params: {build_id: F-10}
+  - kind: cancel_build
+    params: {build_id: F-12}
+  - kind: cancel_build
+    params: {build_id: F-13}

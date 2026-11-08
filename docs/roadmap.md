@@ -593,7 +593,8 @@ how long the quota will last. The rule stays CI-agnostic; CI specifics live in a
 - [x] Depends on CI build/run records in the snapshot (see "close model gaps"): commit sha, branch, trigger event, draft flag, changed paths, duration/minutes, status, `superseded_by`
 - [x] Each wasted build is classified (draft/WIP, superseded, docs-only, already verified) with the minutes it burned
 - [x] Superseded running builds → `cancel_build`, executed by the CI connector (not the platform adapter) through action routing (see "action routing")
-- [ ] (not started) Fail fast: a required cheap check already failed on a PR head → queued or running expensive jobs on that head (e.g. macOS builds) → `cancel_build`, since a fix push will rebuild anyway (field case: an iOS build queued for a Mac on a head with a red rules check)
+- [x] Fail fast: a required cheap check already failed on a PR head → queued or running expensive jobs on that head (e.g. macOS builds) → `cancel_build`, since a fix push will rebuild anyway (field case: an iOS build queued for a Mac on a head with a red rules check) — #360: `fail_fast_checks` / `fail_fast_cancel`, observe-only until `fail_fast_mode = "rule"`; fixture `05-fail-fast.yaml`
+- [ ] The GitHub CI connector carries out a fail-fast `cancel_build` (`params.cause: fail_fast`): today it offers only superseded runs as cancel targets and refuses it; it must re-check that the check's newest run on that head still failed and the target is still active on the same attempt
 - [x] Quota burn forecast (time until exhaustion at the current rate) → `alert` before it runs out; exhausted quota → `critical` with `blocked_tasks` (minutes used from GitHub's billing usage report, #107)
 - [x] Fixtures: existing `05-ci-minutes-exhausted.yaml`; new `05-superseded-builds.yaml`, `05-docs-only-build.yaml`
 

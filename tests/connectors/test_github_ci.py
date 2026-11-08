@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -511,6 +512,17 @@ def test_cancel_refused_for_runs_the_scan_did_not_offer() -> None:
         for build_id in (f"{REPO}:2", f"{OTHER}:1", "../../x", 1):
             assert source.execute(cancel(build_id)) is ActionResult.REFUSED
         assert source.execute(Action(ActionKind.STOP, "x", "r")) is ActionResult.REFUSED
+        assert posts(gh) == []
+
+
+def test_fail_fast_cancel_is_refused_even_for_a_superseded_run() -> None:
+    with serve() as gh:
+        superseded_pair(gh)
+        source = ci(gh, **ALLOWED)
+        source(Snapshot(now=NOW))
+        doomed = cancel(f"{REPO}:1")
+        doomed = replace(doomed, params={**doomed.params, "cause": "fail_fast"})
+        assert source.execute(doomed) is ActionResult.REFUSED
         assert posts(gh) == []
 
 

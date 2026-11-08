@@ -69,6 +69,16 @@ connector's business.
    change requests → one ``warning`` outage that says which. A new check: only logged
    (``not_started_mode = "observe"``) until set to ``"rule"``. See
    :mod:`kelpie.rules._ci_not_started`.
+
+6. **Fail fast**: a cheap required check (a workflow matching ``fail_fast_checks``) already
+   failed on a change request's head, so a fix push will rebuild it anyway → ``cancel_build``
+   for that head's queued or running builds of the workflows in ``fail_fast_cancel`` (the
+   expensive ones, e.g. a macOS build), routed to the connector that reported them. The
+   check failed when its newest finished build on that commit failed at a job that started
+   (a job the CI refused is not the code's verdict), and no build of it is running there (a
+   re-run may still pass). Held builds (an approval, a concurrency group) and builds the
+   superseded cancel already covers are left alone. Off while ``fail_fast_checks`` is empty;
+   a new check: only logged (``fail_fast_mode = "observe"``) until set to ``"rule"``.
 """
 
 from __future__ import annotations
@@ -154,6 +164,11 @@ class CiEconomy:
     toolchain_window: timedelta = TOOLCHAIN_WINDOW
     propose_config: bool = False  # opt-in
     propose_min_minutes: float = 60.0
+    # Fail fast: workflows that are cheap required checks, and those to cancel on their
+    # failed head (globs on Build.workflow). Off while fail_fast_checks is empty.
+    fail_fast_checks: tuple[str, ...] = ()
+    fail_fast_cancel: tuple[str, ...] = ("*",)
+    fail_fast_mode: str = "observe"  # a new check: "observe", or "rule" (the rule's mode)
     name: str = NAME
 
     def evaluate(self, snapshot: Snapshot) -> Sequence[Action]:
@@ -161,6 +176,7 @@ class CiEconomy:
         actions: list[Action] = []
         cancels = self._cancels(snapshot) if self.cancel_superseded else []
         actions.extend(cancels)
+        actions.extend(self._fail_fast(snapshot, {c.params["build_id"] for c in cancels}))
         if (waste := self._waste(recent, snapshot)) is not None:
             if cancels:  # the summary says what happened to this tick's cancels
                 keys = [c.key for c in cancels if c.key]
@@ -437,6 +453,85 @@ class CiEconomy:
             )
         return actions
 
+    # --- 6. fail fast -------------------------------------------------------------------
+
+    def _fail_fast(self, snapshot: Snapshot, cancelled: set[str]) -> list[Action]:
+        if not self.fail_fast_checks:
+            return []
+        failed = self._failed_heads(snapshot)
+        actions: list[Action] = []
+        for build in snapshot.builds:
+            head = (build.source, build.repo, build.sha)
+            check = failed.get(head)
+            if (
+                check is None
+                or build.id in cancelled
+                or not build.status.is_active
+                or build.held
+                or build.pr is None
+                or not build.source
+                or not build.workflow
+                or self._is_check(build.workflow)
+                or not any(fnmatch.fnmatchcase(build.workflow, g) for g in self.fail_fast_cancel)
+            ):
+                continue
+            job = next(j for j in check.jobs or () if j.failed)
+            where = f"{job.name} > {job.step}" if job.step else job.name
+            sha = (build.sha or "")[:7]
+            actions.append(
+                Action(
+                    ActionKind.CANCEL_BUILD,
+                    NAME,
+                    f"Build {build.id} of {build.workflow} on PR #{build.pr} in {build.repo} "
+                    f"is doomed: the required check {check.workflow} already failed on the same "
+                    f"commit {sha} ({check.id}, at {where}). A fix push will build it again; "
+                    f"cancelling it now saves the rest of its run ({_minutes(build.minutes)} "
+                    "so far).",
+                    executor=build.source,
+                    key=f"{NAME}:fail_fast:{build.id}",
+                    once=True,
+                    observe_only=self.fail_fast_mode == "observe",
+                    params={
+                        "build_id": build.id,
+                        "cause": "fail_fast",
+                        "failed_check": check.id,
+                        "check_workflow": check.workflow,
+                        "failed_job": job.name,
+                        "sha": build.sha,
+                        "pr": build.pr,
+                        "repo": build.repo,
+                        "branch": build.branch,
+                        "workflow": build.workflow,
+                        "minutes": round(build.minutes, 1),
+                    },
+                )
+            )
+        return actions
+
+    def _is_check(self, workflow: str | None) -> bool:
+        return workflow is not None and any(
+            fnmatch.fnmatchcase(workflow, g) for g in self.fail_fast_checks
+        )
+
+    def _failed_heads(self, snapshot: Snapshot) -> dict[tuple[Any, ...], Build]:
+        """Per head (CI source, repository, commit), a cheap check whose newest finished
+        build there failed at a job that started, while no build of it runs there."""
+        runs: dict[tuple[Any, ...], list[Build]] = {}
+        for b in snapshot.builds:
+            if b.sha and b.repo and self._is_check(b.workflow):
+                runs.setdefault((b.source, b.repo, b.sha, b.workflow), []).append(b)
+        failed: dict[tuple[Any, ...], Build] = {}
+        for (source, repo, sha, _), found in sorted(runs.items(), key=lambda kv: str(kv[0])):
+            if any(b.status.is_active for b in found):
+                continue  # a re-run may still pass
+            done = [b for b in found if b.finished_at is not None]
+            if not done:
+                continue
+            newest = max(done, key=lambda b: (b.finished_at, b.id))
+            if newest.status is BuildStatus.FAILURE and any(j.failed for j in newest.jobs or ()):
+                failed.setdefault((source, repo, sha), newest)
+        return failed
+
     # --- 3. quota -------------------------------------------------------------------
 
     def _quota(self, recent: list[Build], snapshot: Snapshot) -> list[Action]:
@@ -672,6 +767,14 @@ def build(config: dict[str, Any]) -> CiEconomy:
         if not isinstance(value, bool):
             raise ValueError("propose_config must be true or false")
         kwargs["propose_config"] = value
+    for key in ("fail_fast_checks", "fail_fast_cancel"):
+        if key in config:
+            kwargs[key] = _strings(config.pop(key), key)
+    if "fail_fast_mode" in config:
+        mode = config.pop("fail_fast_mode")
+        if mode not in ("observe", "rule"):
+            raise ValueError('fail_fast_mode must be "observe" or "rule" (the rule\'s own mode)')
+        kwargs["fail_fast_mode"] = mode
     if "cancel_superseded" in config:
         value = config.pop("cancel_superseded")
         if not isinstance(value, bool):

@@ -15,6 +15,7 @@ from kelpie.core.model import (
     BuildStatus,
     Condition,
     ConditionKind,
+    Job,
     Resource,
     ResourceKind,
     Snapshot,
@@ -578,3 +579,112 @@ def test_without_allow_propose_an_act_mode_proposal_only_alerts() -> None:
     assert ("[ci_economy] propose_ci_config (not executed, needs a human)", Severity.WARNING) in (
         alerter.sent
     )
+
+
+# --- fail fast -------------------------------------------------------------------------
+
+
+def _doomed_head(**target: Any) -> Snapshot:
+    """A PR head whose cheap check failed, and an expensive build of it (``target``)."""
+    check = b(
+        "C-1",
+        workflow="lint",
+        sha="head-1",
+        pr=7,
+        status=BuildStatus.FAILURE,
+        jobs=(Job("lint", BuildStatus.FAILURE, step="ruff"),),
+    )
+    fields: dict[str, Any] = {
+        "workflow": "macos",
+        "sha": "head-1",
+        "pr": 7,
+        "status": BuildStatus.RUNNING,
+        "finished_at": None,
+    }
+    fields.update(target)
+    return Snapshot(now=NOW, builds=(check, b("X-1", **fields)))
+
+
+def fail_fast(snapshot: Snapshot, **config: Any) -> list[Action]:
+    rule = build({"fail_fast_checks": ["lint"], **config})
+    return [a for a in rule.evaluate(snapshot) if a.params.get("cause") == "fail_fast"]
+
+
+def test_fail_fast_is_off_without_checks() -> None:
+    assert [
+        a for a in CiEconomy().evaluate(_doomed_head()) if a.kind is ActionKind.CANCEL_BUILD
+    ] == []
+
+
+def test_fail_fast_is_observe_only_by_default() -> None:
+    (cancel,) = fail_fast(_doomed_head())
+    assert cancel.kind is ActionKind.CANCEL_BUILD and cancel.executor == "ci"
+    assert cancel.observe_only
+    assert cancel.key == "ci_economy:fail_fast:X-1" and cancel.once
+    assert "lint > ruff" in cancel.reason
+    (live,) = fail_fast(_doomed_head(), fail_fast_mode="rule")
+    assert not live.observe_only
+
+
+@pytest.mark.parametrize(
+    "target",
+    [
+        {"held": True},  # an approval holds it
+        {"pr": None},  # not a change request's build
+        {"status": BuildStatus.SUCCESS, "finished_at": NOW},  # already done
+        {"sha": "head-2"},  # another commit
+        {"source": None},  # nobody to route the cancel to
+        {"source": "other-ci"},  # another CI's builds of that commit
+        {"workflow": "lint"},  # the check itself
+        {"workflow": None},
+    ],
+)
+def test_fail_fast_leaves_alone(target: dict[str, Any]) -> None:
+    assert fail_fast(_doomed_head(**target)) == []
+
+
+def test_fail_fast_cancel_globs_narrow_the_targets() -> None:
+    assert fail_fast(_doomed_head(), fail_fast_cancel=["ios-*"]) == []
+    assert len(fail_fast(_doomed_head(), fail_fast_cancel=["mac*"])) == 1
+
+
+def test_fail_fast_needs_a_job_that_failed_after_starting() -> None:
+    snap = _doomed_head()
+    check, target = snap.builds
+    unread = replace(check, jobs=None)
+    refused = replace(check, jobs=(Job("lint", BuildStatus.FAILURE, started=False),))
+    for c in (unread, refused):
+        assert fail_fast(replace(snap, builds=(c, target))) == []
+
+
+def test_fail_fast_newest_check_decides_and_a_rerun_waits() -> None:
+    snap = _doomed_head()
+    check, target = snap.builds
+    passed = b("C-2", workflow="lint", sha="head-1", pr=7, finished_at=check.finished_at + M)
+    assert fail_fast(replace(snap, builds=(check, passed, target))) == []
+    rerun = b("C-3", workflow="lint", sha="head-1", status=BuildStatus.RUNNING, finished_at=None)
+    assert fail_fast(replace(snap, builds=(check, rerun, target))) == []
+    skipped = replace(check, status=BuildStatus.SKIPPED, finished_at=None)
+    assert fail_fast(replace(snap, builds=(skipped, target))) == []
+    older_pass = replace(passed, finished_at=check.finished_at - M)
+    assert len(fail_fast(replace(snap, builds=(check, older_pass, target)))) == 1
+
+
+def test_fail_fast_skips_a_build_the_superseded_cancel_covers() -> None:
+    snap = _doomed_head(superseded_by="X-2", cancellable=True)
+    actions = build({"fail_fast_checks": ["lint"]}).evaluate(snap)
+    cancels = [a for a in actions if a.kind is ActionKind.CANCEL_BUILD]
+    assert [c.params.get("cause") for c in cancels] == [None]
+    assert cancels[0].params["superseded_by"] == "X-2"
+
+
+def test_fail_fast_config_is_validated() -> None:
+    rule = build({"fail_fast_checks": ["lint"], "fail_fast_cancel": ["ios-*"]})
+    assert rule.fail_fast_checks == ("lint",) and rule.fail_fast_cancel == ("ios-*",)
+    assert build({"fail_fast_checks": []}).fail_fast_checks == ()
+    with pytest.raises(ValueError, match="fail_fast_mode"):
+        build({"fail_fast_mode": "act"})
+    with pytest.raises(ValueError, match="fail_fast_cancel"):
+        build({"fail_fast_cancel": "ios-*"})
+    with pytest.raises(ValueError, match="fail_fast_checks"):
+        build({"fail_fast_checks": [""]})
