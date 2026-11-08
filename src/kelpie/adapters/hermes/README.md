@@ -78,6 +78,9 @@ note and the agents trusted to write it, and their comments with the note (or ta
 create with it in the description) count as the person's, written by `person`:
 
 ```toml
+[adapters.hermes]
+human_owners = ["ceo"]
+
 [[adapters.hermes.human_decisions]]
 marker = "решение CEO"
 relays = ["partner"]

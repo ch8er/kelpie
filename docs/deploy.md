@@ -162,7 +162,8 @@ tasks name the same machine.
 
 **8. Check.**
 
-- `kelpie_agent_up{agent="laptop"}` and `{agent="vm"}` are 1 on the server's `/metrics`.
+- `kelpie_agent_up{agent="laptop"}` and `{agent="vm"}` are 1 on the server's `/metrics`
+  (from the server's first tick after the agent's first report: up to `[engine] interval`).
 - Task ids in alerts read `laptop:t_1a`, `vm:t_2b`.
 - Close the laptop: within about 2 minutes one alert says "agent laptop silent", and the
   laptop's tasks raise nothing else until it is back.
