@@ -20,7 +20,7 @@ configure what exists.
   [bottlenecks](#6-bottlenecks), [resources](#7-resources),
   [ci_economy](#9-ci_economy), [loop_breaker](#10-loop_breaker),
   [no_progress](#11-no_progress), [conflict_warning](#12-conflict_warning),
-  [dispatch_gate](#dispatch_gate)
+  [dispatch_gate](#dispatch_gate), [unanswered_asks](#unanswered_asks)
 - [[storage]](#storage), [[snooze]](#snooze)
 - [[adapters.hermes]](#adaptershermes), [[adapters.claude_code]](#adaptersclaude_code),
   [[adapters.openclaw]](#adaptersopenclaw), [[adapters.github_issues]](#adaptersgithub_issues),
@@ -180,6 +180,7 @@ is accepted and ignored with a warning. Rules run in the order below.
 | – | `return_causes` | P1 | implemented | `alert`, `comment` | adapter `comment` |
 | – | `output_offenders` | P1 | implemented | `comment`, `alert` | adapter `comment` (Hermes: `hermes kanban comment`) |
 | – | `instruction_bloat` | P1 | implemented | `alert` | alert channel |
+| – | `unanswered_asks` | P1 | implemented | `alert` | alert channel |
 
 Several rules share these terms:
 
@@ -810,6 +811,42 @@ split. Kelpie never edits instruction files; the rule only alerts.
 | `max_growth_per_week` | `10000` | integer > 0 | Characters added per week, over the growth window. |
 | `max_tokens_per_day` | `500000` | integer > 0 | Daily read cost that makes a file over `max_chars` worth splitting even when it is stable. |
 | `min_span` | `"1d"` | duration > 0 | Growth is judged only over at least this much history. |
+
+### unanswered_asks
+
+Issue #297: a question one agent puts to another in a task comment is an obligation until
+it is answered. An **ask** is a comment on an open task by an agent (not a person, not
+Kelpie) that mentions another agent owner as `@<owner id>` (case-insensitive; on a
+multi-host farm the id without its host prefix matches too, and the recipient must serve
+the task's machine) and contains a question mark. One obligation per task, asker and
+recipient, open from the first ask after the last answer. It is **answered** by any later
+comment of the recipient on the task, any later comment of the recipient on any task that
+mentions the asker (`@<asker>`), any later comment of a person on the task, or the task
+finishing. Comments come from the adapters that read them (Hermes `task_comments`).
+
+Kelpie reminds only while the recipient is **idle** (no live session: `session_stale_after`)
+and at most once per step of `steps`, measured from the ask in awake time of the task's
+host: when the recipient is idle, the reminder of the latest step the ask has passed goes
+out once, so a recipient busy across two steps gets one reminder, not two. The first step is
+`info`, later ones `warning`. Past `stop_after` the rule stops reminding about the ask.
+`delivery` is `seen` when the recipient had a session on the asking task after the ask,
+else `unknown` (never assumed lost, never resent). A snooze on the asking task (`kelpie
+snooze`, a chat reply, an `until:` marker) holds the reminders until it ends; after that,
+the current step's reminder goes out and says the snooze expired.
+
+**No double alerts.** Questions to people are rule 13's (`needs_you`): a person is never a
+recipient, and a task blocked on a question to a person is left to the digest. Blocked
+tasks are rule 4's or rule 13's and waiting tasks rule 2's: this rule reminds only about
+asks on tasks that are not blocked or waiting (backlog, ready, in progress, review,
+accepted). It only alerts (`asker`, `recipient`, `asked_at`, `question`, `delivery`,
+`recipient_state`, `step`, `open_hours`; `snooze` when one ended). Kelpie never writes into
+agents' sessions or edits their instructions.
+
+| Key | Default | Unit | Meaning |
+| --- | --- | --- | --- |
+| `steps` | `["1h", "4h", "12h", "24h"]` | list of durations, increasing, > 0 | Ages of an ask (awake time) at which a reminder is due; at most one reminder per step. |
+| `stop_after` | `"3d"` | duration, longer than the last step, at most `6d` | No more reminders about an ask this old (the ledger keeps once-actions for 7 days). |
+| `session_stale_after` | `"30m"` | duration, > 0 | A session silent this long no longer makes its agent busy. |
 
 ## [storage]
 

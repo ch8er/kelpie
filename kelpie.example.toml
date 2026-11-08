@@ -122,6 +122,11 @@ once_attempts = 3         # ...and given up after this many failed attempts
 #                            # loaded, or counted loads) is worth splitting even if stable
 # min_span = "1d"            # growth judged over at least this much history
 #
+# [engine.rules.unanswered_asks]  # issue #297: an agent's @question to another agent
+# steps = ["1h", "4h", "12h", "24h"]  # at most one reminder per step, only while idle
+# stop_after = "3d"          # no more reminders about an older ask (at most 6d)
+# session_stale_after = "30m"  # a silent session no longer makes its agent busy
+#
 # [engine.rules.return_causes]
 # window = "24h"            # returns counted
 # min_returns = 5           # ...at least this many for a finding

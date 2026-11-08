@@ -1,0 +1,86 @@
+id: "field-09-ask-recipient-idle"
+incident: null
+title: "An agent's question to another agent waits while the other agent is idle"
+description: >
+  A developer asked the architect in a task comment which schema version a migration should
+  target, then carried on with other parts of the task. Nobody told the architect, who
+  finished its own run and sat idle; the question waited three hours until a person
+  noticed. Kelpie reminds once per escalation step, and only while the recipient is idle.
+  A question the recipient already answered, and one answered on another task naming the
+  asker, need nothing.
+rule: unanswered_asks
+config:
+  steps: ["1h", "4h", "12h", "24h"]
+  stop_after: "3d"
+snapshot:
+  now: "2026-03-02T15:00:00+00:00"
+  owners:
+    - {id: agent-dev-1, role: developer}
+    - {id: agent-dev-2, role: developer}
+    - {id: architect-1, role: architect}
+    - {id: human-owner, role: owner, kind: human}
+  tasks:
+    # Unanswered for 3h, the architect is idle: one reminder, of step 1 (1h passed, 4h not).
+    - id: T-901
+      title: "Migrate the orders table"
+      status: in_progress
+      status_since: "2026-03-02T11:00:00+00:00"
+      role: developer
+      owner_id: agent-dev-1
+      comments:
+        - {author: agent-dev-1, text: "@architect-1 should the migration target schema v3 or v4?", at: "2026-03-02T12:00:00+00:00"}
+        - {author: agent-dev-1, text: "Started on the indexes meanwhile.", at: "2026-03-02T12:30:00+00:00"}
+    # The architect answered on the same task: no reminder.
+    - id: T-902
+      title: "Add the audit log"
+      status: in_progress
+      status_since: "2026-03-02T10:00:00+00:00"
+      role: developer
+      owner_id: agent-dev-2
+      comments:
+        - {author: agent-dev-2, text: "@architect-1 one table per service or a shared one?", at: "2026-03-02T10:30:00+00:00"}
+        - {author: architect-1, text: "One per service.", at: "2026-03-02T11:15:00+00:00"}
+    # Answered on the architect's own task, naming the asker: no reminder.
+    - id: T-903
+      title: "Cache the price lookups"
+      status: review
+      status_since: "2026-03-02T12:00:00+00:00"
+      role: developer
+      owner_id: agent-dev-2
+      comments:
+        - {author: agent-dev-2, text: "@architect-1 is a 5 minute TTL acceptable?", at: "2026-03-02T11:00:00+00:00"}
+    - id: T-904
+      title: "Service boundaries note"
+      status: in_progress
+      status_since: "2026-03-02T09:00:00+00:00"
+      role: architect
+      owner_id: architect-1
+      comments:
+        - {author: architect-1, text: "@agent-dev-2 yes, 5 minutes is fine for prices.", at: "2026-03-02T11:40:00+00:00"}
+    # A question with no mention of an agent is no ask.
+    - id: T-905
+      title: "Tidy the fixtures"
+      status: in_progress
+      status_since: "2026-03-02T09:00:00+00:00"
+      role: developer
+      owner_id: agent-dev-2
+      comments:
+        - {author: agent-dev-2, text: "Does anyone still use the old fixtures?", at: "2026-03-02T10:00:00+00:00"}
+  sessions:
+    # The architect's last run ended at 13:00: idle since.
+    - {id: S-904, task_id: T-904, owner_id: architect-1, started_at: "2026-03-02T11:30:00+00:00", ended_at: "2026-03-02T13:00:00+00:00"}
+expected_actions:
+  - kind: alert
+    task_id: T-901
+    severity: info
+    reason_contains: "schema v3 or v4"
+    params: {asker: agent-dev-1, recipient: architect-1, delivery: unknown, recipient_state: idle, step: 1, open_hours: 3.0}
+not_expected_actions:
+  - kind: alert
+    task_id: T-902
+  - kind: alert
+    task_id: T-903
+  - kind: alert
+    task_id: T-904
+  - kind: alert
+    task_id: T-905

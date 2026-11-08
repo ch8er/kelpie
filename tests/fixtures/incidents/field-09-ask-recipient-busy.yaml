@@ -1,0 +1,87 @@
+id: "field-09-ask-recipient-busy"
+incident: null
+title: "A recipient mid-run is not interrupted; blocks and people stay with their rules"
+description: >
+  The same unanswered question, but the architect is in the middle of a run: Kelpie does not
+  remind it until it is between runs. A developer that blocked its task on the question is
+  rule 4's (the block is announced there), a question to a person is rule 13's, and a
+  question asked 40 minutes ago is not overdue yet. Only the question to the idle reviewer,
+  asked 5 hours ago, gets a reminder (step 2).
+rule: unanswered_asks
+config:
+  steps: ["1h", "4h", "12h", "24h"]
+  stop_after: "3d"
+  session_stale_after: "30m"
+snapshot:
+  now: "2026-03-02T15:00:00+00:00"
+  owners:
+    - {id: agent-dev-1, role: developer}
+    - {id: agent-dev-2, role: developer}
+    - {id: architect-1, role: architect}
+    - {id: reviewer-1, role: reviewer}
+    - {id: human-owner, role: owner, kind: human}
+  tasks:
+    # The architect is busy (live session): no reminder.
+    - id: T-911
+      title: "Migrate the orders table"
+      status: in_progress
+      status_since: "2026-03-02T11:00:00+00:00"
+      role: developer
+      owner_id: agent-dev-1
+      comments:
+        - {author: agent-dev-1, text: "@architect-1 should the migration target schema v3 or v4?", at: "2026-03-02T12:00:00+00:00"}
+    # Blocked on the question: rule 4 announces the block, not this rule.
+    - id: T-912
+      title: "Split the billing service"
+      status: blocked
+      status_since: "2026-03-02T09:30:00+00:00"
+      role: developer
+      owner_id: agent-dev-2
+      block: {reason: "waiting for @reviewer-1 to confirm the API split", since: "2026-03-02T09:30:00+00:00"}
+      comments:
+        - {author: agent-dev-2, text: "@reviewer-1 can the API split land in two PRs?", at: "2026-03-02T09:20:00+00:00"}
+    # A question to a person: rule 13's.
+    - id: T-913
+      title: "Pick the release date"
+      status: in_progress
+      status_since: "2026-03-02T09:00:00+00:00"
+      role: developer
+      owner_id: agent-dev-2
+      comments:
+        - {author: agent-dev-2, text: "@human-owner is Friday fine for the release?", at: "2026-03-02T09:10:00+00:00"}
+    # Asked 40 minutes ago: below the first step.
+    - id: T-914
+      title: "Rename the queue metrics"
+      status: in_progress
+      status_since: "2026-03-02T13:00:00+00:00"
+      role: developer
+      owner_id: agent-dev-2
+      comments:
+        - {author: agent-dev-2, text: "@reviewer-1 is queue_depth a better name?", at: "2026-03-02T14:20:00+00:00"}
+    # Asked 5 hours ago, the reviewer is idle: step 2.
+    - id: T-915
+      title: "Retry the webhook deliveries"
+      status: review
+      status_since: "2026-03-02T09:00:00+00:00"
+      role: developer
+      owner_id: agent-dev-1
+      comments:
+        - {author: agent-dev-1, text: "@Reviewer-1 do you want the backoff capped at 10 minutes?", at: "2026-03-02T10:00:00+00:00"}
+  sessions:
+    - {id: S-901, task_id: T-920, owner_id: architect-1, started_at: "2026-03-02T13:30:00+00:00", last_heartbeat: "2026-03-02T14:55:00+00:00"}
+    # The reviewer read T-915 after the question (delivery seen) and has been idle since 12:00.
+    - {id: S-902, task_id: T-915, owner_id: reviewer-1, started_at: "2026-03-02T11:00:00+00:00", ended_at: "2026-03-02T12:00:00+00:00"}
+expected_actions:
+  - kind: alert
+    task_id: T-915
+    severity: warning
+    params: {asker: agent-dev-1, recipient: reviewer-1, delivery: seen, step: 2, open_hours: 5.0}
+not_expected_actions:
+  - kind: alert
+    task_id: T-911
+  - kind: alert
+    task_id: T-912
+  - kind: alert
+    task_id: T-913
+  - kind: alert
+    task_id: T-914

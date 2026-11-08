@@ -1172,6 +1172,20 @@ labels: P1, area:core
 - [ ] A throughput spike right after a fix that unblocked a queue is named as a backlog release, and the next full day is preferred for the comparison
 - [ ] Toolchain version (e.g. Xcode / CoreSimulator, read through the textfile collector as config data) recorded per host; an outage that starts when it changes names the change as the likely cause (incident 20)
 
+### rules: unanswered asks — a question to a person or another agent is an obligation until answered
+labels: P1, area:rules
+Issue #297. Agents ask each other in task comments and carry on; nothing reminds the other
+agent. Rule `unanswered_asks` keeps an agent's `@question` to another agent open until it is
+answered. Questions to people stay rule 13's (blocks with approval reasons).
+
+**Acceptance criteria**
+- [x] An ask (task → another agent) from task comments: who asked, whom, since when, answered or not (`open_asks`)
+- [x] Reminder only while the recipient is idle (no live session), at most once per escalation step; a snooze on the asking task holds it
+- [x] Delivery not confirmed is `unknown`, never assumed failed or resent
+- [x] Fixtures: answered (no alert), unanswered with the recipient busy (no reminder), idle (one reminder), snoozed (silent until the date)
+- [ ] The daily report counts agent-hours spent on unanswered asks, by recipient
+- [ ] Asks from block reasons (blocked tasks stay rule 4's today) and comment asks to people (rule 13 reads blocks only)
+
 ### docs: reconcile the roadmap with what is merged
 labels: P1, documentation
 Many items here were finished by parallel sessions without ticking their criteria, so the

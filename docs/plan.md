@@ -107,6 +107,7 @@ Spend becomes a metric Kelpie watches, not a number someone checks in a billing 
 - Rule 1, extended: "done" requires evidence (test output, green CI or a live check); track the reopened-after-done rate (2)
 - Rule 13. "Needs you" inbox: everything waiting for a human across platforms, sorted by cost of delay; detects agents waiting for approval longer than N minutes (13)
 - Rule 9, extended: turn the wasted-build statistics into a proposed PR with a better CI configuration (5)
+- Unanswered asks (#297): an agent's question to another agent is an obligation until answered; remind only while the recipient is idle, once per escalation step, snoozable; questions to people stay rule 13's
 
 ### P2. Rules backlog — on signal
 
