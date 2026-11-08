@@ -1,10 +1,11 @@
-"""The two places Kelpie acts on a farm by itself, end to end, in ``act`` mode.
+"""Where Kelpie acts on a farm by itself, end to end, in ``act`` mode.
 
 - Rule 10 (``loop_breaker``) stops a runaway Hermes run: the real adapter runs the (fake)
   ``hermes kanban block`` command pinned to that run, and the board shows the task blocked
   for a human with the run ended.
 - Rule 9 (``ci_economy``) cancels a superseded CI build through the GitHub connector: the
   fake GitHub receives the cancel for that run and nothing else.
+- Rule 4 (``stale_blocks``) clears a block whose PR merged with ``hermes kanban unblock``.
 """
 
 from __future__ import annotations
@@ -305,3 +306,41 @@ def test_a_cancel_is_announced_as_done(farm: Farm) -> None:
         f"Kelpie did: Cancelled build {REPO}:{builds.old.id} "
         f"(superseded by {REPO}:{builds.new.id})."
     )
+
+
+# --- rule 4 clears a stale block through the Hermes CLI -----------------------------------
+
+
+def test_stale_block_is_cleared_through_the_hermes_cli(farm: Farm) -> None:
+    """Incident 15 in act mode: the PR merged, so Kelpie runs ``hermes kanban unblock`` for
+    that task only; the block still waiting on an open PR stays."""
+    gh = farm.github
+    gh.pull(REPO, 57, merged_at=farm.ago(minutes=25), state="closed")
+    gh.pull(REPO, 58)
+    b = farm.board
+    for task_id, pr in (("t_merged", 57), ("t_open", 58)):
+        b.task(task_id, "todo", farm.ago(hours=4), title=f"Review {task_id}", assignee="dev")
+        b.claim(task_id, "dev", farm.ago(hours=3))
+        b.block(task_id, f"waiting for merge of #{pr}", farm.ago(hours=1))
+    config = farm.config(
+        {"stale_blocks": ACT},
+        github=True,
+        extra={
+            "block_conditions": [
+                {"pattern": r"waiting for merge of (?P<pr>\S+)", "kind": "pr_merged", "repo": REPO}
+            ]
+        },
+    )
+    kelpie = farm.serve(config)
+    wait_for("t_merged unblocked", lambda: b.get("t_merged").status == "ready", timeout=30)
+    kelpie.wait_ticks(3)  # cleared once, not again
+    farm.stop()
+
+    calls = farm.hermes_calls()
+    assert [c["argv"][-2:] for c in calls] == [["--", "t_merged"]]
+    (call,) = calls
+    assert call["code"] == 0 and call["argv"][:2] == ["kanban", "unblock"]
+    assert call["task"] is None  # unblock is orchestrator-only: never pinned to a run
+    assert b.get("t_open").status == "blocked"
+    assert b.comments("t_merged")[-1].startswith("UNBLOCK: The block 'waiting for merge of #57'")
+    assert b.comment_authors("t_merged")[-1] == "kelpie"

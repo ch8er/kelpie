@@ -75,30 +75,32 @@ def test_every_act_advice_starts(
 def test_a_refused_rule_is_never_advised_and_kelpie_says_why(tmp_path: Path) -> None:
     settings = load_settings(config(tmp_path, "hermes"))
     blockers = act_blockers(settings, build_adapters(settings))
-    assert blockers["orphan_status"].refused
-    acting = '[engine]\ndry_run = false\n[engine.rules.orphan_status]\nmode = "act"\n'
-    with pytest.raises(ConfigError, match="Hermes can't close tasks or reassign tasks yet"):
+    assert blockers["exit_contract"].refused
+    acting = '[engine]\ndry_run = false\n[engine.rules.exit_contract]\nmode = "act"\n'
+    with pytest.raises(ConfigError, match="Hermes requeues only tasks Kelpie parked"):
         build_app(load_settings(config(tmp_path, "hermes", acting)))
     report = build_report(
         day_inputs(
             actions=[
                 entry(
                     at(9),
-                    "orphan_status",
-                    sorted(FIXERS["orphan_status"].effects & FIX_KINDS)[0],
+                    "exit_contract",
+                    sorted(FIXERS["exit_contract"].effects & FIX_KINDS)[0],
                     Outcome.SUGGESTED,
                     "T-1",
                     Mode.SUGGEST,
                 )
             ],
-            states=[opened("orphan_status:T-1", "orphan_status", at(8), at(8), at(12))],
-            modes={"orphan_status": Mode.SUGGEST},
-            act_blockers={"orphan_status": blockers["orphan_status"].reason},
+            states=[opened("exit_contract:T-1", "exit_contract", at(8), at(8), at(12))],
+            modes={"exit_contract": Mode.SUGGEST},
+            act_blockers={"exit_contract": blockers["exit_contract"].reason},
         )
     )
-    (advice,) = [a for a in report.recommendations if a.title == "Reduce ownerless tasks"]
-    assert "let orphan_status" not in advice.detail  # no act advice in the remedy either
-    assert "act mode is not available here: Hermes can't close tasks" in advice.detail
+    titles = [a.title for a in report.recommendations]
+    assert "Let exit_contract act" not in titles
+    details = " ".join(a.detail for a in report.recommendations)
+    assert "let exit_contract" not in details  # no act advice in the remedy either
+    assert "act mode is not available here: Hermes requeues only tasks Kelpie parked" in details
 
 
 def test_a_rule_acting_on_some_adapters_is_advised_with_where_it_alerts(

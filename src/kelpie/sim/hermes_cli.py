@@ -20,8 +20,15 @@ Supported commands (anything else exits 2 and is recorded):
   no longer the task's current run; the task becomes ``blocked`` with ``block_kind`` K, its
   claim is released, the run ends with outcome ``blocked`` and a ``blocked`` event carries
   the kind and the reason.
-- ``kanban unblock <task>``: a ``blocked`` task goes back to ``ready``; an ``unblocked``
-  event is recorded.
+- ``kanban unblock [--reason R] [--] <task>``: refused with ``$HERMES_KANBAN_TASK`` set
+  (orchestrator-only); with a reason, ``UNBLOCK: <reason>`` is recorded as a comment first;
+  a ``blocked`` or ``scheduled`` task goes back to ``ready`` (Hermes resumes a task blocked
+  in review to ``review``, and lands it in ``todo`` while a parent is open; not simulated);
+  an ``unblocked`` event is recorded.
+- ``kanban assign [--] <task> <profile>``: refused while the task is ``running`` with a
+  claimed run; sets the (lowercased) assignee, records an ``assigned`` event. ``none``,
+  ``-`` and ``null`` unassign.
+- ``kanban comment [--author A] [--] <task> <text...>``: records the comment.
 
 A file ``hermes-fail`` next to the board makes every command fail (exit 1), for scenarios
 where Hermes refuses. With a clock file (:func:`install`), times written to the board come
@@ -164,31 +171,113 @@ def _block(args: Sequence[str]) -> None:
         conn.close()
 
 
+def _options(args: Sequence[str], names: Sequence[str]) -> tuple[dict[str, str], list[str]]:
+    """``--name V``, ``--name=V`` options anywhere (``--`` ends them) and the positionals."""
+    found: dict[str, str] = {}
+    positional: list[str] = []
+    rest = list(args)
+    while rest:
+        arg = rest.pop(0)
+        if arg == "--":
+            positional += rest
+            break
+        name, eq, value = arg.partition("=")
+        if name in names:
+            if not eq:
+                if not rest:
+                    raise Refused(f"{name} needs a value")
+                value = rest.pop(0)
+            found[name] = value
+        elif arg.startswith("--"):
+            raise Refused(f"unknown option {arg}")
+        else:
+            positional.append(arg)
+    return found, positional
+
+
 def _unblock(args: Sequence[str]) -> None:
-    if len(args) != 1:
-        raise Refused("usage: hermes kanban unblock <task>")
-    (task_id,) = args
+    if os.environ.get(TASK_ENV):
+        raise Refused("kanban unblock is orchestrator-only")
+    found, positional = _options(args, ("--reason",))
+    if len(positional) != 1:
+        raise Refused("usage: hermes kanban unblock [--reason R] <task>")
+    (task_id,) = positional
+    reason = found.get("--reason", "").strip()
+    now = int(_now())
     conn = _db()
     try:
+        if reason:
+            conn.execute(
+                "INSERT INTO task_comments (task_id, author, body, created_at) VALUES (?, ?, ?, ?)",
+                (task_id, _author(), f"UNBLOCK: {reason}", now),
+            )
         conn.execute("BEGIN IMMEDIATE")
         row = conn.execute("SELECT status FROM tasks WHERE id = ?", (task_id,)).fetchone()
         if row is None:
             raise Refused(f"no such task: {task_id}")
-        if row["status"] != "blocked":
-            raise Refused(f"task {task_id} is {row['status']}, not blocked")
+        if row["status"] not in ("blocked", "scheduled"):
+            raise Refused(f"task {task_id} is {row['status']}, not blocked or scheduled")
         conn.execute(
-            "UPDATE tasks SET status = 'ready', block_kind = NULL WHERE id = ?", (task_id,)
+            "UPDATE tasks SET status = 'ready', current_run_id = NULL WHERE id = ?", (task_id,)
         )
         conn.execute(
             "INSERT INTO task_events (task_id, kind, payload, created_at)"
             " VALUES (?, 'unblocked', NULL, ?)",
-            (task_id, int(_now())),
+            (task_id, now),
         )
         conn.execute("COMMIT")
     except BaseException:
         if conn.in_transaction:
             conn.execute("ROLLBACK")
         raise
+    finally:
+        conn.close()
+
+
+def _assign(args: Sequence[str]) -> None:
+    _, positional = _options(args, ())
+    if len(positional) != 2:
+        raise Refused("usage: hermes kanban assign <task> <profile>")
+    task_id, raw = positional
+    profile = None if raw.lower() in ("none", "-", "null") else raw.lower()
+    conn = _db()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT status, current_run_id, assignee FROM tasks WHERE id = ?", (task_id,)
+        ).fetchone()
+        if row is None:
+            raise Refused(f"no such task: {task_id}")
+        if row["status"] == "running" and row["current_run_id"] is not None:
+            raise Refused(f"cannot reassign {task_id}: currently running (claimed)")
+        conn.execute("UPDATE tasks SET assignee = ? WHERE id = ?", (profile, task_id))
+        conn.execute(
+            "INSERT INTO task_events (task_id, kind, payload, created_at)"
+            " VALUES (?, 'assigned', ?, ?)",
+            (task_id, json.dumps({"assignee": profile, "from": row["assignee"]}), int(_now())),
+        )
+        conn.execute("COMMIT")
+    except BaseException:
+        if conn.in_transaction:
+            conn.execute("ROLLBACK")
+        raise
+    finally:
+        conn.close()
+
+
+def _comment(args: Sequence[str]) -> None:
+    found, positional = _options(args, ("--author",))
+    if len(positional) < 2:
+        raise Refused("usage: hermes kanban comment <task> <text...>")
+    task_id, *words = positional
+    conn = _db()
+    try:
+        if conn.execute("SELECT 1 FROM tasks WHERE id = ?", (task_id,)).fetchone() is None:
+            raise Refused(f"no such task: {task_id}")
+        conn.execute(
+            "INSERT INTO task_comments (task_id, author, body, created_at) VALUES (?, ?, ?, ?)",
+            (task_id, found.get("--author") or _author(), " ".join(words), int(_now())),
+        )
     finally:
         conn.close()
 
@@ -203,6 +292,10 @@ def run(argv: Sequence[str]) -> int:
             _block(rest)
         case ["kanban", "unblock", *rest]:
             _unblock(rest)
+        case ["kanban", "assign", *rest]:
+            _assign(rest)
+        case ["kanban", "comment", *rest]:
+            _comment(rest)
         case _:
             print(f"hermes: unsupported command: {' '.join(argv)}", file=sys.stderr)
             return 2

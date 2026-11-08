@@ -209,6 +209,10 @@ class HermesBoards:
         board, local = self._route(task_id)
         board.unblock(local, reason)
 
+    def reassign(self, task_id: str, owner_id: str, reason: str) -> None:
+        board, local = self._route(task_id)
+        board.reassign(local, owner_id, reason)
+
     def comment(self, task_id: str, body: str) -> None:
         board, local = self._route(task_id)
         board.comment(local, body)

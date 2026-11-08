@@ -361,6 +361,10 @@ def unblock_args(task_id: str, reason: str) -> list[str]:
     return ["unblock", f"--reason={text}", "--", task_id]
 
 
+def assign_args(task_id: str, profile: str) -> list[str]:
+    return ["assign", "--", task_id, profile]
+
+
 def comment_args(task_id: str, body: str, author: str = AUTHOR) -> list[str]:
     text = clean_text(body, 4 * MAX_TEXT) or "(Kelpie: no text)"
     return ["comment", "--author", author, "--", task_id, text]

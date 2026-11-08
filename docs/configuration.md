@@ -168,8 +168,8 @@ is accepted and ignored with a warning. Rules run in the order below.
 | – | `checkpoints` | P0 | implemented | `comment`, `wip_commit` | adapter `comment`, `wip_commit` (not in Hermes yet) |
 | 1 | `exit_contract` | P0 | implemented | `requeue`, `alert`, `comment` | adapter `requeue` (not in Hermes yet), `comment` (acceptance criteria) |
 | 2 | `wait_condition` | P0 | implemented | `wake`, `comment`, `alert` | adapter `requeue` (a wake puts the task back in the ready queue), `comment` (not in Hermes yet) |
-| 3 | `orphan_status` | P0 | implemented | `alert`, `reassign` | adapter with `SupportsReassign` (not in Hermes yet) |
-| 4 | `stale_blocks` | P0 | implemented | `unblock`, `alert` | adapter `unblock` (not in Hermes yet) |
+| 3 | `orphan_status` | P0 | implemented | `alert`, `reassign` | adapter with `SupportsReassign` |
+| 4 | `stale_blocks` | P0 | implemented | `unblock`, `alert` | adapter `unblock` |
 | 5 | `ping_pong` | P0 | implemented | `escalate` | alert channel |
 | 6 | `bottlenecks` | P0 | implemented | `alert`, `escalate` | alert channel |
 | 7 | `resources` | P0 | implemented | `alert` | alert channel |

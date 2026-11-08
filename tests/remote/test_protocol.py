@@ -231,6 +231,8 @@ def test_adapters_declare_their_kinds() -> None:
         ActionKind.WAIT,
         ActionKind.REQUEUE,
         ActionKind.WAKE,
+        ActionKind.UNBLOCK,
+        ActionKind.REASSIGN,
         ActionKind.COMMENT,
     }
     assert ClaudeCodeAdapter.actions == {ActionKind.STOP}

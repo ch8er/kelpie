@@ -111,12 +111,14 @@ their actions become alerts"); such a rule can still go to `act`.
 | `dispatch_gate` | `wait`: `hermes kanban schedule` of a ready task, with its conditions in the reason (**unverified**) | `wait_condition` in `act` too, or parked tasks are never woken (Kelpie warns at startup) |
 | `wait_condition` | `wake` of a task Kelpie parked: `hermes kanban unblock` (**unverified**); `comment` (`hermes kanban comment --author kelpie`; blocks, parks and wakes are signed `kelpie` too, `[adapters.hermes] author`) | |
 | `conflict_warning` | `comment` on both tasks; with `serialize`, `wait` of the later running task pinned to its run (**unverified**) | `wait_condition` in `act` too |
+| `orphan_status` | `reassign` on Hermes: `hermes kanban assign` of a `todo`, `ready` or `review` task no run claims, then a comment saying why (**unverified**); a running task, and closing a parent, stay alerts | `[adapters.hermes]` |
+| `stale_blocks` | `unblock` on Hermes: `hermes kanban unblock` of the block the snapshot showed, never Kelpie's own stop (**unverified**) | a condition linked to the block |
 | `orphan_status` | `reassign` on GitHub Issues: the new agent assigned (or labelled, or mentioned) first, then the one holding the issue unassigned (or its label removed), with a signed note (**unverified**) | `[adapters.github_issues]` agents with the same `role`; a token with Issues: write |
 | `stale_blocks` | `unblock` on GitHub Issues: the board's blocked labels come off, with a signed note (**unverified**) | a condition linked to the block; as above |
 | `exit_contract`, `conflict_warning`, `return_causes` | `comment` on GitHub Issues: their `once` notes, the rule's text quoted inert (**unverified**) | as above |
 
-Everything else stays `observe` or `suggest`. That includes `stale_blocks`: its unblock, and
-requeue of tasks Kelpie did not park and WIP commit, are not implemented for Hermes. Kelpie
+Everything else stays `observe` or `suggest`. Requeue of tasks Kelpie did not park and WIP
+commit are not implemented for Hermes. Kelpie
 never writes a GitHub PR URL into a Hermes comment or reason: Hermes holds a ready task back
 for 24 h after one appears (a URL its worker wrote still does, also after a wake). A wake
 (`unblocked`) pages chats subscribed to the task. Parks and stops are signed with a key Kelpie
