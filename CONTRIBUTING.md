@@ -35,6 +35,11 @@ uv run coverage report --include='src/kelpie/rules/*' --fail-under=90
 
 `uv run ruff format .` and `uv run ruff check --fix .` fix most style issues automatically.
 
+`tests/property/` holds property-based tests ([Hypothesis](https://hypothesis.readthedocs.io/))
+of the parsers that read what agents send. They run 60 examples per test, the same ones on
+CI (`CI` set); `KELPIE_HYPOTHESIS=thorough uv run pytest tests/property` runs 2000 with a
+fresh seed, worth doing after a parser change.
+
 ## Invariants
 
 These are non-negotiable; reviews will block on them.

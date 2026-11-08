@@ -103,3 +103,9 @@ def test_parse_when_dst_wall_times_resolve_to_the_first() -> None:
     assert skipped.astimezone(UTC) == datetime(2026, 3, 29, 1, 30, tzinfo=UTC)
     twice = parse_when("2026-10-25T02:30", WHEN_NOW, berlin)  # 02:00-03:00 happens twice
     assert twice.astimezone(UTC) == datetime(2026, 10, 25, 0, 30, tzinfo=UTC)
+
+
+@pytest.mark.parametrize("value", [8.64e13, 10**15, "99999999999d", "9999999999999h"])
+def test_a_duration_out_of_range_is_a_value_error(value: object) -> None:
+    with pytest.raises(ValueError, match="out of range"):
+        parse_duration(value)  # type: ignore[arg-type]
