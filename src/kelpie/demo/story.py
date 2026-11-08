@@ -180,9 +180,8 @@ class Story:
                 ("suggest", "sends the message above; a person clears the block in one command."),
                 (
                     "act",
-                    "not on Hermes yet: its adapter cannot clear a block, so Kelpie refuses "
-                    "to start with stale_blocks in act mode there. Where the adapter can, "
-                    "Kelpie clears the block itself and says so.",
+                    "clears the block itself with `hermes kanban unblock` and says so; it "
+                    "clears only the block it saw, and never a stop of its own.",
                 ),
             ]
         )

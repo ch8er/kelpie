@@ -10,6 +10,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ### Added
 
+- The Hermes adapter carries out `unblock` (`hermes kanban unblock`, only the block its
+  snapshot showed, never Kelpie's own stop) and `reassign` (`hermes kanban assign` of a
+  `todo`, `ready` or `review` task no run claims, to an agent's profile, with a comment
+  saying why), and declares both. `stale_blocks` and `orphan_status` may now run in `act`
+  on Hermes (they stay in `observe` by default). The simulated Hermes CLI applies
+  `unblock --reason`, `assign` and `comment`.
 - The `[view]` listener also serves a read-only page for a phone (`GET /`, #299): today's
   cost of chaos and spend so far, then per board the open tasks by attention (needs you,
   stuck or blocked, running long past `[view] long_after`, the rest) and the open alerts.

@@ -16,7 +16,6 @@ from typing import Any
 
 import pytest
 
-from kelpie.app import ConfigError
 from kelpie.cli import main
 from kelpie.demo import run, story
 from kelpie.demo.farm import DemoFarm
@@ -220,12 +219,24 @@ def scene(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, **modes: str) -> Stor
     return tale
 
 
-def test_act_on_a_stale_block_is_refused_on_hermes(
+def test_act_on_a_stale_block_clears_it_through_the_hermes_cli(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Scene 1's act line: Kelpie will not start with stale_blocks in act mode on Hermes."""
-    with pytest.raises(ConfigError, match=r"stale_blocks"):
-        scene(tmp_path, monkeypatch, stale_blocks="act")
+    """Scene 1's act line: Kelpie clears the block itself with ``hermes kanban unblock``
+    (the person's own unblock that follows in the story is left out: nothing is left to
+    clear)."""
+    tale = scene(tmp_path, monkeypatch, stale_blocks="act")
+    monkeypatch.setattr(tale, "_hermes", lambda argv: None)
+    try:
+        tale.stale_block()
+        farm = tale.farm
+        unblocks = [c for c in farm.hermes_calls() if c["argv"][:2] == ["kanban", "unblock"]]
+        assert len(unblocks) == 1 and unblocks[0]["argv"][-2:] == ["--", "t_review"]
+        assert unblocks[0]["code"] == 0
+        done = [r for r in farm.results if r.action.rule == "stale_blocks"]
+        assert {r.outcome.value for r in done} == {"executed"}
+    finally:
+        tale.farm.close()
 
 
 @pytest.mark.parametrize("mode", ["observe", "suggest"])

@@ -4,10 +4,11 @@ Lets Kelpie watch a [Hermes](https://github.com/NousResearch/hermes-agent) farm.
 reads the Kanban board and a spool of tool calls; rules 1–4 run in `observe` (or `suggest`)
 mode. The actions implemented are `stop` (see [Stopping a run](#stopping-a-run)), `wait`
 (park a task on conditions), the wake of a task Kelpie parked, and `comment` (see
-[Parking, waking, commenting](#parking-waking-commenting)). Unblock, reassign and WIP commit
-are not, so a rule other than `loop_breaker`, `wait_condition`, `conflict_warning` and
-`dispatch_gate` in `act` mode with `dry_run = false` stops Kelpie at startup when Hermes is
-configured.
+[Parking, waking, commenting](#parking-waking-commenting)), `unblock` and `reassign` (see
+[Unblocking and reassigning](#unblocking-and-reassigning)). WIP commit is not, so a rule other
+than `loop_breaker`, `wait_condition`, `conflict_warning`, `dispatch_gate`, `stale_blocks`
+and `orphan_status` in `act` mode with `dry_run = false` stops Kelpie at startup when Hermes
+is configured (`orphan_status` closes no parent on Hermes: that stays an alert).
 
 ## Config
 
@@ -302,6 +303,35 @@ a wake, a comment) goes through one cleaner (`text.py`): GitHub PR URLs are rewr
 `owner/repo#N`, since a PR URL in a comment or reason holds a ready task back for 24 hours in
 Hermes, control and format characters are replaced by a space, and neither of Kelpie's
 markers (`kelpie-wait`, `kelpie-stop`) can appear in the text in front of Kelpie's own.
+
+## Unblocking and reassigning
+
+Rule 4 (`stale_blocks`) clears a block whose condition is met with
+`hermes kanban unblock --reason=<reason> -- <task>`: Hermes returns the task to the phase it
+was blocked in (`ready`, or `review` when it was blocked in review; `todo` while a parent is
+open) and records the reason as an `UNBLOCK:` comment signed `kelpie`. Kelpie clears only the
+block its snapshot showed: the task's latest status event and block event must be unchanged
+since, so a task blocked again for another reason is not unblocked (the rule decides again on
+the next tick), and a task that is no longer blocked is left alone. A block that carries
+Kelpie's stop marker, whether it verifies or not, waits for a person and is never cleared
+(`UnsupportedAction`: a person is told instead), and nor is a task in any other status
+(`scheduled` is a park; only Kelpie's own parks are woken, by `requeue`). Like every unblock,
+it pages chats subscribed to the task, and an agent that blocks the same task again with the
+same kind sends it to `triage` (Hermes' unblock-loop breaker).
+
+Rule 3 (`orphan_status`) hands a task nobody runs to an idle agent of its role with
+`hermes kanban assign -- <task> <profile>`, then says why in a comment signed `kelpie`. Only a
+`todo`, `ready` or `review` task that no run claims, with the status and run Kelpie's snapshot
+showed, and only to a profile name (lowercased, as Hermes stores it) that is not one of
+`human_owners` nor Kelpie's `author`. A running task changes hands on Hermes only by reclaiming
+its run (`hermes kanban reassign --reclaim`), which ends its worker: Kelpie leaves that to a
+person (`UnsupportedAction`), as it does `triage` and `scheduled` cards. Assigning the task to
+its current assignee is a no-op. Hermes resets the task's failure streak when the assignee
+changes. A failed comment does not undo the assignment.
+
+Both were read from the Hermes sources (`hermes_cli/kanban.py` `_cmd_unblock` and
+`_cmd_assign`, `kanban_db.py` `unblock_task` and `assign_task`) and are tested against the
+simulated Hermes CLI (`kelpie.sim.hermes_cli`); neither has run on a live farm yet.
 
 ## Hooks plugin
 

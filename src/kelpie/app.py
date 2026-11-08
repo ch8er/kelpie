@@ -2673,7 +2673,14 @@ def _open_span_store(db_path: Path | None) -> SpanStore:
 # Rules whose effects on a platform are actions the Hermes adapter carries out: stop, wait
 # (park), wake of a parked task, comment (plus alerts). Update with the adapter.
 HERMES_ACT_RULES = frozenset(
-    {"loop_breaker", "wait_condition", "conflict_warning", "dispatch_gate"}
+    {
+        "loop_breaker",
+        "wait_condition",
+        "conflict_warning",
+        "dispatch_gate",
+        "stale_blocks",
+        "orphan_status",
+    }
 )
 
 
@@ -2716,9 +2723,10 @@ def act_blockers(settings: Settings, adapters: Sequence[PlatformAdapter]) -> dic
     The daily report recommends act mode only for rules left out.
 
     On Hermes only the rules in :data:`HERMES_ACT_RULES` act (stop, park, wake of a parked
-    task, comment), and ``ci_economy`` through the CI connector when ``[connectors.github.ci]
-    allow_cancel`` or ``allow_propose`` is set. On a hub, what its agents' adapters carry out
-    is known only once they report, so a platform gap is not judged there."""
+    task, comment, unblock, reassign), and ``ci_economy`` through the CI connector when
+    ``[connectors.github.ci] allow_cancel`` or ``allow_propose`` is set. On a hub, what its
+    agents' adapters carry out is known only once they report, so a platform gap is not
+    judged there."""
     ci = settings.github.ci if settings.github is not None and settings.github.enabled else None
     ci_on = ci is not None and ci.enabled
     allowed = frozenset(
