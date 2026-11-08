@@ -94,10 +94,12 @@ from typing import Any
 from kelpie.core.actions import Action, ActionKind, Severity
 from kelpie.core.alerts import ANNOUNCES
 from kelpie.core.model import Condition, ConditionKind, Owner, OwnerKind, Snapshot, Status, Task
-from kelpie.core.serde import parse_duration
 from kelpie.rules import register
 from kelpie.rules._alerts import alert_params, count
 from kelpie.rules._chains import NOT_FOUND, BlockerGraph, behind_lookup
+from kelpie.rules._params import human as _human
+from kelpie.rules._params import positive_duration as _duration
+from kelpie.rules._params import strings as _strings
 from kelpie.rules._tasks import (
     DEFAULT_STALE_AFTER,
     HANDOFF,
@@ -768,14 +770,6 @@ def _names(ids: Sequence[str]) -> str:
     return shown + (f" and {len(ids) - _SHOWN} more" if len(ids) > _SHOWN else "")
 
 
-def _human(d: timedelta) -> str:
-    minutes = max(0, int(d.total_seconds() // 60))
-    hours, minutes = divmod(minutes, 60)
-    if hours and minutes:
-        return f"{hours}h {minutes:02d}m"
-    return f"{hours}h" if hours else f"{minutes}m"
-
-
 def _finished(task_id: str, snapshot: Snapshot) -> bool:
     """A dependency on a task off the board, or finished, is met."""
     task = snapshot.task(task_id)
@@ -806,16 +800,6 @@ def _idle_agents(snapshot: Snapshot, stale_after: timedelta) -> list[Owner]:
     return sorted(idle, key=lambda o: o.id)
 
 
-def _duration(value: Any, name: str) -> timedelta:
-    try:
-        result = parse_duration(value)
-    except (AttributeError, TypeError) as exc:
-        raise ValueError(f"{name}: invalid duration {value!r}") from exc
-    if result <= timedelta(0):
-        raise ValueError(f"{name} must be positive")
-    return result
-
-
 def _statuses(value: Any, name: str) -> tuple[Status, ...]:
     if not isinstance(value, list | tuple):
         raise ValueError(f"{name} must be a list of statuses")
@@ -823,12 +807,6 @@ def _statuses(value: Any, name: str) -> tuple[Status, ...]:
     if bad := [s for s in statuses if s.is_terminal or s in _NEVER]:
         raise ValueError(f"{name} cannot include {', '.join(bad)}")
     return statuses
-
-
-def _strings(value: Any, name: str) -> tuple[str, ...]:
-    if not isinstance(value, list | tuple) or not all(isinstance(v, str) and v for v in value):
-        raise ValueError(f"{name} must be a list of non-empty strings")
-    return tuple(value)
 
 
 def _flag(value: Any, name: str) -> bool:

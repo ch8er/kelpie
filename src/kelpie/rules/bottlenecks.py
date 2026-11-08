@@ -111,6 +111,8 @@ from kelpie.core.model import ConditionKind, OwnerKind, PullRequest, Snapshot, S
 from kelpie.core.serde import parse_duration
 from kelpie.rules import register
 from kelpie.rules._alerts import alert_params, count
+from kelpie.rules._params import human as _human
+from kelpie.rules._params import positive_int as _positive_int
 from kelpie.rules._tasks import (
     is_live,
     labels_list,
@@ -1009,20 +1011,6 @@ def _last_session(snapshot: Snapshot) -> dict[str, datetime]:
 def _names(names: Sequence[str], shown: int = 5) -> str:
     more = len(names) - shown
     return ", ".join(names[:shown]) + (f" +{more} more" if more > 0 else "")
-
-
-def _human(d: timedelta) -> str:
-    minutes = max(0, int(d.total_seconds() // 60))
-    hours, minutes = divmod(minutes, 60)
-    if hours and minutes:
-        return f"{hours}h {minutes:02d}m"
-    return f"{hours}h" if hours else f"{minutes}m"
-
-
-def _positive_int(value: Any, name: str) -> int:
-    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
-        raise ValueError(f"{name} must be a positive integer")
-    return value
 
 
 def _duration(value: Any, name: str) -> timedelta:

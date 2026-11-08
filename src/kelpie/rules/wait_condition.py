@@ -91,7 +91,6 @@ from kelpie.core.model import (
     Status,
     Task,
 )
-from kelpie.core.serde import parse_duration
 from kelpie.rules import needs_you, register
 from kelpie.rules._alerts import alert_params, check_connectors, count
 from kelpie.rules._calls import (
@@ -103,6 +102,9 @@ from kelpie.rules._calls import (
     tool_calls,
 )
 from kelpie.rules._chains import behind_lookup, behind_text
+from kelpie.rules._params import hours as _hours
+from kelpie.rules._params import positive_duration as _duration
+from kelpie.rules._params import positive_int as _positive_int
 from kelpie.rules._snoozes import checker
 from kelpie.rules._tasks import (
     DEFAULT_MAX_CONDITION_AGE,
@@ -561,28 +563,8 @@ def _snooze_target(
     return {"snooze_task": ref} if ref else {}
 
 
-def _hours(d: timedelta) -> str:
-    return f"{d.total_seconds() / 3600:.1f}h"
-
-
 def _minutes(d: timedelta) -> str:
     return f"{d.total_seconds() / 60:.0f} minutes"
-
-
-def _duration(value: Any, name: str) -> timedelta:
-    try:
-        result = parse_duration(value)
-    except (AttributeError, TypeError) as exc:
-        raise ValueError(f"{name}: invalid duration {value!r}") from exc
-    if result <= timedelta(0):
-        raise ValueError(f"{name} must be positive")
-    return result
-
-
-def _positive_int(value: Any, name: str) -> int:
-    if not isinstance(value, int) or isinstance(value, bool) or value < 1:
-        raise ValueError(f"{name} must be a positive integer")
-    return value
 
 
 @register(NAME)

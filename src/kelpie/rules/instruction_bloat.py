@@ -38,6 +38,7 @@ from kelpie.core.model import InstructionDuplicate, InstructionFile, Snapshot
 from kelpie.core.serde import parse_duration
 from kelpie.rules import register
 from kelpie.rules._alerts import alert_params, count
+from kelpie.rules._params import positive_int as _positive_int
 
 NAME = "instruction_bloat"
 MAX_PLACES = 8  # places of a copy named in a reason
@@ -216,12 +217,6 @@ def _name(path: str) -> str:
     """The last two parts of a path, for a headline (skills are all called SKILL.md)."""
     parts = path.replace("\\", "/").rstrip("/").split("/")
     return "/".join(parts[-2:])
-
-
-def _positive_int(value: Any, name: str) -> int:
-    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
-        raise ValueError(f"{name} must be a positive integer")
-    return value
 
 
 @register(NAME)
