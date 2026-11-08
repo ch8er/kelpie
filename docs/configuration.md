@@ -20,14 +20,16 @@ configure what exists.
   [bottlenecks](#6-bottlenecks), [resources](#7-resources),
   [ci_economy](#9-ci_economy), [loop_breaker](#10-loop_breaker),
   [no_progress](#11-no_progress), [conflict_warning](#12-conflict_warning),
-  [dispatch_gate](#dispatch_gate), [unanswered_asks](#unanswered_asks)
+  [return_causes](#return_causes), [dispatch_gate](#dispatch_gate),
+  [needs_you](#13-needs_you), [output_offenders](#output_offenders),
+  [instruction_bloat](#instruction_bloat), [unanswered_asks](#unanswered_asks)
 - [[storage]](#storage), [[snooze]](#snooze)
 - [[adapters.hermes]](#adaptershermes), [[adapters.claude_code]](#adaptersclaude_code),
   [[adapters.openclaw]](#adaptersopenclaw), [[adapters.github_issues]](#adaptersgithub_issues),
   [[adapters.linear]](#adapterslinear)
 - [[traces]](#traces), [[[traces.tokens]]](#tracestokens), [[[traces.forward]]](#tracesforward),
   [[traces.outputs]](#tracesoutputs)
-- [[[budgets]] and [prices]](#budgets-and-prices), [[spend]](#spend)
+- [[[budgets]] and [prices]](#budgets-and-prices), [[spend]](#spend), [[instructions]](#instructions)
 - [[resources.prometheus]](#resourcesprometheus)
 - [[connectors.github]](#connectorsgithub), [[connectors.github.ci]](#connectorsgithubci),
   [[connectors.github.pulls]](#connectorsgithubpulls), [[[block_conditions]]](#block_conditions)

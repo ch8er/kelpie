@@ -382,7 +382,10 @@ and spans in memory: cooldowns and alert states are then lost on restart, and
 `kelpie serve` creates the database and upgrades its schema on start. `kelpie status`,
 `kelpie doctor` and `kelpie report` only read it. If `kelpie status` says the database
 predates a feature, run `kelpie serve` once. Spans are pruned after `[traces] retention`
-(7 days); the ledger and alert states are not pruned. See [privacy.md](privacy.md).
+(7 days); raw ledger rows, closed alert states and observed task status transitions after
+about `[storage] retention` (30 days; the ledger is summed per day first, and each task's
+latest status is kept: [storage](configuration.md#storage)). See
+[privacy.md](privacy.md#retention).
 
 To copy a live database, use SQLite's online backup (`sqlite3 kelpie.db ".backup copy.db"`)
 rather than copying the file.

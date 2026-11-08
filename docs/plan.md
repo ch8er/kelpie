@@ -245,7 +245,7 @@ Week plans hold P0 work plus the P1 items listed in week 3 above. Every other P1
 The plan marks only multi-host and the audit as blocking the release. Several older P0 roadmap items are still open. Whether any of them should block the release is an open question for the owner:
 
 - `kelpie status` as a farm view
-- ledger retention and status history in storage
+- status history in storage for owners, blocks and conditions (ledger retention shipped in 0.1.0a3, task status transitions with #157)
 - `kelpie run-once`
 - the rest of the model gaps
 - the live-run records

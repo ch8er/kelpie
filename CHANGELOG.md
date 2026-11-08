@@ -24,6 +24,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
   which source it used. Recorded rows follow `[storage] retention` and `max_rows` (#157).
 - `scripts/bootstrap.sh` prepares a fresh checkout or cloud session for the local checks
   (uv, Python 3.12, `uv sync --frozen`) in one idempotent step; `--check` also runs them.
+- A design note in `docs/security.md` for answering an agent's question from the chat
+  (#300): threat model, guards and the rejected presses. Proposed only; nothing is
+  implemented and Telegram buttons still only snooze.
 
 ### Changed
 
@@ -31,6 +34,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
   Older Kelpie versions (0.1.0a3 and before) refuse a database once it is migrated, and
   `kelpie report` and `kelpie status` of this version ask to run `kelpie serve` once on a
   database not yet migrated (#157).
+- docs/privacy.md and docs/install.md state what `[storage] retention` prunes (raw ledger
+  rows, closed alert states, observed status transitions); they still said the ledger was
+  never pruned. The configuration reference's contents list every rule and `[instructions]`.
 
 ### Security
 
