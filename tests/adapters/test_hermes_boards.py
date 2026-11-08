@@ -126,6 +126,16 @@ def test_a_shared_spool_goes_to_the_board_of_each_line(
     assert beats == {"qr:hermes-run-1": ago(minutes=5), "sign:hermes-run-1": ago(minutes=50)}
 
 
+def test_a_shared_spool_line_dated_ahead_is_dropped(
+    boards: tuple[Board, Board], tmp_path: Path
+) -> None:
+    spool = tmp_path / "spool.jsonl"
+    spool.write_text(line("t_q1", 1, NOW + timedelta(days=30), tool_call_id="c1") + "\n")
+    snap = make(*boards, spool=spool).snapshot(NOW)
+    assert [s for s in snap.spans if s.kind.name == "TOOL"] == []
+    assert {s.id: s.last_heartbeat for s in snap.sessions}["qr:hermes-run-1"] == ago(hours=1)
+
+
 def test_a_board_that_cannot_be_read_is_unobserved(
     boards: tuple[Board, Board], tmp_path: Path
 ) -> None:

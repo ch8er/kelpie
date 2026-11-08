@@ -509,6 +509,19 @@ def test_heartbeat_is_the_latest_of_run_task_and_spool(board: Board, tmp_path: P
     assert only_session(board, spool).last_heartbeat == ago(minutes=5)
 
 
+def test_spool_line_dated_ahead_keeps_no_run_alive(board: Board, tmp_path: Path) -> None:
+    """A forged or mis-clocked line dated in the future is dropped, as the Claude Code and
+    OpenClaw adapters do; within the skew it still counts."""
+    board.task("t_1", "running", ago(days=1), assignee="dev")
+    rid = board.run("t_1", "dev", ago(hours=3), heartbeat=ago(hours=2))
+    spool = tmp_path / "spool.jsonl"
+    spool.write_text(tool_line(NOW + timedelta(days=365), run_id=str(rid)) + "\n")
+    assert only_session(board, spool).last_heartbeat == ago(hours=2)
+    assert [s for s in adapter(board, spool).snapshot(NOW).spans if s.tool] == []
+    spool.write_text(tool_line(NOW + timedelta(minutes=4), run_id=str(rid)) + "\n")
+    assert only_session(board, spool).last_heartbeat == NOW + timedelta(minutes=4)
+
+
 def test_task_heartbeat_of_another_run_does_not_count(board: Board) -> None:
     board.task("t_1", "running", ago(days=1))
     old = board.run("t_1", "dev", ago(hours=5), heartbeat=ago(hours=4))

@@ -33,7 +33,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, ClassVar
 
-from kelpie.adapters.hermes.adapter import HermesAdapter, HermesError
+from kelpie.adapters.hermes.adapter import FUTURE_SKEW, HermesAdapter, HermesError
 from kelpie.core.actions import ActionKind, ActionResult
 from kelpie.core.actlock import ActLock
 from kelpie.core.model import (
@@ -127,7 +127,7 @@ class HermesBoards:
         if now.tzinfo is None:
             raise ValueError("now must be timezone-aware")
         reader = self._spool_reader()
-        spans = reader._spans(now - reader.lookback)
+        spans = reader._spans(now - reader.lookback, now + FUTURE_SKEW)
         parts: list[Snapshot] = []
         rows: dict[str, Any] = {}
         unobserved: list[str] = []
