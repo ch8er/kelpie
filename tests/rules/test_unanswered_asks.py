@@ -33,7 +33,9 @@ OWNERS = (
 )
 
 
-def ask(text: str = "@arch-1 v3 or v4?", at: datetime = NOW - 2 * H, author: str = "dev-1"):
+def ask(
+    text: str = "@arch-1 v3 or v4?", at: datetime = NOW - 2 * H, author: str = "dev-1"
+) -> Comment:
     return Comment(author, text, at)
 
 
@@ -130,7 +132,6 @@ def test_what_is_no_ask() -> None:
 
 def test_mention_forms() -> None:
     assert len(run(task(ask("@Arch-1: v3 or v4?")))) == 1
-    assert len(run(task(ask("@host-a:arch-1 v3 or v4?")))) == 1
     prefixed = (Owner("dev-1", "developer"), Owner("host-a:arch-1", "architect"))
     [a] = run(task(ask()), owners=prefixed)
     assert a.params["recipient"] == "host-a:arch-1"
@@ -228,3 +229,30 @@ def test_one_reminder_per_step_across_ticks() -> None:
             if d.outcome is Outcome.ALERTED:
                 alerted.append(d.action.params["step"])
     assert alerted == [1, 2]
+
+
+def test_multi_host_agents_sharing_names() -> None:
+    owners = (
+        Owner("host-a:dev-1", "developer", host="host-a"),
+        Owner("host-a:arch-1", "architect", host="host-a"),
+        Owner("host-b:dev-1", "developer", host="host-b"),
+        Owner("host-b:arch-1", "architect", host="host-b"),
+    )
+    [a] = run(task(ask(), host="host-b"), owners=owners)
+    assert a.params["recipient"] == "host-b:arch-1"
+    # host-b's arch-1 answering its dev-1 does not answer host-a's question
+    answer_b = task(Comment("arch-1", "@dev-1 v4.", NOW - H), tid="T-2", host="host-b")
+    [b] = run(task(ask(), host="host-a"), answer_b, owners=owners)
+    assert b.params["recipient"] == "host-a:arch-1"
+    answer_a = task(Comment("arch-1", "@dev-1 v4.", NOW - H), tid="T-2", host="host-a")
+    assert run(task(ask(), host="host-a"), answer_a, owners=owners) == []
+    # an explicit host must be the task's own
+    assert run(task(ask("@host-b:arch-1 v3?"), host="host-a"), owners=owners) == []
+    [c] = run(task(ask("@HOST-A:arch-1 v3?"), host="host-a"), owners=owners)
+    assert c.params["recipient"] == "host-a:arch-1"
+
+
+def test_wall_clock_stop_when_the_host_slept() -> None:
+    asked = NOW - timedelta(days=6, hours=1)
+    sleep = HostSleep(asked + H, NOW - 2 * H)  # awake age: 3h
+    assert run(task(ask(at=asked)), host_sleeps=(sleep,)) == []

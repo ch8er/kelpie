@@ -2,7 +2,7 @@
 
 A person who knows a task waits on purpose snoozes it until a date (``kelpie snooze``, a
 chat reply, or, where agents record people's decisions, an ``until:`` marker in the block
-reason; :mod:`kelpie.core.snooze`). Three rules honour a snooze, and only for the alerts
+reason; :mod:`kelpie.core.snooze`). Four rules honour a snooze, and only for the alerts
 that repeat a human wait:
 
 - rule 13 (``needs_you``): a snoozed item leaves the person's digest (its state key, its
@@ -12,7 +12,9 @@ that repeat a human wait:
   dead-end, unseen-condition and stale-evidence alerts still fire: those are facts about
   the block or Kelpie's plumbing, not reminders;
 - rule 2 (``wait_condition``): no overdue alert on a waiting task whose only unmet
-  conditions are human tasks a snooze holds; a dead end still fires.
+  conditions are human tasks a snooze holds; a dead end still fires;
+- ``unanswered_asks``: no reminder about an agent's question asked on a snoozed task; once
+  the snooze ends, the next reminder due goes out and mentions it.
 
 Agent-health rules (``loop_breaker``, ``no_progress``, ``exit_contract``,
 ``orphan_status``, ...) never read snoozes. A marker snooze (``source == "marker"``) holds

@@ -816,26 +816,32 @@ split. Kelpie never edits instruction files; the rule only alerts.
 
 Issue #297: a question one agent puts to another in a task comment is an obligation until
 it is answered. An **ask** is a comment on an open task by an agent (not a person, not
-Kelpie) that mentions another agent owner as `@<owner id>` (case-insensitive; on a
-multi-host farm the id without its host prefix matches too, and the recipient must serve
-the task's machine) and contains a question mark. One obligation per task, asker and
+Kelpie) that mentions another agent owner as `@<owner id>` (case-insensitive) and contains
+a question mark; the recipient must serve the task's machine. On a multi-host farm
+`@dev-1` names the `dev-1` of the task's own machine and `@host-b:dev-1` that host's, and
+answers count only from the same machine. One obligation per task, asker and
 recipient, open from the first ask after the last answer. It is **answered** by any later
-comment of the recipient on the task, any later comment of the recipient on any task that
-mentions the asker (`@<asker>`), any later comment of a person on the task, or the task
+comment of the recipient on the task, any later comment of the recipient on any task of
+the same machine that mentions the asker (`@<asker>`), any later comment of a person on the task, or the task
 finishing. Comments come from the adapters that read them (Hermes `task_comments`).
 
 Kelpie reminds only while the recipient is **idle** (no live session: `session_stale_after`)
 and at most once per step of `steps`, measured from the ask in awake time of the task's
 host: when the recipient is idle, the reminder of the latest step the ask has passed goes
 out once, so a recipient busy across two steps gets one reminder, not two. The first step is
-`info`, later ones `warning`. Past `stop_after` the rule stops reminding about the ask.
+`info`, later ones `warning`. Past `stop_after` of awake time, or six days of wall-clock
+time (the ledger's `[engine] once_window` is 7 days), the rule stops reminding about the
+ask. A recipient whose adapter reports no sessions looks idle: its reminders follow the
+steps alone.
 `delivery` is `seen` when the recipient had a session on the asking task after the ask,
 else `unknown` (never assumed lost, never resent). A snooze on the asking task (`kelpie
 snooze`, a chat reply, an `until:` marker) holds the reminders until it ends; after that,
-the current step's reminder goes out and says the snooze expired.
+the next reminder due goes out and says the snooze expired (a step already reminded
+before the snooze is not reminded again).
 
 **No double alerts.** Questions to people are rule 13's (`needs_you`): a person is never a
-recipient, and a task blocked on a question to a person is left to the digest. Blocked
+recipient, and a task with a block that asks a person (rule 13's default
+`approval_reasons`, not a customised `[engine.rules.needs_you]`) is left to the digest. Blocked
 tasks are rule 4's or rule 13's and waiting tasks rule 2's: this rule reminds only about
 asks on tasks that are not blocked or waiting (backlog, ready, in progress, review,
 accepted). It only alerts (`asker`, `recipient`, `asked_at`, `question`, `delivery`,
@@ -902,7 +908,7 @@ agents record people's decisions, as with `[[adapters.hermes.human_decisions]]`.
 snooze is weaker than a person's: rules may only hold repeat human-wait alerts on it, never
 agent-health alerts, and list it as "from marker".
 
-**What a snooze changes.** Only the repeat reminders of a human wait, in three rules:
+**What a snooze changes.** Only the repeat reminders of a human wait, in four rules:
 
 - `needs_you` (rule 13): a snoozed item leaves the person's digest (its counts, cost and
   `waiting`) and is listed in the digest's footer instead: "Snoozed: <title> through
@@ -921,6 +927,8 @@ agent-health alerts, and list it as "from marker".
   rule 13's snooze handling decides what the person hears (see
   [2. wait_condition](#2-wait_condition)); a wait Kelpie cannot check keeps rule 2's alert
   then too.
+- `unanswered_asks`: no reminder about an agent's question asked on a snoozed task; once
+  the snooze ends, the next reminder due goes out and mentions it.
 
 Agent-health rules (`loop_breaker`, `no_progress`, `exit_contract`, `orphan_status`, ...)
 never honour a snooze. A snoozed task alerts again when its snooze ends ("Snooze ran

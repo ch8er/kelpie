@@ -8,30 +8,37 @@ reminds once the recipient is free to answer.
 
 **What is an ask.** A comment on an open task, written by an agent (not a person, not
 Kelpie: adapters leave Kelpie's own comments out), that mentions another agent of the farm
-as ``@<owner id>`` (case-insensitive; on a multi-host farm the id without its host prefix
-matches too) and contains a question mark. The recipient must be an agent owner in the
-snapshot (:class:`~kelpie.core.model.OwnerKind.AGENT`) that can serve the task's machine;
-a mention of anyone else is no ask. One obligation per task, asker and recipient: it opens
-at the first ask after the last answer, and later asks of the same pair add nothing.
+as ``@<owner id>`` (case-insensitive) and contains a question mark. The recipient must be
+an agent owner in the snapshot (:class:`~kelpie.core.model.OwnerKind.AGENT`) that serves
+the task's machine; a mention of anyone else is no ask. On a multi-host farm owner ids are
+``<host>:<id>`` and comment authors are not: ``@dev-1`` names the ``dev-1`` of the task's
+own machine, ``@host-b:dev-1`` names that host's (and is no ask unless it serves the
+task), and answers count only from the same machine. One obligation per task, asker and
+recipient: it opens at the first ask after the last answer, and later asks of the same pair
+add nothing.
 
 **What counts as an answer** (the most conservative reading, so a reminder is never sent
 for a question that was answered somewhere Kelpie can see):
 
 - any later comment by the recipient on the same task;
-- any later comment by the recipient on any task that mentions the asker (``@<asker>``);
+- any later comment by the recipient on any task of the same machine that mentions the
+  asker (``@<asker>``);
 - any later comment by a person on the same task (a person settled it, or took it over);
 - the task reaching a terminal status (done, failed, cancelled).
 
 **When it reminds.** Only while the recipient is idle: no live session of the recipient
 (:func:`~kelpie.rules._tasks.is_live`, ``session_stale_after``). A recipient that is busy
-mid-run is not interrupted; the reminder waits until it is between runs. The ask's age is
+mid-run is not interrupted; the reminder waits until it is between runs. An adapter that
+reports no sessions for the recipient makes it look idle: the reminder then goes out on
+the step's schedule alone. The ask's age is
 awake time of the task's host (a host that slept does not age it). Each of ``steps``
 (``1h``, ``4h``, ``12h``, ``24h`` by default) gives at most one reminder: when the
 recipient is idle, the reminder of the latest step the ask has passed is sent once
 (``once_per_key``, keyed by task, asker, recipient, when the ask opened and the step), so a
-recipient busy across two steps gets one reminder, not two. Past ``stop_after`` (``3d``) the
-rule stops reminding about the ask: it is old news by then, and the ledger's once-window
-must not run out under a reminder that repeats.
+recipient busy across two steps gets one reminder, not two. Past ``stop_after`` (``3d``) of
+awake time, or six days of wall-clock time, the rule stops reminding about the ask: it is
+old news by then, and the ledger's once-window (``[engine] once_window``, 7 days) must not
+run out under a reminder that repeats.
 
 **Delivery** is ``seen`` only when the recipient had a session on the asking task that
 started after the ask; otherwise ``unknown``: Kelpie cannot tell whether the recipient ever
@@ -39,13 +46,15 @@ read the comment, and never assumes the ask was lost or resends it.
 
 **Snoozes.** A snooze on the asking task (``kelpie snooze``, a chat reply, an ``until:``
 marker) holds its reminders while active; once it expired (or the work behind the task grew
-since it was snoozed) the reminder of the current step goes out, saying so.
+since it was snoozed) the next reminder due goes out and mentions the snooze (a step
+already reminded before the snooze is not reminded again).
 
 **Boundaries with other rules (no double alerts).**
 
 - Questions to *people* are rule 13's (``needs_you``): a person is never a recipient here,
-  and an asking task blocked on a question to a person (:func:`asks_a_person`, its default
-  ``approval_reasons``) is left to rule 13's digest.
+  and an asking task with a block that asks a person (:func:`asks_a_person` with rule 13's
+  default ``approval_reasons``, not a customised ``[engine.rules.needs_you]``) is left to
+  rule 13's digest.
 - A *blocked* asking task is rule 4's (``stale_blocks``) or rule 13's: one of them already
   announces the block (no condition, overdue, a dead end, or the person's digest). A
   *waiting* one is rule 2's (``wait_condition``, overdue). This rule only reminds about asks
@@ -75,7 +84,7 @@ from kelpie.core.model import Comment, Owner, OwnerKind, Snapshot, Status, Task
 from kelpie.core.serde import parse_duration
 from kelpie.rules import register
 from kelpie.rules._alerts import alert_params
-from kelpie.rules._snoozes import checker
+from kelpie.rules._snoozes import SnoozeCheck, checker
 from kelpie.rules._tasks import DEFAULT_STALE_AFTER, asks_a_person, is_live, task_awake
 
 NAME = "unanswered_asks"
@@ -87,7 +96,8 @@ DEFAULT_STEPS = (
     timedelta(hours=24),
 )
 DEFAULT_STOP_AFTER = timedelta(days=3)
-# The ledger keeps once-actions for 7 days; reminders must stop well within that.
+# The ledger keeps once-actions for 7 days (``[engine] once_window``, wall-clock); reminders
+# stop well within that, also when a sleeping host keeps the ask's awake age low.
 MAX_STOP_AFTER = timedelta(days=6)
 MAX_QUESTION = 300  # characters of the question quoted in the alert
 
@@ -102,9 +112,25 @@ def _local(name: str) -> str:
 
 
 def _mentions(text: str) -> set[str]:
-    """The names mentioned as ``@name`` (case-folded, without host prefixes and without a
-    trailing sentence dot)."""
-    return {_local(m.rstrip(".:-")) for m in _MENTION.findall(text)}
+    """The names mentioned as ``@name`` or ``@host:name`` (case-folded, without a trailing
+    sentence dot or colon)."""
+    return {m.rstrip(".:-").casefold() for m in _MENTION.findall(text)}
+
+
+def _resolve(name: str, task: Task, agents: dict[str, list[Owner]]) -> Owner | None:
+    """The agent a mention on ``task`` names: among the agents with that id (without its
+    host prefix), the first by id that serves the task's machine; ``@host:name`` must name
+    that host too (on a multi-host farm, owner ids are ``<host>:<id>``)."""
+    host, _, local = name.rpartition(":")
+    for owner in agents.get(local, ()):
+        if host and owner.id.casefold() != name and (owner.host or "").casefold() != host:
+            continue
+        if owner.serves(task):
+            return owner
+    return None
+
+
+Replies = dict[tuple[str | None, str], list[tuple[datetime, set[str]]]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -134,6 +160,8 @@ class UnansweredAsks:
             age = task_awake(task, ask.comment.at, snapshot)
             if age < self.steps[0] or age >= self.stop_after:
                 continue
+            if snapshot.now - ask.comment.at >= MAX_STOP_AFTER:
+                continue  # a host that slept a lot: the ledger's once-window is wall-clock
             if self._busy(ask.recipient, snapshot):
                 continue
             snooze = snoozed(task.id)
@@ -151,7 +179,7 @@ class UnansweredAsks:
         )
 
     def _remind(
-        self, ask: Ask, step: int, age: timedelta, snapshot: Snapshot, snooze: Any
+        self, ask: Ask, step: int, age: timedelta, snapshot: Snapshot, snooze: SnoozeCheck | None
     ) -> Action:
         task, who, asker = ask.task, ask.recipient.id, ask.asker
         asked_at = ask.comment.at
@@ -161,14 +189,14 @@ class UnansweredAsks:
         if len(question) > MAX_QUESTION:
             question = question[: MAX_QUESTION - 1] + "…"
         seen = (
-            f"{who} has had a run on the task since"
+            f"{who} has had a run on the task since the question"
             if delivery == "seen"
             else f"Kelpie cannot tell whether {who} has seen it (delivery unknown)"
         )
         again = f" Reminding again: {snooze.text()}." if snooze is not None else ""
         reason = (
-            f"{asker} asked {who} a question on task {task.id} {hours:g}h ago "
-            f"({asked_at.isoformat()}) and has no answer yet; {seen}. {who} is idle now "
+            f"{asker} asked {who} a question on task {task.id} at {asked_at.isoformat()} "
+            f"({hours:g}h of awake time ago) and has no answer yet; {seen}. {who} is idle now "
             f"(no live session), so this is a good moment to answer. Question: "
             f'"{question}".{again}'
         )
@@ -205,18 +233,20 @@ class UnansweredAsks:
 def open_asks(snapshot: Snapshot) -> list[Ask]:
     """Every unanswered ask on the board's open tasks, in task order, then by when it was
     asked. Pure; status filters and thresholds are the rule's."""
-    agents: dict[str, Owner] = {}
+    agents: dict[str, list[Owner]] = {}
     for o in sorted(snapshot.owners, key=lambda o: o.id):
         if o.kind is OwnerKind.AGENT:
-            agents.setdefault(_local(o.id), o)
+            agents.setdefault(_local(o.id), []).append(o)
     if not agents:
         return []
-    # Comments by author that mention someone: an answer to the asker anywhere.
-    replies: dict[str, list[tuple[datetime, set[str]]]] = {}
+    # Comments by (machine, author) with the names they mention: an answer to the asker
+    # anywhere on the same machine (agents of two hosts may share a name).
+    replies: Replies = {}
     for t in snapshot.tasks:
         for c in t.comments:
             if not c.human:
-                replies.setdefault(_local(c.author), []).append((c.at, _mentions(c.text)))
+                names = {_local(m) for m in _mentions(c.text)}
+                replies.setdefault((t.host, _local(c.author)), []).append((c.at, names))
     found: list[Ask] = []
     for task in snapshot.tasks:
         if task.status.is_terminal or not task.comments:
@@ -227,8 +257,8 @@ def open_asks(snapshot: Snapshot) -> list[Ask]:
 
 def _task_asks(
     task: Task,
-    agents: dict[str, Owner],
-    replies: dict[str, list[tuple[datetime, set[str]]]],
+    agents: dict[str, list[Owner]],
+    replies: Replies,
 ) -> list[Ask]:
     comments = sorted(task.comments, key=lambda c: c.at)
     pending: dict[tuple[str, str], Ask] = {}
@@ -237,29 +267,29 @@ def _task_asks(
         if c.human:
             pending.clear()  # a person spoke on the task: what was asked is theirs now
             continue
-        for pair in [p for p in pending if p[1] == author]:
+        for pair in [p for p in pending if _local(p[1]) == author]:
             del pending[pair]  # the recipient spoke on the task after the ask
         if "?" not in c.text:
             continue
         for name in sorted(_mentions(c.text)):
-            owner = agents.get(name)
-            if owner is None or name == author or not owner.serves(task):
+            owner = _resolve(name, task, agents)
+            if owner is None or _local(owner.id) == author:
                 continue
-            pending.setdefault((author, name), Ask(task, c.author.strip(), owner, c))
+            pending.setdefault((author, owner.id), Ask(task, c.author.strip(), owner, c))
     return [
         ask
         for pair, ask in sorted(pending.items(), key=lambda x: (x[1].comment.at, x[0]))
-        if not _answered_elsewhere(pair, ask.comment.at, replies)
+        if not _answered_elsewhere(task.host, pair, ask.comment.at, replies)
     ]
 
 
 def _answered_elsewhere(
-    pair: tuple[str, str],
-    asked_at: datetime,
-    replies: dict[str, list[tuple[datetime, set[str]]]],
+    host: str | None, pair: tuple[str, str], asked_at: datetime, replies: Replies
 ) -> bool:
     asker, recipient = pair
-    return any(at > asked_at and asker in names for at, names in replies.get(recipient, ()))
+    return any(
+        at > asked_at and asker in names for at, names in replies.get((host, _local(recipient)), ())
+    )
 
 
 def _delivery(ask: Ask, snapshot: Snapshot) -> str:
