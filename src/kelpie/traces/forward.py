@@ -30,6 +30,7 @@ from dataclasses import dataclass, field
 from typing import Protocol
 
 from kelpie import __version__
+from kelpie.net import DeadlineHTTPHandler, DeadlineHTTPSHandler
 
 log = logging.getLogger(__name__)
 
@@ -97,10 +98,13 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
         return None  # urllib then raises HTTPError with the 3xx code
 
 
-_OPENER = urllib.request.build_opener(_NoRedirect)
+# The handlers bound opening the connection by one deadline across all resolved addresses.
+_OPENER = urllib.request.build_opener(_NoRedirect, DeadlineHTTPHandler, DeadlineHTTPSHandler)
 # Plain http never goes through a proxy from the environment: the proxy would see the
 # headers (secrets) and the spans in clear. https may (a CONNECT tunnel).
-_DIRECT = urllib.request.build_opener(_NoRedirect, urllib.request.ProxyHandler({}))
+_DIRECT = urllib.request.build_opener(
+    _NoRedirect, urllib.request.ProxyHandler({}), DeadlineHTTPHandler, DeadlineHTTPSHandler
+)
 MAX_RESPONSE = 64 * 1024  # bytes of a collector's answer read (its body is not used)
 
 
