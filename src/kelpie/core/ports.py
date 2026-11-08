@@ -18,6 +18,7 @@ from kelpie.core.model import (
     Resource,
     Session,
     Snapshot,
+    SourceFailure,
     Status,
     Task,
     ToolchainChange,
@@ -214,6 +215,14 @@ class ResourceReader(Protocol):
     """
 
     def read(self, now: datetime) -> Sequence[Resource]: ...
+
+
+@runtime_checkable
+class ResourceHealth(Protocol):
+    """A :class:`ResourceReader` that says why its last read gave no readings: the failure
+    as of the last :meth:`ResourceReader.read`, None when it read. Must not raise."""
+
+    def failure(self) -> SourceFailure | None: ...
 
 
 @runtime_checkable

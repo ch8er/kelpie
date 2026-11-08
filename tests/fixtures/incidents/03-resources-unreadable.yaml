@@ -1,0 +1,27 @@
+id: "03-resources-unreadable"
+incident: 3
+title: "Prometheus stopped answering: the disk alerts went blind without a word"
+description: >
+  The disk filled while nobody was told, because the readings had stopped: Prometheus
+  refused Kelpie's token after a rotation, so every tick gave no host readings and rule 7
+  saw nothing to alert on. No data is not "all fine". Rule 7 must say once that the host
+  checks are blind and why, while a provider reading it still has keeps its own alerts.
+rule: resources
+config: {}
+snapshot:
+  now: "2026-03-02T14:00:00+00:00"
+  resources_failure: {cause: http_auth, since: "2026-03-02T12:40:00+00:00"}
+  resources:
+    # A disk reading from before the failure: too old to judge, never "all fine" or "full".
+    - {name: "host-a:/", kind: disk, host: host-a, used: 99, limit: 100, unit: GB,
+       at: "2026-03-02T12:39:00+00:00"}
+expected_actions:
+  - kind: alert
+    severity: warning
+    reason_contains: "cannot read host resources (http_auth) since 2026-03-02 12:40 UTC"
+    params: {cause: http_auth}
+not_expected_actions:
+  - kind: alert
+    severity: critical
+  - kind: alert
+    params: {host: host-a}

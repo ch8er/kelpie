@@ -217,7 +217,7 @@ Three weeks, three steps: the core with traces and the first adapter, the full r
 - [ ] Rules: ping-pong, role bottlenecks, environment resources, CI economy — all four act; open: holds by flag or pause and lifted in act mode, suggested concurrency per LLM provider, rule 9's fail-fast cancel in the GitHub connector, the green-main/red-PR fixture
 - [x] Rules: loop and budget breaker (10), activity without progress (11)
 - [ ] Budgets and spend: budget config, thresholds, burn-rate forecast, spend from traces, Claude Code metrics and provider cost APIs — all but two spend sources: Claude Code's OpenTelemetry metrics are not ingested, and provider cost reports check the bill but do not feed budgets
-- [ ] Resource reading via Prometheus and node_exporter for any machine: laptop, cloud VM, container — works; an unreachable Prometheus is logged and counted, not alerted
+- [x] Resource reading via Prometheus and node_exporter for any machine: laptop, cloud VM, container — works; an unreachable Prometheus is alerted once per cause
 - [ ] Condition connectors: GitHub and CI, LLM provider quotas, human tasks — all three work; no connector evaluates `quota_reset` yet, and limit hits come from provider probes, not spans
 - [ ] Run on our own farm and record every rule trigger — observe runs on the farm produced incidents 14–20 and their fixes; the recorded 24 h observe and 48 h act runs of the roadmap item were not done
 

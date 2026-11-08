@@ -439,6 +439,12 @@ heavy tasks when a host is under pressure; alerts on LLM provider quotas, limit 
 credentials. Needs readings from [[resources.prometheus]](#resourcesprometheus) and
 [[connectors.llm_quotas]](#connectorsllm_quotas).
 
+When the host resources cannot be read (Prometheus down, unreachable, refusing the token),
+one `warning` says that the host checks are blind, with the cause and since when: a lasting
+state (`resources:source`), announced once per cause (a new cause is a "changed" notice) and
+resolved when readings come back. Failed optional queries (growth, directory sizes) do not
+raise it: the other readings continue.
+
 Host thresholds (any can be `false` to turn it off; warning must be below critical):
 
 | Key | Default | Unit |

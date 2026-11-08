@@ -116,6 +116,7 @@ Fixture conventions:
 | 2 | `02-done-without-evidence.yaml` | `exit_contract` | with `done_evidence`: `requeue` T-201 (done with only a note: no tests, CI or live check); nothing for test output, green CI, a person's task or a task done two days ago |
 | 2 | `02-healthy-exit.yaml` | `exit_contract` | `requeue` only T-215 (ended an hour ago without status); nothing for a final status, an allowed reason with detail, a block on a registered condition, or an exit still inside the grace period |
 | 3 | `03-disk-full.yaml` | `resources` | `alert` critical, `{host: host-a}` |
+| 3 | `03-resources-unreadable.yaml` | `resources` | `alert` warning "cannot read host resources (http_auth)" with the cause and since when; no critical and no host alert for the old 99% disk reading |
 | 4 | `04-host-overload-heavy-queue.yaml` | `resources` | `alert` warning, `{host: host-a, max_heavy: 1}`; none for healthy host-b or light T-406 |
 | 5 | `05-ci-minutes-exhausted.yaml` | `ci_economy` | `alert` critical (CI quota exhausted), `blocked_tasks` listed; no host alert for the healthy disk |
 | 5 | `05-superseded-builds.yaml` | `ci_economy` | `cancel_build` for the superseded running cancellable build B-1 (`executor: ci`), `info` waste summary; nothing for the newest build, a superseded build that finished before its successor started, one outside the connector's cancel policy, or a manual run |

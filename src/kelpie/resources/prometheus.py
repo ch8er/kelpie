@@ -12,9 +12,11 @@ environment are never used, so a bearer token goes only to the configured URL. T
 is a deadline for the whole request, not per read (see :class:`PrometheusClient`). Failure
 messages and logs never include the token, the response body or the query string. Any
 failure yields no readings for that fetch (a rule must see no data rather than stale data),
-counts in ``kelpie_resource_read_failures_total`` and logs one warning per cause until a
-fetch succeeds again. A failed fetch is not retried before the next ``interval``, so an
-unreachable Prometheus costs at most one timeout per interval.
+counts in ``kelpie_resource_read_failures_total``, logs one warning per cause until a
+fetch succeeds again, and is reported to rule 7 (:meth:`PrometheusSource.failure`, as
+``Snapshot.resources_failure``), which alerts once per cause. A failed fetch is not
+retried before the next ``interval``, so an unreachable Prometheus costs at most one
+timeout per interval.
 """
 
 from __future__ import annotations
@@ -29,7 +31,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Protocol
 
 from kelpie import __version__, net
-from kelpie.core.model import Resource, ResourceKind, ToolchainChange
+from kelpie.core.model import Resource, ResourceKind, SourceFailure, ToolchainChange
 
 log = logging.getLogger(__name__)
 
@@ -363,6 +365,12 @@ class PrometheusSource:
         self._macs: set[str] = set()  # hosts seen running macOS: an OS does not change
         self._os_known = False  # the os query answered at least once
         self._changes: tuple[ToolchainChange, ...] = ()
+        self._failure: SourceFailure | None = None
+
+    def failure(self) -> SourceFailure | None:
+        """Why the last fetch gave no readings, and since when fetches fail; None when it
+        read (implements :class:`kelpie.core.ports.ResourceHealth`)."""
+        return self._failure
 
     def read(self, now: datetime) -> tuple[Resource, ...]:
         if self._next_at is not None and now < self._next_at:
@@ -379,6 +387,8 @@ class PrometheusSource:
                 if isinstance(caught, QueryError)
                 else QueryError("unexpected", type(caught).__name__)
             )
+            since = self._failure.since if self._failure is not None else now
+            self._failure = SourceFailure(exc.cause, since)
             if exc.cause not in self._warned:
                 self._warned.add(exc.cause)
                 log.warning(
@@ -393,6 +403,7 @@ class PrometheusSource:
             if self._warned:
                 log.info("Prometheus answers again; host resource readings resumed")
             self._warned.clear()
+            self._failure = None
             if self.observer is not None:
                 self.observer.resource_read(len(self._cached))
         return self._cached

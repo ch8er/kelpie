@@ -230,6 +230,17 @@ class ResourceKind(StrEnum):
 
 
 @dataclass(frozen=True, slots=True)
+class SourceFailure:
+    """A source of readings Kelpie could not read this tick (host resources from
+    Prometheus): ``cause`` is a short category safe to show (``http_auth``, ``unexpected``,
+    ...; never a URL, token or response body), ``since`` when its reads began failing (the
+    first failure of this run, whatever the cause since)."""
+
+    cause: str
+    since: datetime
+
+
+@dataclass(frozen=True, slots=True)
 class Resource:
     """A point-in-time reading of a host resource or an external quota.
 
@@ -905,6 +916,9 @@ class Snapshot:
     # False when spend could not be read this tick: ``budgets`` then holds the last good
     # statuses (stale), so a rule should neither resolve nor raise budget alerts on them.
     budgets_ok: bool = True
+    # Set when host resources could not be read this tick: rules then see no host readings,
+    # and rule 7 says once per cause that it is blind (None: read, or no source).
+    resources_failure: SourceFailure | None = None
     limit_hits: tuple[LimitHit, ...] = ()  # observed provider limits (budgets forecast them)
     # Toolchain version changes per host within the source's lookback (an outage that starts
     # soon after one names it as the likely cause).
