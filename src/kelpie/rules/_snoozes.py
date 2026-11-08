@@ -68,6 +68,8 @@ def behind_counter(snapshot: Snapshot) -> Callable[[str], int]:
             ref = c.params.get("task")
             if c.kind not in _TASK_REFS or not isinstance(ref, str) or not ref:
                 continue
+            if ref in c.waiters:
+                continue  # malformed: waits on one of its own waiters (as check_task_status)
             for waiter in {*c.waiters, named.get(c.id)}:
                 if waiter is not None and waiter in open_ids and waiter != ref:
                     found.setdefault(ref, set()).add(waiter)

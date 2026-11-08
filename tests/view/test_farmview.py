@@ -154,3 +154,25 @@ def test_wire_form_round_trips() -> None:
 def test_malformed_wire_form_is_refused(data: object) -> None:
     with pytest.raises(ValueError):
         from_dict(data)  # type: ignore[arg-type]
+
+
+def test_a_shared_condition_is_listed_under_each_waiter() -> None:
+    snapshot = Snapshot(
+        now=NOW,
+        tasks=(task("a:T-1", Status.WAITING, "a"), task("b:T-2", Status.WAITING, "b")),
+        conditions=(
+            Condition(
+                "c1",
+                ConditionKind.PR_MERGED,
+                "a:T-1",
+                {"repo": "example/repo", "pr": 7},
+                task_ids=("b:T-2",),
+            ),
+            Condition("c2", ConditionKind.TIME, task_ids=("b:T-2",), satisfied=True),  # met
+        ),
+    )
+    view = build_view(NOW, snapshot, [], [])
+    assert [(w.task_id, w.condition_id, w.board) for w in view.waiting] == [
+        ("a:T-1", "c1", "a"),
+        ("b:T-2", "c1", "b"),
+    ]
