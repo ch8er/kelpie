@@ -201,14 +201,13 @@ def test_ended_task_on_the_board_names_its_status_and_time() -> None:
     ]
 
 
-def test_ended_task_off_the_board_names_the_status_param_or_ended() -> None:
-    with_status = cond("C-1", task="T-102", terminal=True, status="failed")
-    assert edges_of(with_status) == [
-        Edge("waiting on task_status condition C-1", dead=DeadEnd("T-102", "ended as failed"))
-    ]
-    without = cond("C-1", task="T-102", terminal=True)
-    assert edges_of(without) == [
-        Edge("waiting on task_status condition C-1", dead=DeadEnd("T-102", "ended as ended"))
+def test_a_human_task_off_the_board_names_the_status_it_ended_in() -> None:
+    """For a human task the connector's ``status`` is the status it ended in (for a
+    ``task_status`` condition it is the wanted one, and the connector never flags a target
+    off the board as terminal, so that case is not pinned)."""
+    ended = cond("C-1", ConditionKind.HUMAN_TASK, task="T-102", terminal=True, status="failed")
+    assert edges_of(ended) == [
+        Edge("waiting on human_task condition C-1", dead=DeadEnd("T-102", "ended as failed"))
     ]
 
 
