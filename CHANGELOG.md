@@ -110,9 +110,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
   Hermes boards namespace them. `Condition.target` says what a condition waits on, typed
   (a pull request, a task or a person), read from its params. Conditions without
   `task_ids` behave as before; no adapter or connector shares one yet (a producer removes
-  a waiter from `task_ids` when it stops waiting). The farm view and the report's waits
-  still count a condition for its registering task only. `kelpie agent` may send at most
-  64 waiters per condition, checked as ids.
+  a waiter from `task_ids` when it stops waiting). The farm view (`kelpie status`, `[view]`)
+  lists a shared condition under each waiter ("waiting on conditions" counts those rows),
+  and the report's waits file each waiter under the condition's cause. `kelpie agent` may
+  send at most 64 waiters per condition, checked as ids.
 - Incident fixture `15-green-main-red-pr.yaml`: with main green and the awaited PR's head
   red, rule 4 keeps the block; a task waiting for a PR to merge stays blocked while the PR
   is open, whatever CI says.

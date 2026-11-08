@@ -4,8 +4,9 @@
 both build it here, from the same inputs, so they never disagree:
 
 - tasks per status, per board (``Task.board``; ``None`` on a farm with one board);
-- waiting conditions: every condition linked to a task that is not met yet, with its task's
-  board and status;
+- waiting on conditions: every condition that is not met yet, once per task that waits on
+  it (a shared condition is listed under each), with that task's board and status; its
+  ``registered_at`` is when the last waiter joined;
 - open alert states (``kelpie.core.states``), newest first;
 - the latest ledger entries per rule (``kelpie.core.ledger``), newest first;
 - the open tasks ordered by attention (:class:`Attention`): what needs a person, what is
@@ -37,7 +38,7 @@ from kelpie.core.transitions import StatusChange
 SCHEMA_VERSION = 1
 PER_RULE = 3  # ledger entries kept per rule
 MAX_TEXT = 500  # characters kept of any text from the board or the ledger
-MAX_ITEMS = 200  # waiting conditions, alerts and attention items kept; the rest are counted
+MAX_ITEMS = 200  # waiting rows, alerts and attention items kept; the rest are counted
 LONG_AFTER = timedelta(hours=2)  # in progress this long: "running long"
 NEEDS_YOU_RULE = "needs_you"  # rule 13: its open states are a person's to-do
 
@@ -271,20 +272,22 @@ def build_view(
             boards_of[t.id] = t.board
             status_of[t.id] = str(t.status)
         for c in snapshot.conditions:
-            if c.task_id is None or c.satisfied is True:
+            if c.satisfied is True:
                 continue
-            waiting.append(
+            # A shared condition is listed under every task that waits on it.
+            waiting.extend(
                 WaitingItem(
-                    task_id=c.task_id,
+                    task_id=waiter,
                     condition_id=c.id,
                     kind=str(c.kind),
                     satisfied=c.satisfied,
                     target=_target(c.params),
-                    task_status=status_of.get(c.task_id),
-                    board=boards_of.get(c.task_id),
+                    task_status=status_of.get(waiter),
+                    board=boards_of.get(waiter),
                     registered_at=c.registered_at,
                     checked_at=c.checked_at,
                 )
+                for waiter in c.waiters
             )
     elif stored:
         source = "stored"

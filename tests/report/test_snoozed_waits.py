@@ -323,3 +323,30 @@ def test_the_day_boundary_counts_no_hour_twice() -> None:
     # without the earlier entries the first sample of the day was back-filled: a double
     day_only = WaitCauses([], [today], snoozes=[held], dependencies=[Dependency("A-1", "H-1")])
     assert day_only.split(a1, at(0), at(2))[SNOOZED] + chaos > 2.0
+
+
+def test_a_shared_wait_on_a_snoozed_human_task_holds_every_waiter() -> None:
+    human = Task("H-1", "Sign the contract", Status.READY, at(0, 15), role="owner", owner_id="ceo")
+    waiters = [
+        Task(t, "Integrate", Status.WAITING, at(0, 18), role="developer", owner_id="agent-dev-1")
+        for t in ("W3", "W4")
+    ]
+    cond = Condition("C-3", ConditionKind.HUMAN_TASK, "W3", {"task": "H-1"}, False,
+                     task_ids=("W4",))  # fmt: skip
+    until = datetime(2026, 10, 25, 9, tzinfo=UTC)
+    r = report(tasks=(human, *waiters), conditions=(cond,), snoozes=(snooze("H-1", at(6), until),))
+    assert r.snoozed is not None and r.snoozed.held == {"H-1": ("W3", "W4")}
+
+
+def test_every_waiter_of_a_shared_condition_gets_its_cause() -> None:
+    w3, w4 = (Task(t, "w", Status.WAITING, at(0)) for t in ("W3", "W4"))
+    shared = Condition("C", ConditionKind.PR_MERGED, "W3", {"repo": "example/repo", "pr": 7},
+                       False, task_ids=("W4",))  # fmt: skip
+    outage = OutageSpan(at(4), at(12), repos=frozenset({"example/repo"}))
+    causes = WaitCauses([shared], [], (), (), [outage], [snooze("W4", at(8), at(16))])
+    assert causes(w3) == causes(w4) == "merge"
+    # A merge wait is never snoozed, for the second waiter as for the first.
+    assert causes.split(w4, at(0), at(20)) == causes.split(w3, at(0), at(20))
+    assert "snoozed" not in causes.split(w4, at(0), at(20))
+    alone = Task("W5", "w", Status.WAITING, at(0))
+    assert causes(alone) != "merge"  # no condition of its own and no waiter of C

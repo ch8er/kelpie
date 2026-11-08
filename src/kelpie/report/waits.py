@@ -453,8 +453,8 @@ class WaitCauses:
         self._by_task: dict[str, list[Condition]] = {}
         for c in conditions:
             self._by_id[c.id] = c
-            if c.task_id:
-                self._by_task.setdefault(c.task_id, []).append(c)
+            for waiter in c.waiters:  # a shared condition: each task that waits on it
+                self._by_task.setdefault(waiter, []).append(c)
         # Rule 13: approvals (the agent task waits for a person's answer) and the agent
         # tasks parked on a person's human task (``waiting``); not ``items[].behind``,
         # which reaches tasks further down the chain that may wait on something else.
@@ -469,8 +469,10 @@ class WaitCauses:
         for c in conditions:
             ref = c.params.get("task")
             unmet = c.kind is ConditionKind.HUMAN_TASK and c.satisfied is not True
-            if unmet and c.task_id and isinstance(ref, str) and ref != c.task_id:
-                self._humans.setdefault(c.task_id, set()).add(ref)
+            if unmet and isinstance(ref, str) and ref:
+                for waiter in c.waiters:
+                    if ref != waiter and ref not in c.waiters:
+                        self._humans.setdefault(waiter, set()).add(ref)
         entries = sorted(entries, key=lambda e: e.at)
         for e in entries:
             if e.rule == "needs_you" and "escalate_to" in e.params:

@@ -57,7 +57,7 @@ def render(view: FarmView) -> str:
                 lines.append(f"  board {_t(board) if board else '(none)'}: {_counts(counts)}")
     else:
         lines.append(f"  tasks: {_counts(list(view.statuses))}")
-    lines += ["", f"waiting conditions: {view.waiting_total}"]
+    lines += ["", f"waiting on conditions: {view.waiting_total}"]
     for w in view.waiting:
         state = "unknown" if w.satisfied is None else "unmet"
         where = f"{_t(w.board, 40)}/" if w.board else ""
