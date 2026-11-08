@@ -12,7 +12,8 @@
 # already there (uv on PATH, a Python 3.12 that uv can find, a .venv in sync with
 # uv.lock). It never edits tracked files, never touches git and writes nothing outside
 # the checkout except uv's own install and cache directories. uv is installed, only when
-# missing, with `python3 -m pip install --user uv` and else uv's official installer.
+# missing, with `python3 -m pip install --user uv` and else uv's official installer
+# (told to leave shell profiles alone).
 # Dependencies come from uv.lock as they are (`uv sync --frozen`), as in CI.
 set -eu
 
@@ -21,7 +22,7 @@ for arg in "$@"; do
   case "$arg" in
     --check) check=1 ;;
     -h | --help)
-      sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'
+      sed -n '2,/^[^#]/s/^# \{0,1\}//p' "$0"
       exit 0
       ;;
     *)
@@ -52,15 +53,25 @@ PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
 export PATH
 if ! command -v uv >/dev/null 2>&1; then
   echo "[bootstrap] uv not found, installing it"
-  if command -v python3 >/dev/null 2>&1 &&
-    { python3 -m pip install --user --quiet uv 2>/dev/null ||
-      python3 -m pip install --user --quiet --break-system-packages uv 2>/dev/null; }; then
-    :
-  elif command -v curl >/dev/null 2>&1; then
-    curl -LsSf https://astral.sh/uv/install.sh | sh
-  else
-    echo "$0: cannot install uv: no pip and no curl; see https://docs.astral.sh/uv/" >&2
-    exit 1
+  if command -v python3 >/dev/null 2>&1; then
+    if ! python3 -m pip install --user --quiet uv; then
+      # PEP 668: a distribution Python refuses user installs without this flag.
+      echo "[bootstrap] retrying with --break-system-packages (user site only)"
+      python3 -m pip install --user --quiet --break-system-packages uv || :
+    fi
+    # pip's user scripts directory (~/Library/Python/3.X/bin on macOS, or $PYTHONUSERBASE).
+    user_base=$(python3 -m site --user-base 2>/dev/null || :)
+    [ -n "$user_base" ] && PATH="$user_base/bin:$PATH"
+  fi
+  if ! command -v uv >/dev/null 2>&1; then
+    if command -v curl >/dev/null 2>&1; then
+      echo "[bootstrap] installing uv with its official installer"
+      # UV_NO_MODIFY_PATH: leave the shell profiles alone; this script sets PATH itself.
+      curl -LsSf https://astral.sh/uv/install.sh | UV_NO_MODIFY_PATH=1 sh
+    else
+      echo "$0: cannot install uv: pip failed and there is no curl; see https://docs.astral.sh/uv/" >&2
+      exit 1
+    fi
   fi
   command -v uv >/dev/null 2>&1 || {
     echo "$0: uv was installed but is not on PATH" >&2
@@ -82,6 +93,9 @@ step "python $("$py" -c 'import platform; print(platform.python_version())')"
 # 3. Locked dependencies, runtime and dev, into .venv.
 uv sync --frozen --quiet
 step "uv sync --frozen"
+# uv run would otherwise re-lock (and rewrite uv.lock) when pyproject.toml has moved on.
+UV_FROZEN=1
+export UV_FROZEN
 
 if [ "$check" -eq 1 ]; then
   uv run ruff check . --quiet

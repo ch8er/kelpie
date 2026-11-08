@@ -15,7 +15,7 @@ skips issues whose title already exists in the repository.
 **One task — one branch, one PR.** Each issue below is sized for a single PR. If an issue
 turns out bigger, split it before starting.
 
-Already delivered by the bootstrap PR and therefore not listed: the incident fixture
+Already delivered by the initial scaffolding PR and therefore not listed: the incident fixture
 loader and harness (`tests/incidents.py`), the import-boundary check (import-linter and
 `tests/test_architecture.py`), the docker compose stack with CI (the `ci-ok` aggregator job
 is the only required check), `CLAUDE.md`, and the clean-context `reviewer` agent
