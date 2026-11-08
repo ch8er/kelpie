@@ -135,6 +135,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
   example loads on its own. `kelpie doctor`'s OTLP hint no longer points at the Hermes
   quickstart's step number. A test now loads every TOML example in the docs and parses
   every `kelpie` command they show, so a renamed key or flag fails CI.
+- Rule `unanswered_asks` takes linear time in the board's comments and sessions: on a
+  synthetic board of 5,000 tasks one evaluation went from 5.8 s to 0.12 s (#391).
 - A `KELPIE_VIEW_TOKEN` with blanks around it (a trailing newline) now matches the client's
   token instead of refusing every request (#395).
 
