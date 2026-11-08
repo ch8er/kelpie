@@ -17,8 +17,8 @@ keep less. It describes the code as it is; the files named below are the referen
 | Session owners, task labels | owner id and task id per session, labels per task | | `kelpie.db` | `[traces] retention` |
 | Instruction file sizes (optional, `[instructions]`) | per file: its path, when measured, size in bytes and characters, SHA-256, section count, whether a change only appended; in memory for one scan only, hashed word shingles per section and hashed `key: value` facts, to find copies | the files' text, headings and values | `kelpie.db`, table `instruction_sizes`: a row when a file is first measured and when its hash changes | the growth window (`[instructions] window`, 7 days) plus each file's last row before it; all rows of a file once it is no longer found |
 | Provider cost reports (optional) | per provider and UTC day: the token cost per model (Anthropic) or the day's total (OpenAI), in USD | workspaces, projects, API keys, users, line items | `kelpie.db`, table `cost_reports` | 90 days |
-| Action ledger, alert states | each action Kelpie proposed or took, with its reason text; each snooze button press with the person's Telegram user id and name | | `kelpie.db` | raw rows and closed alert states `[storage] retention` (30 days), then per-day counts per rule only; open alert states kept |
-| Observed task status transitions | task id, board, adapter, old and new status, when each was seen | titles, text | `kelpie.db`, table `task_transitions` | `[storage] retention` (30 days), plus each task's newest row before it |
+| Action ledger, alert states | each action Kelpie proposed or took, with its reason text; each snooze button press with the person's Telegram user id and name | | `kelpie.db` | raw rows and closed alert states `[storage] retention` (30 days, by whole UTC days; raw rows also beyond `max_rows`), then per day and per rule, kind and mode only counts and the first and last time, no text, kept for good; open alert states kept |
+| Observed task status transitions | task id, board, adapter, old and new status and platform status, the board's `status_since`, when each was seen; per run of `kelpie serve`, when it watched (times only) | titles, text | `kelpie.db`, tables `task_transitions` and `transition_watches` | `[storage] retention` (30 days), plus each task's newest row before it, and beyond `max_rows` (oldest first) |
 | Recorded fixes | the note, rule, command prefix and role of `kelpie fix` | | `kelpie.db` | not pruned |
 | Snoozes | task id, until, the reason (500 characters) and who set it (`--by`, default the OS user name; 100 characters) of `kelpie snooze`; for a Telegram button press, the person's Telegram name (40 characters) | | `kelpie.db`, table `snoozes` | 30 days after it expires |
 | Snooze buttons (optional) | the HMAC key, the Telegram update offset, and per button reference the alert, the task id, the item number, the message id and when it was issued and used; per alert, the id of its latest message; per message with buttons, its text and formatting as Telegram answered Kelpie (the alert as sent, then with each acknowledgement line, which names the person who pressed) and the keyboard sent | user ids | `kelpie.buttons.db` beside `kelpie.db` (mode 0600) | references, latest messages and message copies 7 days after issue or last edit; the key and offset until the file is deleted |
@@ -356,7 +356,8 @@ the same from the hook's `Skill` lines. No other argument of the call is read.
   stores a snooze whose "by" is the person's Telegram name (first and last name, else the
   username; cleaned, at most 40 characters), and a ledger entry with that name and their
   Telegram **user id**, the task and until when. These user ids stay in `kelpie.db` with
-  the ledger's raw rows, for `[storage] retention` (30 days). Presses that are refused are counted
+  the ledger's raw rows, for about `[storage] retention` (30 days; see
+  [Retention](#retention)). Presses that are refused are counted
   in metrics by reason only; Kelpie's log names the reason, and the user id of a press it
   took (snoozed, refused for a longer snooze, or failed to write). The button store (`kelpie.buttons.db`) holds no user ids. It keeps what a button
   refers to and a copy of each alert message with buttons, as Kelpie sent it and then
@@ -409,8 +410,8 @@ configured.
 | Spans | Deleted once older than `[traces] retention` (default 7 days) and beyond `max_rows` (oldest first), checked about once an hour. Spans that end before the retention are rejected on arrival. |
 | Session owners, task labels | Deleted with the same retention. |
 | Cost reports | Days older than 90 days are deleted at each read. |
-| Ledger, alert states | Raw ledger rows and closed alert states: deleted once older than `[storage] retention` (default 30 days; ledger rows also beyond `max_rows`), checked about once an hour; each pruned day is first summed per rule (counts only, no text), and the sums are kept. Open alert states: kept. |
-| Observed task status transitions | Task id, board, adapter, old and new status and their times (no text): deleted with `[storage] retention`, except each task's newest row before the cut. |
+| Ledger, alert states | Raw ledger rows and closed alert states: deleted once older than `[storage] retention` (default 30 days; ledger rows also beyond `max_rows`), checked about once an hour, by whole UTC days (a row stays up to a day more); each pruned day is first summed per rule, kind and mode (counts and the first and last time, no text), and the sums are kept. Open alert states: kept. |
+| Observed task status transitions | Task id, board, adapter, old and new status and platform status and their times (no text): deleted with `[storage] retention`, except each task's newest row before the cut, and beyond `max_rows` (oldest first, those newest rows included). Watch periods go with the retention. |
 | Snoozes | Expired ones deleted 30 days after they end. |
 | Fixes | Kept until you delete the database. |
 | Spool | Rotated at the size limit; one backup. |
