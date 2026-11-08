@@ -634,7 +634,7 @@ block (incident 10 in another form). Turn such blocks into conditions instead of
 - [x] A condition is bound to the exact target the task waits for: repo, PR number and the PR's head SHA. `ci_green` means the required checks on that head are green; green CI on `main` or on another PR never satisfies it; a new push to the PR resets it. When a task waits for a PR to land, the condition is `pr_merged`, not `ci_green` (field case: a duty agent unblocked a task because CI on `main` was green while the PR it waited for was still red)
 - [x] Unmatched blocks, and matched ones whose PR cannot be resolved, keep the current behaviour
 - [x] Fixture for a review block waiting on a merge, with a 13 h unmatched block as the true positive: `10-block-waits-on-pr-merge.yaml` (#31)
-- [ ] Fixture `15-green-main-red-pr.yaml` (main green, the awaited PR head red → the block stays); today the head binding is tested only in `tests/connectors/test_github_blocks.py`
+- [x] Fixture `15-green-main-red-pr.yaml` (main green, the awaited PR head red → the block stays; #372); the connector's head binding stays tested in `tests/connectors/test_github_blocks.py`
 
 ### connectors: LLM provider quotas and auth health
 labels: P0, week-2, area:connectors

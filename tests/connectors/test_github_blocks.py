@@ -336,6 +336,44 @@ def test_attachment_produces_the_fixture_shape() -> None:
     assert {c.id: (c.kind, c.task_id, c.registered_at) for c in out.conditions} == expected
 
 
+def test_green_main_never_satisfies_the_red_head_a_task_waits_for() -> None:
+    """Fixture 15-green-main-red-pr from the raw blocks: main green, #150's head red. The
+    conditions come out as the fixture holds them, and rule 4 clears only the green head."""
+    fixture = load(Path("tests/fixtures/incidents/15-green-main-red-pr.yaml"))
+    raw = tuple(
+        replace(t, block=replace(t.block, condition_id=None)) if t.block else t
+        for t in fixture.snapshot.tasks
+    )
+    patterns = [
+        *PATTERNS,
+        {"pattern": r"waiting for merge of (?P<pr>\S+)", "kind": "pr_merged", "repo": REPO},
+    ]
+    red, green, merge, main = "a" * 40, "b" * 40, "c" * 40, "d" * 40
+    done = {"updated_at": "2026-03-02T13:30:00Z"}
+    with serve() as gh:
+        gh.pull(REPO, 150, sha=red)
+        gh.pull(REPO, 151, sha=green)
+        gh.pull(REPO, 152, sha=merge)
+        gh.ci(REPO, red, statuses=[{"state": "failure", **done}], status_state="failure")
+        gh.ci(REPO, green, statuses=[{"state": "success", **done}])
+        gh.ci(REPO, merge, statuses=[{"state": "success", **done}])
+        gh.ci(REPO, main, statuses=[{"state": "success", **done}])  # main: green
+        connector = GitHubConnector(
+            GitHubClient(gh.url, TOKEN, clock=Clock(fixture.snapshot.now)), [REPO]
+        )
+        out = ConditionSync(connector, load_block_conditions(patterns, [REPO]))(
+            replace(fixture.snapshot, tasks=raw, conditions=())
+        )
+        assert not any(main in r.path for r in gh.requests)  # main is never asked
+    assert [t.block for t in out.tasks] == [t.block for t in fixture.snapshot.tasks]
+    want = {
+        c.id: (c.kind, c.satisfied, c.params.get("ci_state")) for c in fixture.snapshot.conditions
+    }
+    assert {c.id: (c.kind, c.satisfied, c.params.get("ci_state")) for c in out.conditions} == want
+    unblocked = {a.task_id for a in StaleBlocks().evaluate(out) if a.kind is ActionKind.UNBLOCK}
+    assert unblocked == {"T-1512"}
+
+
 # --- ready tasks (dispatch gate) ----------------------------------------------------------
 
 READY_PATTERNS = [
