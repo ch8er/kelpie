@@ -170,7 +170,7 @@ already did by itself; duplicates are merged instead of repeated.
 **Acceptance criteria**
 - [x] Alert payload carries severity, the affected tasks/hosts, the action Kelpie already took (or "dry-run: would …") and what a human should do (`AlertEvent`: severity, items with `needed` and `blocking`, `did`; a host only as the subject; #97, #135, #187, #212)
 - [x] Alerts with nothing for a human to do are not sent in real time (they go to the daily report) (info alerts, which carry nothing to do, stay out of chat by default: per-channel `min_severity`, default warning; open states are listed in the report; #47, #206)
-- [ ] Identical or overlapping alerts within a configurable window are merged into one with a count, using the action ledger's fingerprints and cooldown (no separate dedup store). Done except the count: repeats are suppressed and counted in the ledger (#5), lasting states alert on transitions (#12), per-task alerts fold under an open outage (#183, #247); the message never shows the count
+- [x] Identical or overlapping alerts within a configurable window are merged into one with a count, using the action ledger's fingerprints and cooldown (no separate dedup store): repeats are suppressed and counted in the ledger (#5), lasting states alert on transitions (#12), per-task alerts fold under an open outage (#183, #247); an alert sent again after its cooldown says how many repeats it merged ("raised 5 more times in 30 min", #365)
 - [x] Untrusted task text is escaped before it reaches any alerter (#64, #187)
 
 ### core: Slack alerter

@@ -134,6 +134,10 @@ Each rule has a mode: `mode = "observe" | "suggest" | "act"` in its
 `[engine.rules.<name>]` table, else `default_mode`. `dry_run = true` overrides every mode.
 Every action goes through the action ledger first (cooldown, rate limit, once-actions), and
 every outcome is recorded there and in `kelpie_actions_total`.
+An alert raised again within the cooldown is merged into the one already sent (the ledger
+counts it); when the cooldown is over and it is sent again, its headline line says how many
+it merged since the last send ("raised 5 more times in 30 min"). Alerts about a lasting
+condition speak only on their transitions, and never carry that count.
 
 | Action | `dry_run = true` | `observe` | `suggest` | `act` |
 | --- | --- | --- | --- | --- |

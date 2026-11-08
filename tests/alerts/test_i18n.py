@@ -94,3 +94,27 @@ def test_task_url_defaults_to_the_reports() -> None:
     assert load_alerts({}, report).rendering.task_url == report
     own = "https://board.example.org/t/{id}"
     assert load_alerts({"task_url": own}, report).rendering.task_url == own
+
+
+def test_merged_repeats_read_in_both_languages() -> None:
+    from datetime import timedelta
+
+    from kelpie.alerts.render import RenderSettings, layout
+    from kelpie.core.actions import Severity
+    from kelpie.core.alerts import AlertEvent
+
+    event = AlertEvent(
+        "r",
+        "alert",
+        "Disk is filling.",
+        Severity.WARNING,
+        repeats=1,
+        repeats_over=timedelta(minutes=45),
+    )
+    assert layout(event).transition == "raised 1 more time in 45 min"
+    ru = RenderSettings(language="ru")
+    assert layout(event, ru).transition == "повторилось 1 раз за 45 мин"
+    three = AlertEvent(
+        "r", "alert", "x.", Severity.WARNING, repeats=3, repeats_over=timedelta(hours=2)
+    )
+    assert layout(three, ru).transition == "повторилось 3 раза за 2,0 ч"

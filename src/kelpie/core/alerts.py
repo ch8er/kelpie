@@ -156,6 +156,8 @@ class AlertEvent:
     alert leaves out and lists in a footer. ``at`` is the tick that raised it (a channel
     words dates relative to it) and ``state`` the long-lived state it reports on, if any
     (the same across its escalation steps); neither is part of the fingerprint.
+    ``repeats`` counts the times the same alert was raised again since it was last sent and
+    held back by the ledger (merged into this one), over ``repeats_over``.
     """
 
     rule: str
@@ -174,6 +176,10 @@ class AlertEvent:
     # how many there are in all (None: as many as listed)
     snoozed: tuple[AlertItem, ...] = ()
     snoozed_total: int | None = None
+    # The same alert raised again since it was last sent, merged into this one by the
+    # ledger (None: none), and how long ago that last send was.
+    repeats: int | None = None
+    repeats_over: timedelta | None = None
     # Metadata, not what the alert says: left out of equality and of the fingerprint.
     at: datetime | None = field(default=None, compare=False)
     state: str | None = field(default=None, compare=False)
@@ -196,6 +202,7 @@ class AlertEvent:
             self.summary,
             tuple(item.fingerprint for item in self.snoozed),
             self.snoozed_total,
+            self.repeats,
             tuple(item.fingerprint for item in self.items),
         )
 

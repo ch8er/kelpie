@@ -4,6 +4,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
+from kelpie.alerts.render import layout
 from kelpie.core.actions import Action, ActionKind, Severity
 from kelpie.core.alerts import AlertEvent
 from kelpie.core.config import EngineConfig, Mode
@@ -550,3 +551,38 @@ def test_session_without_source_or_task_is_still_unroutable_with_two_platforms()
     )
     [result] = engine.tick(lambda: snapshot)
     assert result.outcome is Outcome.NOT_EXECUTED and a.calls == b.calls == []
+
+
+def test_a_re_sent_alert_says_how_many_repeats_it_merged() -> None:
+    alerter = FakeAlerter()
+    config = EngineConfig(dry_run=False, default_mode=Mode.ACT, cooldown=timedelta(minutes=30))
+    alert = Action(ActionKind.ALERT, "emit", "Disk is filling.", key="disk:h")
+    state = Action(ActionKind.ALERT, "emit", "Lasting.", key="s", state="emit:s")
+    engine = Engine(
+        [Emit([alert, state])], adapters=[FakeAdapter()], alerter=alerter, config=config
+    )
+    for minute in range(0, 35, 5):
+        engine.tick(lambda m=minute: Snapshot(now=NOW + timedelta(minutes=m)))
+    disk = [e for e in alerter.events if e.reason == "Disk is filling."]
+    assert [e.repeats for e in disk] == [None, 5]
+    assert disk[1].repeats_over == timedelta(minutes=30)
+    assert layout(disk[1]).transition == "raised 5 more times in 30 min"
+    # a long-lived state speaks on its transitions, never with a count
+    assert all(e.repeats is None for e in alerter.events if e.reason == "Lasting.")
+
+
+def test_merged_repeats_never_ride_on_another_message() -> None:
+    """An effect message sent in the same tick as a re-sent alert says nothing of its
+    repeats: the count is the alert's own."""
+    alerter = FakeAlerter()
+    config = EngineConfig(dry_run=False, default_mode=Mode.ACT, cooldown=timedelta(minutes=30))
+    alert = Action(ActionKind.ALERT, "emit", "Disk is filling.", key="disk:h")
+    requeue = Action(ActionKind.REQUEUE, "emit", "Back to the queue.", task_id="t1")
+    engine = Engine(
+        [Emit([alert, requeue])], adapters=[FakeAdapter()], alerter=alerter, config=config
+    )
+    for minute in range(0, 35, 5):
+        engine.tick(lambda m=minute: Snapshot(now=NOW + timedelta(minutes=m)))
+    assert [e.repeats for e in alerter.events if e.reason == "Disk is filling."] == [None, 5]
+    others = [e for e in alerter.events if e.reason != "Disk is filling."]
+    assert others and all(e.repeats is None for e in others)
