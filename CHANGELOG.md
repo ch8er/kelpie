@@ -80,6 +80,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ### Security
 
+- The multi-host hub refuses a snapshot from a `kelpie agent` that sets a required field to
+  null or a map to a list: rules read such fields unguarded and raised for the whole farm
+  (#385).
 - A Hermes, Claude Code or OpenClaw spool line, a Claude Code task file or a Hermes event
   payload nested too deep for the JSON decoder (about 10 KB of `[`) is skipped like any
   malformed line. It used to raise `RecursionError` out of the adapter, so one such line

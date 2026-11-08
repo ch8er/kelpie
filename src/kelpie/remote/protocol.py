@@ -278,18 +278,24 @@ def _checked[T](obj: T, where: str) -> T:
 
 
 def _value(tp: Any, value: Any, where: str, is_id: bool) -> Any:
-    if value is None:
-        return None
     origin = get_origin(tp)
     if origin in (Union, types.UnionType):
+        if value is None and type(None) in get_args(tp):
+            return None
         inner = [a for a in get_args(tp) if a is not type(None)]
         return _value(inner[0], value, where, is_id)
+    if value is None:  # only an optional field may be null: rules rely on the rest
+        if tp is Any:
+            return None
+        raise ProtocolError(f"{where} must not be null")
     if origin is tuple:
         if not isinstance(value, tuple):
             raise ProtocolError(f"{where} must be a list")
         (item_tp, _) = get_args(tp)
         items = [_value(item_tp, v, where, is_id) for v in value]
         return value if all(a is b for a, b in zip(items, value, strict=True)) else tuple(items)
+    if origin is dict and not isinstance(value, dict):
+        raise ProtocolError(f"{where} must be an object")
     if origin is dict or tp is Any:
         return _plain(value, where, 1)
     if origin is Mapping:
