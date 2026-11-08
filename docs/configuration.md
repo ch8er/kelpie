@@ -149,11 +149,11 @@ every outcome is recorded there and in `kelpie_actions_total`.
   session; else to the platform adapter named in its task's `source`;
   else to the only platform adapter if there is exactly one.
 - **What can act today.** The Claude Code adapter carries out `stop` only; Hermes carries out
-  `stop`, `wait`, waking a parked task and `comment`. With a Hermes adapter enabled and
-  `dry_run = false`, Kelpie refuses to start when a rule outside `HERMES_ACT_RULES` in
-  `src/kelpie/app.py` (`loop_breaker`, `wait_condition`, `conflict_warning`,
-  `dispatch_gate`) is in `act`, except `ci_economy` when `[connectors.github.ci]
-  allow_cancel` is set. The Claude Code adapter refuses the other actions with
+  `stop`, `wait`, waking a parked task, `comment`, `unblock` and `reassign`. With a Hermes
+  adapter enabled and `dry_run = false`, Kelpie refuses to start when a rule outside
+  `HERMES_ACT_RULES` in `src/kelpie/app.py` (`loop_breaker`, `wait_condition`,
+  `conflict_warning`, `dispatch_gate`, `stale_blocks`, `orphan_status`) is in `act`, except
+  `ci_economy` when `[connectors.github.ci] allow_cancel` or `allow_propose` is set. The Claude Code adapter refuses the other actions with
   `UnsupportedAction`, so on Claude Code they become "not executed" alerts. See the
   [act checklist](act-checklist.md).
 

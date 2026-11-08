@@ -423,16 +423,14 @@ snooze buttons plus the ones below, and every one of them must hold before a wri
 
 | Adapter | Comments read (with author) | `comment` | `unblock` | First version |
 | --- | --- | --- | --- | --- |
-| Hermes | yes (`task_comments`) | yes | no: the action raises `NotImplementedError` (`hermes kanban unblock` is used only to wake Kelpie's own parks) | comment only, **after** Hermes `unblock` is implemented (below) |
+| Hermes | yes (`task_comments`) | yes | yes since #367 (`hermes kanban unblock` of the block the snapshot showed, never Kelpie's own stop) | comment, then unblock |
 | GitHub Issues, Linear | no comments in the snapshot; block reason is the fixed text `label '<name>'` | yes | yes (blocked labels off) | no offers can be read: out of scope until the adapters read comments |
 | Claude Code, OpenClaw | no | refused (`UnsupportedAction`) | refused | out of scope |
 
 So the first version is Hermes only. A blocked Hermes task gets no run: a comment alone is
 not read until someone unblocks it, and rule 4 says nothing about an item rule 13 lists.
-**Prerequisite:** wire `unblock` on Hermes for a block that asks a person (the same CLI call
-the parks use, after re-checking the block), as its own reviewed PR. Without it the feature
-would only leave a note the agent cannot see; the open questions below ask whether to
-build it at all before then.
+So the unblock is what makes the answer reach the agent; Hermes carries it out since #367,
+with the adapter's own re-check of the block.
 
 ### How it builds on #297 (`unanswered_asks`)
 
@@ -587,8 +585,9 @@ numeric user id is, or the owner id `answer_users` maps it to.
 
 The comment is always the answer; the unblock lets the agent read it. It runs only after
 its comment succeeded, only if the board opted in, and only if the task is still blocked
-with the same block (re-checked by the adapter). It needs the Hermes `unblock` of the
-coverage table first.
+with the block the press referred to: the action carries that block (its `since`), and the
+adapter compares it with its own re-read before unblocking (Hermes' `unblock` re-checks
+against its latest snapshot today; the answer path needs it against the press's block).
 
 ### Rejected and replayed presses (the acceptance cases)
 
@@ -613,8 +612,7 @@ buttons have.
 
 ### Open questions for review
 
-- Build the Hermes `unblock` first (its own PR), or ship answers as comments only and
-  accept that a blocked Hermes agent does not read them until someone unblocks it?
+- Unblock by default once a board opts in to answers, or only with a second opt-in?
 - Make `answer_users` (answers only from the item's own person) required rather than
   optional?
 - Slack has no inbound channel in Kelpie. Should it get a `kelpie answer <task> <label>`

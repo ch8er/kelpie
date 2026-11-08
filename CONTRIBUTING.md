@@ -96,11 +96,11 @@ relative to the repository root, and `hermes/` and `claude_code/` stand for
 | Tasks come from | a SQLite Kanban board, opened read-only | task files in `~/.claude/tasks/<list>/` |
 | Sessions come from | the board's `task_runs` table plus a spool | a spool written by a command hook |
 | Agent-host code | `hermes/plugin.py` (a Hermes plugin) | `claude_code/hook.py` (a command hook) |
-| Actions carried out | stop, wait, wake (`requeue`), comment | stop only (a marker the hook enforces) |
+| Actions carried out | stop, wait, wake (`requeue`), comment, unblock, reassign | stop only (a marker the hook enforces) |
 | README | `hermes/README.md` | `claude_code/README.md` |
 
 Read `claude_code/` first: it is the smaller example and almost read-only (`stop` only). `hermes/` adds the write
-side (parking tasks through the platform's CLI).
+side (parking, unblocking and reassigning tasks through the platform's CLI).
 
 ### 1. Before you write code
 
