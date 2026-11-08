@@ -159,3 +159,36 @@ def test_the_report_says_which_source_it_used() -> None:
     assert "No status change Kelpie recorded decided a stage here" in unwatched
     assert "Kelpie's own record for" not in inferred
     assert "Before/after verification of fixes still infers stages" in inferred
+
+
+T = Task("T", "T", Status.REVIEW, at(15), role="developer", owner_id="dev-1")
+T_SESSION = (Session("S9", "T", "dev-1", at(14), ended_at=at(15), final_status=Status.REVIEW),)
+
+
+def _t(
+    recorded: tuple[StatusChange, ...], watched: tuple[tuple[datetime, datetime], ...]
+) -> dict[str, float]:
+    [dev] = throughput(
+        (T,), T_SESSION, OWNERS, (), START, END, history=history(recorded), watched=watched
+    )
+    return dict(dev.stages)
+
+
+def test_a_downtime_that_starts_during_the_day_is_not_filled() -> None:
+    # serve watched 03-05 only and saw T blocked: blocked 03-05, nothing known 05-14
+    blocked = (StatusChange(at(3), "T", Status.BLOCKED, at(3)),)
+    assert _t(blocked, ((at(3), at(5)),)) == pytest.approx(
+        {"waiting": 2, "working": 1, "review": 9}
+    )
+
+
+def test_a_board_not_read_before_the_next_change_is_a_gap() -> None:
+    # watched all day, but T was last seen blocked at 05:00 and next seen ready at 13:00
+    # (the board says since 12:00): blocked 03-05, unknown 05-12, ready 12-14
+    recorded = (
+        StatusChange(at(3), "T", Status.BLOCKED, at(3)),
+        StatusChange(at(13), "T", Status.READY, at(12), previous=Status.BLOCKED, after=at(5)),
+    )
+    assert _t(recorded, ((at(0), at(24)),)) == pytest.approx(
+        {"waiting": 2, "queue": 2, "working": 1, "review": 9}
+    )

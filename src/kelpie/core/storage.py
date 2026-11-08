@@ -1658,6 +1658,19 @@ def _day_of(at: str) -> date:
     return datetime.fromisoformat(at).astimezone(UTC).date()
 
 
+# The row cap of task_transitions: rows a newer row of the same task follows, oldest first;
+# then any row, oldest first (both only before the ledger's own windows).
+_CAP_OLDER = (
+    "DELETE FROM task_transitions WHERE id IN (SELECT t.id FROM task_transitions t"
+    " WHERE t.at < ? AND EXISTS (SELECT 1 FROM task_transitions n"
+    " WHERE n.task_id = t.task_id AND n.id > t.id) ORDER BY t.at, t.id LIMIT ?)"
+)
+_CAP_ANY = (
+    "DELETE FROM task_transitions WHERE id IN (SELECT id FROM task_transitions"
+    " WHERE at < ? ORDER BY at, id LIMIT ?)"
+)
+
+
 class SqliteLedgerPruner:
     """Retention of the raw action ledger and of closed alert states (#318), on a
     connection of its own: the ledger store's lock is never taken, and every write is a
@@ -1735,22 +1748,19 @@ class SqliteLedgerPruner:
         )
         floor = _ts(now - keep)
         excess = self._count_transitions() - max(0, max_rows)
-        while excess > 0 and not self._closing.is_set():
-            with self._lock:
-                if self._closing.is_set():
+        # history before a task's newest row first, then the newest rows themselves
+        for older in (_CAP_OLDER, _CAP_ANY):
+            while excess > 0 and not self._closing.is_set():
+                with self._lock:
+                    if self._closing.is_set():
+                        break
+                    with self._db:
+                        n = self._db.execute(older, (floor, min(self._batch, excess))).rowcount
+                if self._on_batch is not None and n:
+                    self._on_batch()
+                if not n:
                     break
-                with self._db:
-                    n = self._db.execute(
-                        "DELETE FROM task_transitions WHERE id IN (SELECT id FROM"
-                        " task_transitions WHERE at < ? ORDER BY id IN (SELECT MAX(id) FROM"
-                        " task_transitions GROUP BY task_id), at, id LIMIT ?)",
-                        (floor, min(self._batch, excess)),
-                    ).rowcount
-            if self._on_batch is not None and n:
-                self._on_batch()
-            if not n:
-                break
-            deleted, excess = deleted + n, excess - n
+                deleted, excess = deleted + n, excess - n
         return deleted
 
     def _count_transitions(self) -> int:

@@ -56,13 +56,13 @@ from __future__ import annotations
 from collections import Counter, defaultdict
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from itertools import pairwise
 
 from kelpie.core.model import Owner, OwnerKind, Session, Status, Task
 from kelpie.core.stages import STAGES, UNKNOWN_ROLE, rework_role, status_stage, task_roles
 from kelpie.core.states import OpenState
-from kelpie.core.transitions import StatusChange, changed_at, watching
+from kelpie.core.transitions import StatusChange, changed_at
 
 OWNERLESS_RULES = frozenset({"orphan_status"})
 WAITING_RULES = frozenset({"wait_condition", "stale_blocks"})
@@ -308,36 +308,60 @@ def state_windows(states: Iterable[OpenState]) -> StateWindows:
 @dataclass(frozen=True, slots=True)
 class Recorded:
     """A task's recorded status changes (#157), ordered by when they happened, and when
-    Kelpie's recorder watched (``(first tick, latest tick)`` per run). A record is evidence
-    only while Kelpie watched, or from the board's own ``status_since`` to the tick that
-    saw it; across a downtime the status is inferred as without a record."""
+    Kelpie's recorder watched (``(first tick, latest tick)`` per run).
+
+    A recorded status is evidence only over :meth:`intervals`: from the board's own
+    ``status_since`` to the tick that saw it, then while Kelpie watched, up to the last
+    time it saw that status (the next change's ``after``). Gaps (a downtime, a board not
+    read before the next change) are inferred as without a record."""
 
     changes: tuple[StatusChange, ...] = ()
     watched: tuple[tuple[datetime, datetime], ...] = ()
 
+    def intervals(self) -> list[tuple[datetime, datetime, Status, datetime]]:
+        """``(from, to, status, placed at)`` stretches where a record is evidence."""
+        out = []
+        for i, c in enumerate(self.changes):
+            lo = changed_at(c)
+            nxt = self.changes[i + 1] if i + 1 < len(self.changes) else None
+            stop = None if nxt is None else _seen_until(nxt)
+            if lo < c.at:  # the board's own record, up to the tick that saw it
+                out.append((lo, c.at if stop is None else min(c.at, stop), c.status, lo))
+            for a, b in self.watched:  # seen since, while Kelpie watched
+                hi = b if stop is None else min(b, stop)
+                lo_w = max(a, c.at)
+                if lo_w < hi:
+                    out.append((lo_w, hi, c.status, lo))
+        return out
+
     def status_at(self, at: datetime, after: datetime | None = None) -> Status | None:
         """The recorded status at ``at``, None when no record is evidence for it; a
         change placed before ``after`` (the last session's end) is not."""
-        seen = [c for c in self.changes if changed_at(c) <= at]
-        if not seen:
-            return None
-        c = seen[-1]
-        if after is not None and changed_at(c) < after:
-            return None
-        if changed_at(c) <= at < c.at or watching(at, self.watched):
-            return c.status
-        return None
+        found = [
+            (placed, st)
+            for lo, hi, st, placed in self.intervals()
+            if lo <= at < hi and (after is None or placed >= after)
+        ]
+        return max(found, key=lambda x: x[0])[1] if found else None
 
     def points(self, end: datetime) -> set[datetime]:
-        """Where a recorded status may start or stop being evidence, before ``end``."""
-        out = {p for c in self.changes if (p := changed_at(c)) < end}
-        out.update(c.at for c in self.changes if c.at < end)
-        if self.changes:
-            out.update(p for w in self.watched for p in w if p < end)
-        return out
+        """Where a recorded status starts or stops being evidence, before ``end``."""
+        return {p for lo, hi, _, _ in self.intervals() for p in (lo, hi) if p < end}
 
 
 NO_RECORD = Recorded()
+# A gap this short between the last sighting of the old status and the board's own time of
+# the change is a tick's uncertainty (30 s by default), not a blind spot: the old status
+# holds up to the change. A longer one (a board not read) is left to inference.
+TICK_SLACK = timedelta(minutes=5)
+
+
+def _seen_until(change: StatusChange) -> datetime:
+    """Up to when the status before ``change`` is known."""
+    at = changed_at(change)
+    if change.after is None or at - change.after <= TICK_SLACK:
+        return at
+    return change.after
 
 
 def stage_spans(
@@ -364,16 +388,18 @@ def stage_spans(
         for a, b in windows.get((task.id, kind), ()):
             points.update((a, b))
     extra = recorded.points(end)
-    # from the task's first known moment: when it was created is not known, unless a
-    # record is evidence of its status earlier
-    known = [p for p in sorted(extra) if recorded.status_at(max(p, start)) is not None]
-    first = max(start, min([*points, *known[:1]]))
+    # from the task's first known moment: when it was created is not known; a stretch
+    # before it counts only when a record is evidence for it
+    inferred_first = max(start, min(points))
+    first = max(start, min([*points, *extra]))
     cuts = sorted(p for p in points | extra | {first} if first <= p <= end)
     out = []
     for a, b in pairwise(cuts):
         stage, by_record = _stage_of(
             task, sessions, windows, a, review_roles, role_of_session, end, recorded
         )
+        if a < inferred_first and not by_record:
+            continue
         if stage is not None:
             out.append((stage, a, b))
             if by_record and used is not None:

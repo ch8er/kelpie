@@ -21,9 +21,11 @@ that saw the new one. :func:`changed_at` places the change at the board's own
 
 Each run of the recorder also keeps a *watch*: from its first tick to its latest one
 (one row per run, updated every tick). A recorded status is evidence only while Kelpie was
-watching (or, for a change, from the board's own ``status_since`` to the tick that saw
-it): across a downtime the report falls back to inference instead of carrying the last
-record forward.
+watching, up to the last time Kelpie saw that status (the next change's ``after``), or,
+for a change, from the board's own ``status_since`` to the tick that saw it: across a
+downtime, or a board not read before the next change, the report falls back to inference
+instead of carrying the last record forward. A board not read for some ticks and back with
+the same status counts as unchanged.
 
 A task missing from a snapshot (a board not read this tick, a task archived) records
 nothing: absence is not a status. Task ids are assumed unique across adapters, as
@@ -214,11 +216,6 @@ class TransitionRecorder:
         for t in snapshot.tasks:
             self._seen[t.id] = snapshot.now
         return changes
-
-
-def watching(at: datetime, watched: Sequence[tuple[datetime, datetime]]) -> bool:
-    """Whether Kelpie was recording at ``at``: within a watch (first tick to latest)."""
-    return any(a <= at <= b for a, b in watched)
 
 
 def history(changes: Iterable[StatusChange]) -> dict[str, tuple[StatusChange, ...]]:
