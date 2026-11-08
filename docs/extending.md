@@ -325,7 +325,8 @@ carry out actions outside the platform (cancel a CI build). They live in
 | `params.terminal` | `True` when it can never hold (a PR closed without merging). Rules 2 and 4 alert at once. |
 
 **Action results.** `ActionResult.DONE` (or `True`/`None`): carried out. `NOTHING_TO_DO`:
-the target no longer needs it. `REFUSED` (or `False`): not allowed by the connector's config,
+the target no longer needs it (a platform adapter raises `NothingToDo` with a note instead,
+which the ledger keeps). `REFUSED` (or `False`): not allowed by the connector's config,
 and a human is told instead. Raise on a transient failure (network, rate limit): the engine
 records a failure and the ledger retries after `[engine] retry_after`. Re-check the target
 right before a write.

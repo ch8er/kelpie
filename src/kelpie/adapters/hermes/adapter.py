@@ -16,7 +16,8 @@ a ready or running task in Hermes ``scheduled`` with its conditions), ``requeue`
 Kelpie parked) and ``comment``, see :mod:`kelpie.adapters.hermes.park`; ``unblock`` (clear a
 block the snapshot showed, never Kelpie's own stop) and ``reassign`` (``SupportsReassign``:
 hand a task that no run claims to another profile). WIP commit is not implemented yet, and
-requeue of a task Kelpie did not park is not supported.
+requeue of a task Kelpie did not park is not supported unless it is already in the queue (an
+action already in effect raises ``NothingToDo``: a ledger note, not an alert).
 
 Status mapping (task ``status`` -> :class:`~kelpie.core.model.Status`)::
 
@@ -202,7 +203,7 @@ from kelpie.core.model import (
     Status,
     Task,
 )
-from kelpie.core.ports import PlatformEvent, UnsupportedAction
+from kelpie.core.ports import NothingToDo, PlatformEvent, UnsupportedAction
 from kelpie.core.spans import UNVERIFIED_ATTRIBUTE
 from kelpie.core.tools import (
     COMMAND_COMPLETE_ATTRIBUTE,
@@ -260,6 +261,8 @@ NOT_IMPLEMENTED = (
 # changes hands only by reclaiming its run (``hermes kanban reassign --reclaim``), which ends
 # the worker: that stays a person's call.
 REASSIGN_STATUSES = ("todo", "ready", "review")
+# Hermes statuses of a task waiting in the queue: a requeue has nothing left to do.
+QUEUED = ("ready", "todo")
 # What ``hermes kanban assign`` reads as "unassign" (``_none_profile``), and the shape of a
 # profile name Kelpie hands a task to (Hermes lowercases them).
 UNASSIGN_WORDS = ("none", "-", "null")
@@ -641,6 +644,7 @@ class _ParkState:
     run: int | None  # current run id
     ours: bool  # the latest ``scheduled`` event is Kelpie's park (verified)
     woken: bool  # it has left ``scheduled`` since (unblock, or a human in the dashboard)
+    parked: frozenset[tuple[str, ConditionKind]] = frozenset()  # that park's conditions
 
 
 @dataclass(slots=True)
@@ -1747,19 +1751,30 @@ class HermesAdapter:
                 " AND kind = 'scheduled' ORDER BY created_at DESC, id DESC LIMIT 1",
                 (task_id,),
             ).fetchone()
-        ours = _park_conditions(task_id, park, self._key(), self._park_window) is not None
+        found = _park_conditions(task_id, park, self._key(), self._park_window)
         status = str(row["status"])
-        return _ParkState(status, _run_id(row["current_run_id"]), ours, status != "scheduled")
+        parked = frozenset((cid, kind) for cid, kind, _ in found or ())
+        return _ParkState(
+            status, _run_id(row["current_run_id"]), found is not None, status != "scheduled", parked
+        )
 
     def wait(self, task_id: str, conditions: Sequence[Condition], reason: str) -> None:
         """Park a ready or running task in Hermes ``scheduled`` with the conditions in the
         reason, if Hermes still shows the status and run the snapshot showed. A running task
-        is pinned to that run. Raises ``UnsupportedAction`` for any other status and
-        :class:`HermesError` when the task moved or Hermes refuses; a park Kelpie cannot
-        read back is undone."""
+        is pinned to that run. A task Kelpie already parked on these conditions (ids and
+        kinds) is :class:`NothingToDo`. Raises ``UnsupportedAction`` for any other status
+        (Hermes cannot schedule a scheduled task, so a park on other conditions is not
+        registered) and :class:`HermesError` when the task moved or Hermes refuses; a park
+        Kelpie cannot read back is undone."""
         state = self._task_state(task_id)
         if state is None:
             raise HermesError(f"unknown Hermes task: {task_id}")
+        wanted = {(c.id, c.kind) for c in conditions}
+        if state.status == "scheduled" and state.ours and wanted <= state.parked:
+            raise NothingToDo(
+                f"task {task_id} is already parked by Kelpie on "
+                + ", ".join(sorted(cid for cid, _ in wanted))
+            )
         seen = self._seen.get(task_id)
         if seen is None:  # not in the snapshot the rule saw: nothing to check against
             raise HermesError(f"task {task_id} was not in the last snapshot; not parked")
@@ -1831,15 +1846,18 @@ class HermesAdapter:
 
     def requeue(self, task_id: str, reason: str) -> None:
         """Wake a task Kelpie parked (``hermes kanban unblock``). Hermes keeps its assignee
-        and lands it in ready, or todo while a parent is open. A Kelpie park already woken
-        is left alone; anything else is not supported on Hermes (``UnsupportedAction``)."""
+        and lands it in ready, or todo while a parent is open. A Kelpie park already woken,
+        or a task already in the queue (``ready`` or ``todo`` with no run), is
+        :class:`NothingToDo`; anything else is not supported on Hermes
+        (``UnsupportedAction``: a person is told, since Kelpie cannot requeue it)."""
         state = self._task_state(task_id)
         if state is None:
             raise HermesError(f"unknown Hermes task: {task_id}")
         if state.status != "scheduled":
             if state.ours and state.woken:
-                log.info("hermes: task %s is already awake (%s)", task_id, state.status)
-                return
+                raise NothingToDo(f"task {task_id} was already woken ({state.status})")
+            if state.status in QUEUED and state.run is None:
+                raise NothingToDo(f"task {task_id} is already in the queue ({state.status})")
             raise UnsupportedAction(
                 f"Hermes task {task_id} is {state.status}, not parked by Kelpie; requeue it by hand"
             )
@@ -1858,7 +1876,8 @@ class HermesAdapter:
             )
         except HermesCliError as exc:
             if (after := self._task_state(task_id)) is not None and after.status != "scheduled":
-                return  # woken in between (by a human): nothing left to do
+                # woken in between (by a person): nothing left to do
+                raise NothingToDo(f"task {task_id} was woken meanwhile ({after.status})") from exc
             raise HermesError(str(exc)) from exc
 
     # --- unblock and reassign -------------------------------------------------------------
@@ -1909,10 +1928,7 @@ class HermesAdapter:
         seen = self._blocks.get(task_id)
         if status != "blocked":
             if seen is not None:
-                log.info(
-                    "hermes: task %s is no longer blocked (%s); nothing to do", task_id, status
-                )
-                return
+                raise NothingToDo(f"task {task_id} is no longer blocked ({status})")
             raise UnsupportedAction(f"Hermes task {task_id} is {status}, not blocked")
         if has_stop_marker(block_reason):
             raise UnsupportedAction(
@@ -1939,7 +1955,8 @@ class HermesAdapter:
             )
         except HermesCliError as exc:
             if (after := self._block_state(task_id)) is not None and after[0] != "blocked":
-                return  # unblocked in between (by a person): nothing left to do
+                # unblocked in between (by a person): nothing left to do
+                raise NothingToDo(f"task {task_id} was unblocked meanwhile ({after[0]})") from exc
             raise HermesError(str(exc)) from exc
         if (after := self._block_state(task_id)) is not None and after[0] == "blocked":
             raise HermesError(f"task {task_id} is still blocked after hermes kanban unblock")
@@ -1980,8 +1997,7 @@ class HermesAdapter:
                 + "; Kelpie reassigns only a task no run claims, reassign it by hand"
             )
         if assignee == profile:
-            log.info("hermes: task %s is already assigned to %s; nothing to do", task_id, profile)
-            return
+            raise NothingToDo(f"task {task_id} is already assigned to {profile}")
         try:
             run_kanban(
                 self.cli,

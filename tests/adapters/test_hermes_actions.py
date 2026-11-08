@@ -12,10 +12,15 @@ import pytest
 from kelpie.adapters.hermes import HermesAdapter
 from kelpie.adapters.hermes.adapter import HermesError
 from kelpie.adapters.hermes.boards import HermesBoards
-from kelpie.adapters.hermes.stop import stop_comment
+from kelpie.adapters.hermes.stop import HermesCliError, stop_comment
 from kelpie.core.actions import Action, ActionKind
 from kelpie.core.executors import PlatformExecutor
-from kelpie.core.ports import SupportsReassign, UnsupportedAction, declared_actions
+from kelpie.core.ports import (
+    NothingToDo,
+    SupportsReassign,
+    UnsupportedAction,
+    declared_actions,
+)
 from kelpie.sim import hermes_cli
 from tests.adapters.kanban import Board
 
@@ -114,7 +119,8 @@ def test_a_task_unblocked_since_the_snapshot_is_left_alone(
     blocked(board)
     a = make(board, exe)
     board.update("t1", status="ready")  # a person unblocked it in the dashboard
-    a.unblock("t1", "met")
+    with pytest.raises(NothingToDo, match="no longer blocked"):
+        a.unblock("t1", "met")
     assert argv(log) == []
 
 
@@ -182,6 +188,22 @@ def test_a_refused_unblock_is_an_error(board: Board, cli: tuple[str, Path]) -> N
     assert row(board)[0] == "blocked"
 
 
+def test_an_unblock_that_failed_after_a_person_unblocked_is_nothing_to_do(
+    board: Board, cli: tuple[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    exe, _ = cli
+    blocked(board)
+    a = make(board, exe)
+
+    def unblocked_but_failed(*args: object, **kw: object) -> None:
+        board.update("t1", status="ready")
+        raise HermesCliError("hermes kanban unblock failed (exit 1)")
+
+    monkeypatch.setattr("kelpie.adapters.hermes.adapter.run_kanban", unblocked_but_failed)
+    with pytest.raises(NothingToDo, match="unblocked meanwhile"):
+        a.unblock("t1", "met")
+
+
 def test_an_unblock_that_did_not_take_is_an_error(
     board: Board, cli: tuple[str, Path], monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -239,7 +261,8 @@ def test_reassign_through_the_executor(board: Board, cli: tuple[str, Path]) -> N
 def test_reassign_to_the_current_assignee_is_a_no_op(board: Board, cli: tuple[str, Path]) -> None:
     exe, log = cli
     board.task("t1", "todo", NOW - timedelta(hours=4), assignee="dev-2")
-    make(board, exe).reassign("t1", "DEV-2", "again")
+    with pytest.raises(NothingToDo, match="already assigned to dev-2"):
+        make(board, exe).reassign("t1", "DEV-2", "again")
     assert argv(log) == [] and comments(board) == []
 
 

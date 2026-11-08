@@ -24,11 +24,11 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from kelpie import __version__, net
-from kelpie.core.alerts import failure_reason
+from kelpie.core.alerts import failure_reason, nothing_reason
 from kelpie.core.executors import PlatformExecutor
 from kelpie.core.host_sleep import SleepWatch
 from kelpie.core.ledger import Outcome as LedgerOutcome
-from kelpie.core.ports import PlatformAdapter, SnapshotSource
+from kelpie.core.ports import NothingToDo, PlatformAdapter, SnapshotSource
 from kelpie.remote.config import AgentSettings
 from kelpie.remote.protocol import (
     ACTIONS_PATH,
@@ -220,6 +220,9 @@ class Agent:
         )
         try:
             out = self._executors[wire.adapter].execute(wire.action())
+        except NothingToDo as exc:  # already in effect: the note goes to the hub's ledger
+            log.info("action %s: nothing to do: %s", wire.id, exc)
+            result = Result(wire.id, Outcome.NOTHING_TO_DO, nothing_reason(exc))
         except Exception as exc:
             log.warning("action %s failed: %r", wire.id, exc)
             result = Result(wire.id, Outcome.FAILED, failure_reason(exc))

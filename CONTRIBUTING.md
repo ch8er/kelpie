@@ -228,6 +228,12 @@ An adapter carries out what the platform allows and refuses the rest.
   any side effect, and the engine alerts a human ("not executed, needs a human").
   `claude_code/adapter.py` does this for `requeue`, `unblock`, `comment` and `wip_commit`.
   A plain `NotImplementedError` means "not implemented yet" and is recorded as a failure.
+- An action that is already in effect (a second park of a task the adapter parked on those
+  conditions, a requeue of a task already in the queue, an unblock of a task no longer
+  blocked) raises `kelpie.core.ports.NothingToDo` with a short note, before any side effect:
+  the engine records "nothing to do" with that note in the ledger (`kelpie why`) and tells
+  nobody. Keep `UnsupportedAction` for what still needs a person (`hermes/adapter.py`:
+  `wait`, `requeue`, `unblock`, `reassign`).
 - Optional capabilities are separate protocols in `src/kelpie/core/ports.py`, checked with
   `isinstance`: `SupportsStop`, `SupportsWait`, `SupportsReassign`, `SupportsClose`.
   Declare what the adapter really does in `actions: ClassVar[frozenset[ActionKind]]`, as

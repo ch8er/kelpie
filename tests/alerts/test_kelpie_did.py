@@ -22,6 +22,7 @@ from kelpie.core.config import EngineConfig, Mode
 from kelpie.core.engine import Engine
 from kelpie.core.ledger import Outcome
 from kelpie.core.model import Session, Snapshot
+from kelpie.core.ports import NothingToDo
 from tests.fakes import Emit, FakeAdapter, StoppingAdapter
 
 NOW = datetime(2026, 3, 2, 10, tzinfo=UTC)
@@ -212,6 +213,32 @@ def test_an_effect_whose_alert_stays_quiet_is_announced_on_its_own() -> None:
         ("alert T-1", "Stopped run S-1; the worker exits within ~2 min.", Severity.CRITICAL),
         ("stop T-1", "Stopped run S-2; the worker exits within ~2 min.", Severity.CRITICAL),
     ]
+
+
+class AlreadyStopped(StoppingAdapter):
+    def stop(self, session_id: str, reason: str) -> None:
+        raise NothingToDo(f"run {session_id} is\nalready blocked")
+
+
+def test_an_announced_effect_already_in_effect_is_said_by_its_alert_and_asks_nobody() -> None:
+    alert = replace(
+        runaway(),
+        params={**runaway().params, "needed": "Stop the run", "blocking": 0},
+    )
+    (m,) = tick([alert, stop()], AlreadyStopped(), ACT).messages
+    assert m.did_text == "Nothing to do: run S-1 is already blocked."
+    assert all(item.needed is None for item in m.items)
+
+
+def test_an_effect_already_in_effect_sends_no_message_of_its_own() -> None:
+    recorder = Recorder()
+    engine = Engine([Emit([stop()])], adapters=[AlreadyStopped()], alerter=recorder, config=ACT)
+    (result,) = engine.tick(lambda: Snapshot(now=NOW, sessions=(SESSION,)))
+    assert result.outcome is Outcome.NOTHING_TO_DO
+    assert result.detail == "run S-1 is already blocked"  # control characters replaced
+    assert recorder.messages == []
+    (again,) = engine.tick(lambda: Snapshot(now=NOW, sessions=(SESSION,)))
+    assert again.outcome is Outcome.SUPPRESSED  # the ledger holds it back, like any action
 
 
 def test_an_alert_announcing_several_effects_lists_them_all() -> None:

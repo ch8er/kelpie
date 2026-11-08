@@ -24,6 +24,8 @@ from kelpie.core.alerts import (
     failure_reason,
     lead_in,
     not_executed_line,
+    nothing_line,
+    nothing_reason,
     suggested_line,
 )
 from kelpie.core.alerts import Transition as AlertTransition
@@ -41,7 +43,7 @@ from kelpie.core.ledger import (
     subject,
 )
 from kelpie.core.model import HostSleep, Snapshot
-from kelpie.core.ports import ActionConnector, Alerter, Deferred, PlatformAdapter
+from kelpie.core.ports import ActionConnector, Alerter, Deferred, NothingToDo, PlatformAdapter
 from kelpie.core.rule import Rule
 from kelpie.core.states import MemoryStateStore, OpenState, StateStore, StateTracker, Transition
 from kelpie.core.transitions import TransitionRecorder
@@ -129,6 +131,8 @@ class Engine:
         init=False, default_factory=dict
     )
     _told: set[str] = field(init=False, default_factory=set)
+    # Per tick: announced effects that turned out to be in effect already (NothingToDo)
+    _noted: set[str] = field(init=False, default_factory=set)
     _announcer_severity: dict[str, Severity] = field(init=False, default_factory=dict)
     # While an alert about a state is processed: what it says besides the rule's reason,
     # keyed by the alert's key.
@@ -202,7 +206,7 @@ class Engine:
         # Incident alerts before the other alerts: what happened to them decides what folds.
         ordered = sorted(actions, key=lambda a: (a.kind in _ALERT_ACTIONS, _incident(a) is None))
         self._announced = {k for a in ordered for k in _announces(a)}
-        self._lines, self._held, self._told = {}, {}, set()
+        self._lines, self._held, self._told, self._noted = {}, {}, set(), set()
         self._announcer_severity = {}
         for a in ordered:
             for k in _announces(a):
@@ -329,6 +333,7 @@ class Engine:
                 urgent = replace(action, severity=_higher(action.severity, floor))
                 self._safe_alert(urgent, snapshot, executed=executed, kind=kind, did=did)
         self._announced, self._lines, self._held, self._told = set(), {}, {}, set()
+        self._noted = set()
         self._announcer_severity = {}
 
     def _process(self, action: Action, snapshot: Snapshot) -> Dispatched:
@@ -363,6 +368,15 @@ class Engine:
                     )
                     self._lines.setdefault(action.key, []).append(line)
                 return Dispatched(action, mode, Outcome.DEFERRED)  # not an attempt
+            except NothingToDo as exc:  # already in effect: a note in the ledger, no message
+                log.info("nothing to do: %s: %s", action, exc)
+                self._detail = nothing_reason(exc)
+                outcome = Outcome.NOTHING_TO_DO
+                if action.key is not None and action.key in self._announced:
+                    # The alert announcing it says so, and asks nobody to do it; no message
+                    # of its own when that alert does not go out.
+                    self._lines.setdefault(action.key, []).append(nothing_line(self._detail))
+                    self._noted.add(action.key)
             except Exception as exc:
                 self._detail = failure_reason(exc)
                 log.warning("action failed: %s: %r", action, exc)
@@ -655,7 +669,8 @@ class Engine:
             # Done only when every announced effect was carried out: one with nothing held
             # (deferred, failed with retries left, suppressed) is still to do.
             done = bool(keys) and all(
-                (held := self._held.get(k)) and all(kind is Did.DONE for _, _, kind, _ in held)
+                ((held := self._held.get(k)) and all(kind is Did.DONE for _, _, kind, _ in held))
+                or (k in self._noted and not self._held.get(k))
                 for k in keys
             )
             merged = self._merged(action, mode, snapshot.now)

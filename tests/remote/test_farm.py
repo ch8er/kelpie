@@ -25,6 +25,7 @@ from kelpie.core.model import (
     Status,
     Task,
 )
+from kelpie.core.ports import NothingToDo
 from kelpie.remote.config import HubAgent, HubSettings
 from kelpie.remote.farm import (
     MAX_ACTIONS_PER_TICK,
@@ -380,6 +381,14 @@ def test_results_map_onto_the_engine(outcome: Outcome, detail: str | None, expec
     agent.join(5)
     (sent,) = agent.seen  # type: ignore[attr-defined]
     assert sent.params == {"session_id": "s1"} and sent.task_id is None
+
+
+def test_nothing_to_do_with_a_note_reaches_the_ledger_as_one() -> None:
+    rig = ready()
+    agent = answer(rig.hub, "laptop", Outcome.NOTHING_TO_DO, "the run had already ended")
+    with pytest.raises(NothingToDo, match="the run had already ended"):
+        rig.executors["laptop/hermes"].execute(stop())
+    agent.join(5)
 
 
 def test_a_failure_carries_only_the_public_reason() -> None:

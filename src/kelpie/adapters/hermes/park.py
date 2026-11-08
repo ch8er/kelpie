@@ -53,13 +53,15 @@ Safety, as for ``stop``:
   the cost is one restart), and a human's block in that moment would be replaced by the
   park (Hermes schedules todo, ready, running and blocked tasks alike), to be woken to
   ready later.
-- Anything else (backlog, review, blocked, done) is not parked: ``UnsupportedAction``.
+- Anything else (backlog, review, blocked, done) is not parked: ``UnsupportedAction``,
+  except a task Kelpie already parked on those conditions (``NothingToDo``, a ledger note).
 - A park Kelpie cannot read back as its own (Hermes stored the reason differently, the key
   changed meanwhile) is undone at once with ``unblock``, so it is never left scheduled with
   nothing to wake it. For a running task the run has already ended, so the undo costs a
   restart, and a new worker may start before the old one is reaped.
-- Wake (``requeue``) unblocks only a task Kelpie parked; a Kelpie park already woken is left
-  alone; any other requeue is ``UnsupportedAction``.
+- Wake (``requeue``) unblocks only a task Kelpie parked; a Kelpie park already woken, or a
+  task already in the queue (``ready``, ``todo`` with no run), is ``NothingToDo``; any other
+  requeue is ``UnsupportedAction``.
   Hermes lands it in ``ready``, or ``todo`` while a parent is open. The ``unblocked`` event
   does page chats subscribed to the task, and Hermes still holds a woken task back for 24 h
   if a GitHub PR URL appeared in one of its comments (written by its worker, for instance).

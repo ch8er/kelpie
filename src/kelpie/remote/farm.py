@@ -24,7 +24,7 @@ from kelpie.core.executors import Executor
 from kelpie.core.host_sleep import DEFAULT_KEEP as SLEEPS_KEPT
 from kelpie.core.ledger import Outcome as LedgerOutcome
 from kelpie.core.model import HostSleep, Snapshot
-from kelpie.core.ports import Alerter, Deferred
+from kelpie.core.ports import Alerter, Deferred, NothingToDo
 from kelpie.remote.hub import AgentView, Hub
 from kelpie.remote.protocol import (
     MAX_BOARDS,
@@ -347,6 +347,8 @@ class RemoteFarm:
             case Outcome.DONE:
                 return result.detail or True
             case Outcome.NOTHING_TO_DO:
+                if result.detail:  # the agent's note (in its own ids), for the ledger
+                    raise NothingToDo(f"on {agent}: {result.detail}")
                 return LedgerOutcome.NOTHING_TO_DO
             case Outcome.NOT_EXECUTED:
                 log.warning("agent %s did not carry out %s: %s", agent, action.kind, result.detail)
