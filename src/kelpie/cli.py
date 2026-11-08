@@ -419,6 +419,11 @@ def main(argv: Sequence[str] | None = None) -> int:
 
             today = today_figures(settings)
         view = view_service(app, today=today)
+    except ConfigError as exc:
+        app.close()
+        locks.release()
+        print(f"kelpie: config error: {exc}", file=sys.stderr)
+        return 2
     except OSError as exc:
         app.close()
         locks.release()

@@ -113,10 +113,11 @@ class ViewSource:
         except Exception:  # the page goes on without them
             if not self._today_failed:
                 log.exception("today's figures for the farm view failed")
-            self._today_failed = True
+            with self._lock:
+                self._today_failed = True
             return
-        self._today_failed = False
         with self._lock:
+            self._today_failed = False
             self._today = today
             self._cached = None
 
@@ -154,8 +155,8 @@ def _presented(header: str | None) -> bytes | None:
     if header is None:
         return None
     scheme, _, value = header.strip().partition(" ")
-    if scheme.lower() == "bearer":
-        return value.strip().encode()
+    if scheme.lower() == "bearer":  # http.server decodes headers as latin-1: the raw bytes
+        return value.strip().encode("latin-1", "replace")
     if scheme.lower() == "basic":
         try:
             decoded = base64.b64decode(value.strip(), validate=True)
@@ -194,8 +195,9 @@ class ViewHandler(GuardedHandler):
         self.close_connection = True
         path = self.path.split("?")[0]
         if not self.server.authorized(self.headers.get("Authorization")):
-            # A browser asks for the password (the token) once and remembers it.
-            challenge = 'Bearer, Basic realm="kelpie view", charset="UTF-8"'
+            # A browser asks for the password (the token) once and remembers it; one
+            # challenge per reply (browsers do not split several on one header line).
+            challenge = "Bearer" if path == PATH else 'Basic realm="kelpie view", charset="UTF-8"'
             self._json(401, {"error": "unauthorized"}, {"WWW-Authenticate": challenge})
             return
         if path not in (PATH, PAGE, MANIFEST_PATH):

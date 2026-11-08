@@ -135,7 +135,8 @@ def render_page(view: FarmView) -> str:
         items = [i for i in view.items if i.board == board]
         title = f"Board {_e(board)}" if board else ("Tasks" if not view.boards else "No board")
         body.append(f"<h2>{title}</h2>")
-        body += _board(items, now) or ['<p class="muted">No open tasks.</p>']
+        empty = "No open tasks." if view.items_total == len(view.items) else "None listed."
+        body += _board(items, now) or [f'<p class="muted">{empty}</p>']
     if view.items_total > len(view.items):
         body.append(f'<p class="muted">{view.items_total - len(view.items)} more not listed</p>')
     body.append(f"<h2>Open alerts ({view.alerts_total})</h2>")
@@ -158,7 +159,7 @@ def render_page(view: FarmView) -> str:
         '<!doctype html>\n<html lang="en"><head><meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width, initial-scale=1">'
         f'<meta http-equiv="refresh" content="{REFRESH_SECONDS}">'
-        '<link rel="manifest" href="/manifest.webmanifest">'
+        '<link rel="manifest" href="/manifest.webmanifest" crossorigin="use-credentials">'
         "<title>Kelpie farm view</title>"
         f"<style>{_STYLE}</style></head><body>" + "\n".join(body) + "</body></html>\n"
     )

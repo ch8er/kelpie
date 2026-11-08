@@ -230,3 +230,54 @@ def test_the_demo_farm_renders(tmp_path: Path) -> None:
     assert "Kelpie farm view" in page and "t_store" in page
     assert page.index("Needs you") < page.index("The rest")
     assert "<form" not in page and "<script" not in page
+
+
+def test_backlog_of_a_person_and_info_alerts_do_not_jump_the_queue() -> None:
+    snapshot = Snapshot(
+        now=NOW,
+        owners=(Owner("sam", "owner", OwnerKind.HUMAN),),
+        tasks=(task("T-later", Status.BACKLOG, owner_id="sam"), task("T-info", Status.READY)),
+    )
+    info = OpenState("i", "no_progress", NOW, NOW, NOW, 0, Severity.INFO, "fyi", "T-info")
+    assert {i.attention for i in attention_items(snapshot, [info])} == {"rest"}
+
+
+def test_one_challenge_per_reply(listener: ViewServer) -> None:
+    assert _get(listener, PAGE).getheader("WWW-Authenticate", "").startswith("Basic realm=")
+    assert _get(listener, MANIFEST_PATH).getheader("WWW-Authenticate", "").startswith("Basic")
+    assert _get(listener, PATH).getheader("WWW-Authenticate") == "Bearer"
+    assert 'crossorigin="use-credentials"' in render_page(build_view(NOW, FARM))
+
+
+@pytest.mark.parametrize(
+    "auth",
+    [
+        "Basic " + base64.b64encode(TOKEN.encode()).decode(),  # no colon: no password
+        "Basic " + base64.b64encode(b"me:").decode(),
+        "Bearer ",
+        "Bearer",
+        "Token " + TOKEN,
+    ],
+)
+def test_malformed_credentials_are_refused(listener: ViewServer, auth: str) -> None:
+    assert _get(listener, PAGE, auth).status == 401
+
+
+@pytest.mark.parametrize("method", ["POST", "HEAD", "PUT", "DELETE"])
+def test_the_page_takes_no_writes(listener: ViewServer, method: str) -> None:
+    conn = http.client.HTTPConnection("127.0.0.1", listener.server_address[1], timeout=5)
+    try:
+        conn.request(method, PAGE, headers={"Authorization": _basic(TOKEN)})
+        assert conn.getresponse().status == 405
+    finally:
+        conn.close()
+
+
+def test_page_headers(listener: ViewServer) -> None:
+    page = _get(listener, PAGE, _basic(TOKEN))
+    csp = page.getheader("Content-Security-Policy") or ""
+    assert "default-src 'none'" in csp and "frame-ancestors 'none'" in csp
+    assert "script-src" not in csp
+    assert page.getheader("X-Frame-Options") == "DENY"
+    assert page.getheader("Referrer-Policy") == "no-referrer"
+    assert page.getheader("Cache-Control") == "no-store"

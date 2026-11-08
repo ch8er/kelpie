@@ -28,6 +28,7 @@ from datetime import datetime, timedelta
 from enum import StrEnum
 from typing import Any
 
+from kelpie.core.actions import Severity
 from kelpie.core.ledger import LedgerEntry
 from kelpie.core.model import OwnerKind, Snapshot, Status, Task
 from kelpie.core.states import OpenState
@@ -51,6 +52,10 @@ class Attention(StrEnum):
 
 
 _RANK = {a: i for i, a in enumerate(Attention)}
+# A person's task is theirs to do in these statuses (not in the backlog).
+_ACTIVE = frozenset(
+    {Status.READY, Status.IN_PROGRESS, Status.REVIEW, Status.BLOCKED, Status.WAITING}
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -194,9 +199,8 @@ def _attention(
 ) -> tuple[Attention, str | None]:
     state = alerted.get(t.id)
     owner = snapshot.owner(t.owner_id) if t.owner_id else None
-    if (owner is not None and owner.kind is OwnerKind.HUMAN) or (
-        state is not None and state.rule == NEEDS_YOU_RULE
-    ):
+    held = owner is not None and owner.kind is OwnerKind.HUMAN and t.status in _ACTIVE
+    if held or (state is not None and state.rule == NEEDS_YOU_RULE):
         return Attention.NEEDS_YOU, state.summary if state is not None else None
     if t.status is Status.BLOCKED:
         return Attention.STUCK, t.block.reason if t.block is not None else None
@@ -211,9 +215,11 @@ def attention_items(
     snapshot: Snapshot, states: Sequence[OpenState] = (), long_after: timedelta = LONG_AFTER
 ) -> list[AttentionItem]:
     """The snapshot's open tasks (not done, failed or cancelled) by attention, then board,
-    then oldest status first. A task with several open states is ranked by the most urgent
+    then oldest status first. A person's task needs them once it left the backlog; an info
+    alert does not make a task stuck. A task with several open states is ranked by the most urgent
     (rule 13's first, else the newest)."""
     alerted: dict[str, OpenState] = {}
+    states = [st for st in states if st.severity is not Severity.INFO or st.rule == NEEDS_YOU_RULE]
     for st in sorted(states, key=lambda st: (st.rule == NEEDS_YOU_RULE, st.opened_at)):
         if st.task_id is not None:
             alerted[st.task_id] = st  # rule 13's states, then the newest, win

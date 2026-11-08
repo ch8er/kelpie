@@ -2348,10 +2348,11 @@ most once every 2s):
 
 - `GET /`: a small page for a phone (no script, reloads every minute): today's cost of
   chaos and spend so far (the daily report's figures for the day in progress, computed
-  every 5 minutes off the request path, never with the LLM section), then per board the
-  open tasks by attention (needs you: a person holds it or rule 13 waits on one; stuck or
-  blocked: blocked, or an open alert about it; running long: in progress past
-  `long_after`; the rest), oldest first, then the open alerts.
+  every 5 minutes off the request path, never with the LLM section; on a large database
+  that is a read of a few days of history each time), then per board the open tasks by
+  attention (needs you: a person holds it out of the backlog, or rule 13 waits on one;
+  stuck or blocked: blocked, or a warning or critical alert about it; running long: in
+  progress past `long_after`; the rest), oldest first, then the open alerts.
 - `GET /v1/farm`: the same view as JSON (`kelpie status --json` prints the same shape).
 - `GET /manifest.webmanifest`: lets a phone add the page to its home screen.
 
