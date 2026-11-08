@@ -10,6 +10,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ### Added
 
+- The `[view]` listener also serves a read-only page for a phone (`GET /`, #299): today's
+  cost of chaos and spend so far, then per board the open tasks by attention (needs you,
+  stuck or blocked, running long past `[view] long_after`, the rest) and the open alerts.
+  No script, no form; a browser gives the token as the password of its sign-in prompt. A
+  web manifest lets a phone add it to the home screen. Off by default, on loopback.
 - `kelpie status` shows the farm after the rules: tasks per status (per board), waiting
   conditions, open alert states and the last actions per rule, read-only (the board offline,
   the database without writing to it; with no adapter, the last statuses `kelpie serve`

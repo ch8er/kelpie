@@ -3,7 +3,8 @@
 It listens on its own address (``host``, ``port``; 127.0.0.1:9465 by default), apart from
 the main port, so OTLP ingest can be opened to agents while the view stays on loopback. Off
 loopback it needs a token (``token_env``, default ``KELPIE_VIEW_TOKEN``): ``kelpie serve``
-refuses to start without a strong one, and ``kelpie doctor`` warns.
+refuses to start without a strong one, and ``kelpie doctor`` warns. ``long_after``: a
+task in progress this long is shown as "running long" on the page.
 """
 
 from __future__ import annotations
@@ -11,14 +12,17 @@ from __future__ import annotations
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import timedelta
 from typing import Any
 
+from kelpie.core.farmview import LONG_AFTER
+from kelpie.core.serde import parse_duration
 from kelpie.traces.config import is_loopback, weak_token
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 9465
 DEFAULT_TOKEN_ENV = "KELPIE_VIEW_TOKEN"
-_KEYS = frozenset({"enabled", "host", "port", "token_env"})
+_KEYS = frozenset({"enabled", "host", "port", "token_env", "long_after"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -27,6 +31,7 @@ class ViewSettings:
     host: str = DEFAULT_HOST
     port: int = DEFAULT_PORT
     token_env: str = DEFAULT_TOKEN_ENV
+    long_after: timedelta = LONG_AFTER
 
     def token(self, environ: Mapping[str, str] = os.environ) -> str | None:
         """The view token, or None when the variable is unset or empty."""
@@ -75,4 +80,10 @@ def load_view(raw: Any) -> ViewSettings:
     token_env = raw.get("token_env", DEFAULT_TOKEN_ENV)
     if not isinstance(token_env, str) or not token_env.strip():
         raise ValueError("[view] token_env must be the name of an environment variable")
-    return ViewSettings(enabled, host.strip(), port, token_env.strip())
+    try:
+        long_after = parse_duration(raw.get("long_after", LONG_AFTER))
+    except (TypeError, ValueError):
+        raise ValueError("[view] long_after must be a duration such as 2h") from None
+    if long_after <= timedelta(0):
+        raise ValueError("[view] long_after must be positive")
+    return ViewSettings(enabled, host.strip(), port, token_env.strip(), long_after)

@@ -60,15 +60,21 @@ you would not publish.
 ### Farm view
 
 `[view]` (off by default) serves the farm view read-only on its own listener, under the
-same guards: task ids, condition targets, alert summaries and ledger reasons, which are
-farm data. It has no write endpoint (405 for every method but `GET`). On loopback without a
+same guards: task ids and titles, condition targets, alert summaries, ledger reasons and
+today's spend, which are farm data. It has no write endpoint (405 for every method but `GET`). On loopback without a
 token any local process can read it, as it can read `/metrics`: set the token on a shared
 machine. It binds
 `127.0.0.1` by default; on any other address `kelpie serve` refuses to start unless
 `[view] token_env` holds a strong token, which every request must then carry as a bearer
-token (compared in constant time). Kelpie never opens it further: no tunnel, no port
-forwarding. Reaching it from elsewhere is the owner's choice, such as a private network
-between their own machines, with the token. `kelpie status --server` sends the token to
+token or as the password of HTTP Basic auth (compared in constant time; over plain http a
+Basic password crosses the network in clear like a bearer token, so off loopback use a
+private, encrypted network or a TLS-terminating proxy). The page runs no script and loads
+nothing from elsewhere (`Content-Security-Policy: default-src 'none'`, inline styles only;
+`X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`), and every value on it is
+HTML-escaped. Kelpie never opens it further: no tunnel, no port forwarding. Reaching it
+from a phone is the owner's choice, for example a private network between their own
+devices (Tailscale-style) with `[view] host` set to that network's address and the
+token set. `kelpie status --server` sends the token to
 the configured address only: never through a proxy from the environment, never along a
 redirect, and it warns when the token would cross the network over plain http.
 

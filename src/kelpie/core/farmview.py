@@ -7,7 +7,11 @@ both build it here, from the same inputs, so they never disagree:
 - waiting conditions: every condition linked to a task that is not met yet, with its task's
   board and status;
 - open alert states (``kelpie.core.states``), newest first;
-- the latest ledger entries per rule (``kelpie.core.ledger``), newest first.
+- the latest ledger entries per rule (``kelpie.core.ledger``), newest first;
+- the open tasks ordered by attention (:class:`Attention`): what needs a person, what is
+  stuck or blocked, what has run long, then the rest; oldest first within each;
+- today's cost of chaos and spend so far (:class:`Today`), when the caller has them (the
+  server computes them from the report, off the request path).
 
 Pure: no I/O, no clock reads (``now`` is passed in). The view holds facts only; text from
 agents (titles, reasons) is kept as it is and cleaned where it is rendered.
@@ -20,18 +24,63 @@ from __future__ import annotations
 from collections import Counter
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
+from enum import StrEnum
 from typing import Any
 
+from kelpie.core.actions import Severity
 from kelpie.core.ledger import LedgerEntry
-from kelpie.core.model import Snapshot, Status
+from kelpie.core.model import OwnerKind, Snapshot, Status, Task
 from kelpie.core.states import OpenState
 from kelpie.core.transitions import StatusChange
 
 SCHEMA_VERSION = 1
 PER_RULE = 3  # ledger entries kept per rule
 MAX_TEXT = 500  # characters kept of any text from the board or the ledger
-MAX_ITEMS = 200  # waiting conditions and alerts kept; the rest are counted
+MAX_ITEMS = 200  # waiting conditions, alerts and attention items kept; the rest are counted
+LONG_AFTER = timedelta(hours=2)  # in progress this long: "running long"
+NEEDS_YOU_RULE = "needs_you"  # rule 13: its open states are a person's to-do
+
+
+class Attention(StrEnum):
+    """Why a task is shown where it is, most urgent first."""
+
+    NEEDS_YOU = "needs_you"  # a person holds it, or rule 13 says it waits for one
+    STUCK = "stuck"  # blocked, or an open alert about it
+    RUNNING_LONG = "running_long"  # in progress past ``long_after``
+    REST = "rest"
+
+
+_RANK = {a: i for i, a in enumerate(Attention)}
+# A person's task is theirs to do in these statuses (not in the backlog).
+_ACTIVE = frozenset(
+    {Status.READY, Status.IN_PROGRESS, Status.REVIEW, Status.BLOCKED, Status.WAITING}
+)
+
+
+@dataclass(frozen=True, slots=True)
+class AttentionItem:
+    task_id: str
+    title: str
+    status: str
+    since: datetime
+    attention: str
+    board: str | None = None
+    owner: str | None = None
+    why: str | None = None  # the block reason or the alert summary that put it there
+
+
+@dataclass(frozen=True, slots=True)
+class Today:
+    """The report's figures for the day so far (``kelpie.report``), at ``at``."""
+
+    at: datetime
+    day: str  # YYYY-MM-DD in [report] timezone
+    chaos_hours: float
+    chaos_usd: float  # tokens burned plus, with [report] hour_usd, the stuck hours
+    spend_usd: float  # API providers' tokens priced
+    tokens: int
+    plan_tokens: int = 0  # tokens of providers on a subscription (never dollars)
 
 
 @dataclass(frozen=True, slots=True)
@@ -101,6 +150,9 @@ class FarmView:
     alerts_total: int = 0
     snapshot_at: datetime | None = None  # when the tasks were read, if not ``now``
     problems: tuple[str, ...] = ()  # what could not be read
+    items: tuple[AttentionItem, ...] = ()  # open tasks by attention (needs a board read)
+    items_total: int = 0
+    today: Today | None = None
 
 
 def _cut(text: str | None, limit: int = MAX_TEXT) -> str:
@@ -142,6 +194,56 @@ def latest_per_rule(
     return by_rule
 
 
+def _attention(
+    t: Task, snapshot: Snapshot, alerted: Mapping[str, OpenState], long_after: timedelta
+) -> tuple[Attention, str | None]:
+    state = alerted.get(t.id)
+    owner = snapshot.owner(t.owner_id) if t.owner_id else None
+    held = owner is not None and owner.kind is OwnerKind.HUMAN and t.status in _ACTIVE
+    if held or (state is not None and state.rule == NEEDS_YOU_RULE):
+        return Attention.NEEDS_YOU, state.summary if state is not None else None
+    if t.status is Status.BLOCKED:
+        return Attention.STUCK, t.block.reason if t.block is not None else None
+    if state is not None:
+        return Attention.STUCK, state.summary
+    if t.status is Status.IN_PROGRESS and snapshot.now - t.status_since >= long_after:
+        return Attention.RUNNING_LONG, None
+    return Attention.REST, None
+
+
+def attention_items(
+    snapshot: Snapshot, states: Sequence[OpenState] = (), long_after: timedelta = LONG_AFTER
+) -> list[AttentionItem]:
+    """The snapshot's open tasks (not done, failed or cancelled) by attention, then board,
+    then oldest status first. A person's task needs them once it left the backlog; an info
+    alert does not make a task stuck. A task with several open states is ranked by the most urgent
+    (rule 13's first, else the newest)."""
+    alerted: dict[str, OpenState] = {}
+    states = [st for st in states if st.severity is not Severity.INFO or st.rule == NEEDS_YOU_RULE]
+    for st in sorted(states, key=lambda st: (st.rule == NEEDS_YOU_RULE, st.opened_at)):
+        if st.task_id is not None:
+            alerted[st.task_id] = st  # rule 13's states, then the newest, win
+    items = []
+    for t in snapshot.tasks:
+        if t.status.is_terminal:
+            continue
+        attention, why = _attention(t, snapshot, alerted, long_after)
+        items.append(
+            AttentionItem(
+                task_id=t.id,
+                title=_cut(t.title, 200),
+                status=str(t.status),
+                since=t.status_since,
+                attention=str(attention),
+                board=t.board,
+                owner=t.owner_id,
+                why=_cut(why, 300) if why else None,
+            )
+        )
+    items.sort(key=lambda i: (_RANK[Attention(i.attention)], i.board or "", i.since, i.task_id))
+    return items
+
+
 def build_view(
     now: datetime,
     snapshot: Snapshot | None,
@@ -152,6 +254,8 @@ def build_view(
     stored: Mapping[str, StatusChange] | None = None,
     per_rule: int = PER_RULE,
     problems: Sequence[str] = (),
+    long_after: timedelta = LONG_AFTER,
+    today: Today | None = None,
 ) -> FarmView:
     """The view at ``now``. Tasks come from ``snapshot`` when there is one, else from
     ``stored`` (the last status observed per task), else there are none."""
@@ -226,6 +330,7 @@ def build_view(
         for rule, kept in sorted(latest_per_rule(entries, per_rule).items())
     )
     boards = sorted({b for b in boards_of.values() if b})
+    items = attention_items(snapshot, states, long_after) if snapshot is not None else []
     return FarmView(
         now=now,
         source=source,
@@ -239,6 +344,9 @@ def build_view(
         alerts_total=len(alerts),
         snapshot_at=snapshot_at,
         problems=tuple(problems),
+        items=tuple(items[:MAX_ITEMS]),
+        items_total=len(items),
+        today=today,
     )
 
 
@@ -328,7 +436,46 @@ def to_dict(view: FarmView) -> dict[str, Any]:
             for r in view.rules
         ],
         "problems": list(view.problems),
+        "items_total": view.items_total,
+        "items": [
+            {
+                "task_id": i.task_id,
+                "title": i.title,
+                "status": i.status,
+                "since": _ts(i.since),
+                "attention": i.attention,
+                "board": i.board,
+                "owner": i.owner,
+                "why": i.why,
+            }
+            for i in view.items
+        ],
+        "today": None
+        if view.today is None
+        else {
+            "at": _ts(view.today.at),
+            "day": view.today.day,
+            "chaos_hours": view.today.chaos_hours,
+            "chaos_usd": view.today.chaos_usd,
+            "spend_usd": view.today.spend_usd,
+            "tokens": view.today.tokens,
+            "plan_tokens": view.today.plan_tokens,
+        },
     }
+
+
+def _today(data: Any) -> Today | None:
+    if data is None:
+        return None
+    return Today(
+        at=_req(data["at"]),
+        day=str(data["day"]),
+        chaos_hours=float(data["chaos_hours"]),
+        chaos_usd=float(data["chaos_usd"]),
+        spend_usd=float(data["spend_usd"]),
+        tokens=int(data["tokens"]),
+        plan_tokens=int(data.get("plan_tokens", 0)),
+    )
 
 
 def from_dict(data: Mapping[str, Any]) -> FarmView:
@@ -394,6 +541,21 @@ def from_dict(data: Mapping[str, Any]) -> FarmView:
                 for r in data.get("rules", ())
             ),
             problems=tuple(str(p) for p in data.get("problems", ())),
+            items_total=int(data.get("items_total", 0)),
+            items=tuple(
+                AttentionItem(
+                    task_id=str(i["task_id"]),
+                    title=str(i.get("title", "")),
+                    status=str(i["status"]),
+                    since=_req(i["since"]),
+                    attention=str(i["attention"]),
+                    board=_opt(i.get("board")),
+                    owner=_opt(i.get("owner")),
+                    why=_opt(i.get("why")),
+                )
+                for i in data.get("items", ())
+            ),
+            today=_today(data.get("today")),
         )
     except (KeyError, TypeError, AttributeError) as exc:
         raise ValueError(f"malformed farm view: {exc!r}") from None

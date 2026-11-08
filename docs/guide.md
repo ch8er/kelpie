@@ -195,8 +195,10 @@ farm throughput metrics from traces.
   needs a human (alert states still open, actions Kelpie could not carry out, repeated
   huge-output offenders), the top 3 recommendations and the largest tool outputs. See
   [Daily report](#daily-report), including the before/after effect of yesterday's fixes.
-- **Dashboards**: no custom UI. Kelpie exposes Prometheus metrics on `/metrics`, Grafana
-  shows them, traces open in Langfuse. CLI: `kelpie status` (the rules and their modes, then
+- **Dashboards**: no custom UI beyond an optional read-only page (`[view]`, off by
+  default: what needs you, what is stuck, what runs long, per board, with today's cost of
+  chaos and spend; [configuration](configuration.md#view)). Kelpie exposes Prometheus
+  metrics on `/metrics`, Grafana shows them, traces open in Langfuse. CLI: `kelpie status` (the rules and their modes, then
   the farm: tasks per status and board, waiting conditions, open alerts and the last actions
   per rule, read-only from the board and the database; `--json` for scripts, `--server` for
   a running `kelpie serve`'s [`[view]`](configuration.md#view)), `kelpie report` and
