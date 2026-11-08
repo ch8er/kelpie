@@ -114,6 +114,31 @@ def test_other_paths_are_not_found(listener: ViewServer) -> None:
     assert _request(listener, "GET", "/metrics")[0] == 404
 
 
+@pytest.mark.parametrize(
+    ("host", "code"),
+    [
+        ("attacker.example:9465", 421),  # a page that rebound its name to 127.0.0.1
+        ("attacker.example", 421),
+        ("127.0.0.1.attacker.example", 421),
+        ("localhost:9465", 200),
+        ("LOCALHOST", 200),
+        ("127.0.0.1", 200),
+        ("[::1]:9465", 200),
+    ],
+)
+def test_on_loopback_only_a_loopback_host_is_served(
+    listener: ViewServer, host: str, code: int
+) -> None:
+    """DNS rebinding: a web page the operator opens cannot read the farm (#395)."""
+    assert _request(listener, "GET", PATH, {"Host": host})[0] == code
+
+
+def test_a_token_with_blanks_around_it_still_matches() -> None:
+    settings = ViewSettings(enabled=True)
+    assert settings.token({settings.token_env: f" {TOKEN}\r\n"}) == TOKEN
+    assert settings.token({settings.token_env: "  "}) is None
+
+
 @pytest.mark.parametrize("listener", [TOKEN], indirect=True)
 def test_token_is_required_when_set(listener: ViewServer) -> None:
     assert _request(listener, "GET", PATH)[0] == 401

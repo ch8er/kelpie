@@ -94,6 +94,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ### Security
 
+- The `[view]` listener on loopback answers only requests addressed to a loopback name or
+  its configured host (421 otherwise): a web page could rebind its own name to 127.0.0.1 and
+  read the farm view through the operator's browser. A `KELPIE_VIEW_TOKEN` with blanks
+  around it now matches (#395).
 - The multi-host hub refuses a snapshot from a `kelpie agent` that sets a required field to
   null or a map to a list: rules read such fields unguarded and raised for the whole farm
   (#385).

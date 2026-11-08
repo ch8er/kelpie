@@ -34,8 +34,9 @@ class ViewSettings:
     long_after: timedelta = LONG_AFTER
 
     def token(self, environ: Mapping[str, str] = os.environ) -> str | None:
-        """The view token, or None when the variable is unset or empty."""
-        return environ.get(self.token_env) or None
+        """The view token (blanks around it dropped, as a client's header is), or None when
+        the variable is unset or empty."""
+        return (environ.get(self.token_env) or "").strip() or None
 
     @property
     def loopback(self) -> bool:

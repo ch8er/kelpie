@@ -181,6 +181,20 @@ class ViewServer(GuardedServer):
         self.token = token
         super().__init__((settings.host, settings.port), ViewHandler, limits)
 
+    def host_ok(self, header: str | None) -> bool:
+        """On loopback, a request must name a loopback host (or the configured one): a web
+        page that rebinds its own name to 127.0.0.1 sends its name, and must not read the
+        farm through the operator's browser (DNS rebinding). No Host (HTTP/1.0) is fine:
+        browsers always send one."""
+        if not self.settings.loopback or header is None:
+            return True
+        host = header.strip().lower()
+        if host.startswith("["):
+            name = host[1 : host.find("]")] if "]" in host else host
+        else:
+            name = host.rsplit(":", 1)[0] if host.count(":") == 1 else host
+        return name in {"localhost", "127.0.0.1", "::1", self.settings.host.lower()}
+
     def authorized(self, header: str | None) -> bool:
         if self.token is None:
             return True
@@ -193,6 +207,9 @@ class ViewHandler(GuardedHandler):
 
     def do_GET(self) -> None:
         self.close_connection = True
+        if not self.server.host_ok(self.headers.get("Host")):
+            self._json(421, {"error": "unexpected host: use 127.0.0.1 or localhost"})
+            return
         path = self.path.split("?")[0]
         if not self.server.authorized(self.headers.get("Authorization")):
             # A browser asks for the password (the token) once and remembers it; one
