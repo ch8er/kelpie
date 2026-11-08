@@ -46,6 +46,10 @@ kelpie_prework_oldest_seconds{board="app-b",platform_status="triage"} 14400
 # TYPE kelpie_idle_agents gauge
 kelpie_idle_agents{role="dev"} 1
 kelpie_idle_agents{role="ops"} 1
+# HELP kelpie_role_idle_seconds_total Agent-seconds the agents of a role spent idle (no live session, no open task), counted from each tick to the next; a gap between ticks over 10 minutes is not counted.
+# TYPE kelpie_role_idle_seconds_total counter
+kelpie_role_idle_seconds_total{role="dev"} 0
+kelpie_role_idle_seconds_total{role="ops"} 0
 # HELP kelpie_role_agents Agent owners per role.
 # TYPE kelpie_role_agents gauge
 kelpie_role_agents{role="dev"} 1
