@@ -38,7 +38,7 @@ def _spool(tmp_path: Path, **rec: object) -> Path:
     return spool
 
 
-@pytest.mark.parametrize("millis", [EONS, 1e300, float("inf")])
+@pytest.mark.parametrize("millis", [10**16, EONS, 1e300, float("inf")])
 def test_hermes_cuts_a_huge_duration(tmp_path: Path, millis: float) -> None:
     spool = _spool(tmp_path, type="tool", run_id="1", task_id="t_1", tool="x", duration_ms=millis)
     adapter = hermes.HermesAdapter(db_path=tmp_path / "kanban.db", spool=spool)
