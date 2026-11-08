@@ -1078,7 +1078,7 @@ db_path = "~/.hermes/kanban/boards/sign/kanban.db"
   `kelpie_role_reopened_after_done_24h` and `_ratio`. Its values are the configured board
   names only, never a value from the data: a task on no configured board (another adapter's,
   or an agent's on a hub) has `board=""`, shown only while such a task exists. Agent gauges (`kelpie_role_agents`,
-  `kelpie_idle_agents`, ...) have no board label: the home's profiles work on every board.
+  `kelpie_idle_agents`, `kelpie_role_idle_seconds_total`, ...) have no board label: the home's profiles work on every board.
   Role labels are bounded ([security.md](security.md#text-from-agents)).
   The Grafana dashboard sums over the boards picked in its **Board** variable (All by
   default); `sum by (board) (...)` splits a panel.

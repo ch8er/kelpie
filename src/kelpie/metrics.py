@@ -63,6 +63,8 @@ MAX_SLOT_POOLS = 20  # tool slot pools exported (pools are config data)
 # Role labels come from the boards (and a hub's agents): at most this many roles, first seen
 # first, each cut to MAX_ROLE_CHARS; the rest are summed under OTHER_ROLE (audit L10).
 MAX_ROLES = 32
+# Longest step between two ticks counted as idle time (kelpie_role_idle_seconds_total).
+MAX_IDLE_STEP = timedelta(minutes=10)
 MAX_ROLE_CHARS = 64
 OTHER_ROLE = "other"  # a real role of that name is summed with them
 MAX_STATUS_CHARS = 64  # a pre-work platform status label, cut the same way
@@ -113,6 +115,9 @@ class Metrics:
         self.open_states: Counter[str] = Counter()
         self.tasks: Counter[tuple[BoardKey, str]] = Counter()
         self.idle_agents: Counter[str] = Counter()  # role -> idle agents (0 if all busy)
+        # role -> agent-seconds idle, summed tick to tick (see MAX_IDLE_STEP)
+        self.idle_seconds: Counter[str] = Counter()
+        self._fleet_at: datetime | None = None  # the snapshot time of the last fleet reading
         # (board, platform status) -> (cards in it before work, seconds the oldest sat there)
         self.prework: dict[tuple[BoardKey, str], tuple[int, float]] = {}
         # tool slot pool -> (slots, {holder: slots held}) (Hermes [adapters.hermes.tools])
@@ -489,9 +494,26 @@ class Metrics:
         idle: Counter[str] = Counter()
         for r, load in loads.items():
             idle[self._role(r)] += len(load.idle)
+        self._idle_time(snapshot.now)
         self.idle_agents = idle
+        for role in idle:
+            self.idle_seconds[role] += 0  # a role is listed from its first sighting
         self._throughput(snapshot, loads, of_board, boards)
         self._fold_roles()
+
+    def _idle_time(self, now: datetime) -> None:
+        """Add the idle agents of the previous reading times the time since it, per role:
+        idle time is counted from the tick that saw it to the next. A gap longer than
+        ``MAX_IDLE_STEP`` (serve stopped, the host slept, a tick hung) is not counted, and
+        neither is a clock that went back."""
+        last, self._fleet_at = self._fleet_at, now
+        if last is None:
+            return
+        step = (now - last).total_seconds()
+        if not 0 < step <= MAX_IDLE_STEP.total_seconds():
+            return
+        for role, n in self.idle_agents.items():
+            self.idle_seconds[role] += n * step
 
     def _role(self, role: str) -> str:
         """The label of ``role``: itself (cut to MAX_ROLE_CHARS) for the first MAX_ROLES
@@ -808,6 +830,17 @@ class Metrics:
                     [
                         f"kelpie_idle_agents{_labels(role=r)} {n}"
                         for r, n in sorted(self.idle_agents.items())
+                    ],
+                )
+                metric(
+                    "kelpie_role_idle_seconds_total",
+                    "counter",
+                    "Agent-seconds the agents of a role spent idle (no live session, no open "
+                    "task), counted from each tick to the next; gaps between ticks over 10 "
+                    "minutes are not counted.",
+                    [
+                        f"kelpie_role_idle_seconds_total{_labels(role=r)} {s:.0f}"
+                        for r, s in sorted(self.idle_seconds.items())
                     ],
                 )
                 self._render_throughput(metric)

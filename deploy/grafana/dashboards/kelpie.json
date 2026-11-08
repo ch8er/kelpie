@@ -2749,6 +2749,39 @@
         "overrides": []
       },
       "description": "OTLP requests authenticated by a previous token: exporters not yet on the new one. Should reach zero before the grace period ends."
+    },
+    {
+      "id": 89,
+      "type": "timeseries",
+      "title": "Idle agent-hours per hour by role",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "kelpie-prometheus"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 0,
+        "y": 192
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "kelpie-prometheus"
+          },
+          "refId": "A",
+          "expr": "increase(kelpie_role_idle_seconds_total[1h]) / 3600",
+          "legendFormat": "{{role}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "description": "Idle time per role: agent-hours its agents spent with no live session and no open task over the last hour (1 = one agent idle all hour)."
     }
   ],
   "templating": {

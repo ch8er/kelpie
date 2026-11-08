@@ -212,7 +212,11 @@ farm throughput metrics from traces.
   ownerless), in the daily report's "Farm throughput" section. Live on `/metrics`:
   `kelpie_role_agents`, `kelpie_role_agents_with_work`, `kelpie_role_ownerless_queue_tasks`,
   `kelpie_role_tasks_done_24h`, `kelpie_role_returns_24h`, `kelpie_role_reopened_after_done_24h`
-  and `_ratio`, and `kelpie_tasks_by_stage` (with a `board` label on a farm with several
+  and `_ratio`, `kelpie_idle_agents` and `kelpie_role_idle_seconds_total` (idle time per
+  role: agent-seconds with no live session and no open task, counted from each tick to the
+  next; a gap over 10 minutes between ticks, such as serve stopped or the host asleep, is
+  not counted; `increase(...[1h]) / 3600` is idle agents averaged over the hour), and
+  `kelpie_tasks_by_stage` (with a `board` label on a farm with several
   boards: [configuration](configuration.md#adaptershermesboards); role labels are cut to 64
   characters and the 33rd role on is summed under `other`:
   [security.md](security.md#text-from-agents)), with
