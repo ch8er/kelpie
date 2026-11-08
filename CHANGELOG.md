@@ -14,8 +14,6 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
   agents had no live session and no open task, counted from each tick to the next; a gap
   over 10 minutes, or 3 `[engine] interval`s when longer, is not counted), with a Grafana
   panel of idle agent-hours per hour.
-  over 10 minutes, or 3 `[engine] interval`s when longer, is not counted), with a Grafana panel of idle agent-hours
-  per hour.
 - The Hermes adapter carries out `unblock` (`hermes kanban unblock`, only the block its
   snapshot showed, never Kelpie's own stop) and `reassign` (`hermes kanban assign` of a
   `todo`, `ready` or `review` task no run claims, to an agent's profile, with a comment
