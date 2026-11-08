@@ -94,7 +94,7 @@ Set it above your heartbeat interval for the rules that take it.
 
 ```bash
 uv run kelpie serve                # second shell
-uv run kelpie doctor               # PASS|FAIL|SKIP per check, "fix:" under each FAIL; exit 1 on FAIL
+uv run kelpie doctor               # PASS|WARN|FAIL|SKIP per check, "fix:" under FAIL/WARN; exit 1 on FAIL
 uv run kelpie status               # rules, their mode, Workboard and spool age
 ```
 

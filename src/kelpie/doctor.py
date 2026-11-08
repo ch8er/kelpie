@@ -653,7 +653,11 @@ def check_spans(
     except sqlite3.Error as exc:
         return _fail(name, f"span store {path} not readable: {exc}", fix)
     if newest is None:
-        return _skip(name, f"no span has arrived in {path}; OTLP is optional (quickstart step 4)")
+        return _skip(
+            name,
+            f"no span has arrived in {path}; OTLP is optional "
+            "(Hermes quickstart step 4, Claude Code step 5)",
+        )
     age = now - datetime.fromisoformat(newest)
     if age > FRESH:  # spans used to arrive and stopped
         return _quiet_or_fail(name, f"newest span is {format_age(age)} old ({path})", fix, running)
