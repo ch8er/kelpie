@@ -317,9 +317,18 @@ class Recorded:
 
     changes: tuple[StatusChange, ...] = ()
     watched: tuple[tuple[datetime, datetime], ...] = ()
+    _spans: tuple[tuple[datetime, datetime, Status, datetime], ...] = field(
+        default=(), init=False, repr=False, compare=False
+    )
 
-    def intervals(self) -> list[tuple[datetime, datetime, Status, datetime]]:
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "_spans", tuple(self._build()))
+
+    def intervals(self) -> tuple[tuple[datetime, datetime, Status, datetime], ...]:
         """``(from, to, status, placed at)`` stretches where a record is evidence."""
+        return self._spans
+
+    def _build(self) -> list[tuple[datetime, datetime, Status, datetime]]:
         out = []
         for i, c in enumerate(self.changes):
             lo = changed_at(c)

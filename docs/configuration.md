@@ -903,11 +903,12 @@ tick records nothing. The last record per task is read back at start, so a resta
 no transition; a change during the downtime is known only to within the gap (the board's
 `status_since` places it when it falls inside). Each run of `kelpie serve` also keeps
 when it watched (first tick to latest): the report treats a recorded status as known only
-while Kelpie watched and up to the last tick that saw it, and infers the rest as before, so
-a downtime is never filled with the last status seen (a board not read for some ticks that
-comes back unchanged counts as unchanged). On a multi-host farm the hub records the merged boards. Rules never read
-these rows; the daily report's stages do ([report](#report)). Task ids are assumed unique
-across adapters, as everywhere in Kelpie.
+while Kelpie watched and up to the last tick that saw it (a gap of up to 5 minutes before
+the next change counts as one tick), and infers the rest as before, so a downtime is
+never filled with the last status seen. A board not read for some ticks that comes back
+unchanged counts as unchanged. On a multi-host farm the hub records the merged boards.
+Rules never read these rows; the daily report's stages do ([report](#report)). Task ids
+are assumed unique across adapters, as everywhere in Kelpie.
 
 ## [snooze]
 
