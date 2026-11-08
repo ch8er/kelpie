@@ -19,6 +19,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
   listener of its own (`GET /v1/farm`, 127.0.0.1:9465). No write endpoint; with
   `[view] token_env` set every request needs the bearer token, and off loopback `kelpie
   serve` refuses to start without a strong one; `kelpie doctor` warns about it first.
+- Block storms (rule 4, #229): once `storm_mode = "rule"`, rule 13's "needs you" digest
+  folds the person's items of a storm's tasks into one item for the storm, so the person
+  reads one cause instead of each block again; a task joining the storm no longer
+  re-announces the digest. A storm's "resolved" notice says how many of its tasks were
+  unblocked ("Block storm over: 5 of 7 tasks unblocked") and which are still blocked.
 - Rule `unanswered_asks` (P1, #297, observe by default): an agent's `@question` to another
   agent in a task comment is an obligation until the recipient (or a person) answers.
   Kelpie reminds only while the recipient is idle, at most once per step (`steps`, default

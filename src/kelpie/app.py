@@ -156,6 +156,7 @@ from kelpie.rules.ci_economy import CiEconomy
 from kelpie.rules.conflict_warning import ConflictWarning
 from kelpie.rules.no_progress import NoProgress
 from kelpie.rules.resources import Resources
+from kelpie.rules.stale_blocks import StaleBlocks
 from kelpie.traces.auth import TokenFile, TokenFileError, loose_mode
 from kelpie.traces.config import TraceSettings, load_traces
 from kelpie.traces.forward import Forwarder
@@ -969,11 +970,8 @@ def _rule_config(
     section = dict(config.rules.get(name, {}))
     if name in _LEAVES_TO_INBOX:
         return _with_inbox(name, section, config, REGISTRY if registry is None else registry)
-    if name == "needs_you" and "planned_labels" not in section:
-        planned = planned_labels(config.rules.get("bottlenecks", {}))
-        if planned:
-            section["planned_labels"] = planned
-        return section
+    if name == "needs_you":
+        return _needs_you_section(section, config)
     if name == "return_causes" and "expected_shared" not in section:
         # Files many tasks are meant to edit are not conflict hot spots either.
         shared = config.rules.get("conflict_warning", {}).get("expected_shared")
@@ -998,6 +996,29 @@ def _rule_config(
             "loop_breaker.poll_patterns differs from wait_condition.poll_patterns: calls "
             "matching only one of them are coached by rule 2 or stopped by rule 10 inconsistently"
         )
+    return section
+
+
+def _needs_you_section(section: dict[str, Any], config: EngineConfig) -> dict[str, Any]:
+    """``needs_you`` inherits rule 6's planned and hold labels (unless it sets its own) and,
+    while rule 4's block-storm check is switched on (``storm_mode = "rule"``), rule 4's storm
+    settings as ``block_storms``: its digest folds the items of a storm's tasks into one."""
+    if "block_storms" in section:
+        raise ValueError(
+            "block_storms is set automatically from [engine.rules.stale_blocks] storm_mode, "
+            "not in [engine.rules.needs_you]"
+        )
+    if "planned_labels" not in section:
+        planned = planned_labels(config.rules.get("bottlenecks", {}))
+        if planned:
+            section["planned_labels"] = planned
+    blocks = config.rules.get("stale_blocks", {})
+    if blocks.get("storm_mode") == "rule" and "stale_blocks" in config.rules:
+        defaults = StaleBlocks()
+        section["block_storms"] = {
+            "min_tasks": blocks.get("storm_min_tasks", defaults.storm_min_tasks),
+            "window": blocks.get("storm_window", defaults.storm_window),
+        }
     return section
 
 

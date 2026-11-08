@@ -78,8 +78,9 @@ and hashes stripped; what it names kept apart) are one outage: one alert with th
 reason as its cause, the person it names (who can end it) and the tasks. Only blocks
 without a condition Kelpie can check count, and not snoozed ones. A new check: its alert and
 its "resolved" notice are only logged (``storm_mode = "observe"``) until set to ``"rule"``,
-which follows the rule's mode and folds this rule's alerts of its tasks under it (rule 13's
-inbox items are not folded).
+which follows the rule's mode and folds this rule's alerts of its tasks under it; rule 13's
+digest then folds the person's items of its tasks into one (``block_storms``). Its
+"resolved" notice says how many of its tasks were unblocked.
 
 The dead-end and no-condition alerts list the tasks stuck behind the blocked one
 (``params.stuck_ids``, through dependencies and task waits, as rule 3 reads them), so rule 3
@@ -100,11 +101,12 @@ from types import MappingProxyType
 from typing import Any
 
 from kelpie.core.actions import Action, ActionKind, Severity
+from kelpie.core.incidents import is_outage_state
 from kelpie.core.model import Condition, ConditionKind, KelpieMark, Snapshot, Status, Task
 from kelpie.core.serde import parse_duration
 from kelpie.rules import needs_you, register
 from kelpie.rules._alerts import alert_params, check_connectors
-from kelpie.rules._block_storm import storms
+from kelpie.rules._block_storm import resolved_text, storms
 from kelpie.rules._chains import behind_lookup, behind_text
 from kelpie.rules._snoozes import SnoozeCheck, checker, describe
 from kelpie.rules._tasks import (
@@ -342,14 +344,21 @@ class StaleBlocks:
         return asks_a_person(task, snapshot, settings.approval_reasons, settings.condition_reasons)
 
     def resolved(
-        self, state_id: str, snapshot: Snapshot, last_key: str | None = None
+        self,
+        state_id: str,
+        snapshot: Snapshot,
+        last_key: str | None = None,
+        summary: str | None = None,
     ) -> str | None:
         """The resolve notice of a block whose state closed because a snooze holds it (without
         the snooze this rule would still alert on it), or because rule 13 lists it now (without
         the hand-off it would): that it is snoozed and until when, or that it is in the
         person's digest, not that the block is gone. None otherwise: the engine's general
         notice. A block whose last alert was about stale evidence is not described as handed
-        off: the connector recovered, which is what closed it."""
+        off: the connector recovered, which is what closed it. A block storm says how many of
+        its tasks were unblocked (:func:`~kelpie.rules._block_storm.resolved_text`)."""
+        if is_outage_state(state_id):
+            return resolved_text(snapshot, NAME, state_id, summary, checker(snapshot))
         task = next(
             (
                 t

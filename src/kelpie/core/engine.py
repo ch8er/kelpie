@@ -482,13 +482,16 @@ class Engine:
         if callable(hook):
             try:
                 # a hook that takes ``last_key`` also learns which alert last announced it,
-                # one that takes ``since`` when the state began
+                # one that takes ``since`` when the state began, one that takes ``summary``
+                # what that alert said
                 wants = inspect.signature(hook).parameters
                 extra: dict[str, Any] = {}
                 if "last_key" in wants:
                     extra["last_key"] = state.key
                 if "since" in wants:
                     extra["since"] = state.since
+                if "summary" in wants:
+                    extra["summary"] = state.summary
                 text = hook(state.id, snapshot, **extra)
             except Exception:
                 log.exception("rule %s failed to describe resolved state %s", state.rule, state.id)

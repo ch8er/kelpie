@@ -116,6 +116,19 @@ held: that is news, said at once. A snooze is on the item's own task: the human 
 the blocked agent task of an approval; one on a task merely parked behind a human task
 holds nothing (``kelpie snooze`` warns, :func:`parked_on`).
 
+**Block storms** (#229). While rule 4's storm check is switched on (``storm_mode =
+"rule"``), ``kelpie.app`` gives this rule its storm settings (``block_storms``) and the
+person's items whose tasks are in a storm (:mod:`kelpie.rules._block_storm`, found the same
+way) are one entry of ``items`` for the storm: ``kind`` ``block_storm``, ``task_id`` its
+longest-waiting task, ``needed`` the shared reason, ``tasks`` all of them, ``storm`` its
+state id, ``blocking`` the tasks waiting behind its tasks; ``storms`` lists each storm's
+state and tasks, and the headline counts tasks, not items. The state's key holds the storm's
+state id instead of its tasks, so the digest says "changed" once when a storm forms, and a
+task joining it later is the storm's news, not the digest's. A storm's tasks are those
+blocked since it began (rule 4's scope): an earlier block on the same reason stays an item.
+Counts, cost, ``approvals`` and ``waiting`` still hold every task: the person is still what
+they wait on.
+
 This rule owns escalating human work, per person. Rule 6 keeps the farm-level alert (free
 slots and only human tasks ready) and escalates single human gates only with
 ``escalate_human_gates = true``.
@@ -131,9 +144,13 @@ from typing import Any
 
 from kelpie.core.actions import Action, ActionKind, Severity
 from kelpie.core.conditions import linked_conditions
+from kelpie.core.incidents import Outage
 from kelpie.core.model import Condition, KelpieMark, Snapshot, Status, Task
 from kelpie.core.serde import parse_duration
 from kelpie.rules import register
+from kelpie.rules._alerts import alert_params
+from kelpie.rules._alerts import count as counted
+from kelpie.rules._block_storm import storms
 from kelpie.rules._chains import behind_lookup
 from kelpie.rules._snoozes import SnoozeCheck, checker, describe
 from kelpie.rules._tasks import (
@@ -154,6 +171,7 @@ from kelpie.rules.bottlenecks import (
 )
 
 NAME = "needs_you"
+STALE_BLOCKS = "stale_blocks"  # rule 4, whose block storms fold this rule's items
 # Params every escalation carries for planned work behind the person's listed human tasks
 # (incident 20): not waiting on them, so outside ``waiting``; for the daily report to import.
 # (Not ``PLANNED``: ``kelpie.rules.PLANNED`` is the list of planned rules.)
@@ -233,6 +251,10 @@ class NeedsYou:
     condition_reasons: tuple[re.Pattern[str], ...] = ()
     # Labels marking a task as later (inherited from rule 6's planned and hold labels).
     planned_labels: frozenset[str] = frozenset()
+    # Rule 4's block storms, once switched on there (kelpie.app sets them from
+    # stale_blocks' storm settings): the person's items in a storm fold into one item.
+    storm_min_tasks: int = 0  # 0: no folding
+    storm_window: timedelta = timedelta(hours=2)
     name: str = NAME
 
     def evaluate(self, snapshot: Snapshot) -> list[Action]:
@@ -241,7 +263,24 @@ class NeedsYou:
             ((person, live, held) for person, (live, held) in split.items() if live),
             key=lambda x: (-_total(x[1]), x[0]),
         )
-        return [self._escalate(person, live, snapshot.now, held) for person, live, held in ranked]
+        found = self._storms(snapshot) if ranked else []
+        return [
+            self._escalate(person, live, snapshot.now, held, found) for person, live, held in ranked
+        ]
+
+    def _storms(self, snapshot: Snapshot) -> list[Outage]:
+        """Rule 4's block storms, as it finds them (its storm settings, given to this rule
+        while its storm check is switched on); none without them."""
+        if self.storm_min_tasks <= 0:
+            return []
+        alerts = storms(
+            snapshot,
+            STALE_BLOCKS,
+            self.storm_min_tasks,
+            self.storm_window,
+            snoozed=checker(snapshot),
+        )
+        return [o for a in alerts if (o := Outage.from_params(a.params)) is not None]
 
     def resolved(self, state_id: str, snapshot: Snapshot) -> str | None:
         """The resolve notice of a person whose items are all snoozed: what is snoozed, and
@@ -417,9 +456,15 @@ class NeedsYou:
         return (self.approvers.get(role) if role else None) or self.default_approver
 
     def _escalate(
-        self, person: str, items: list[Item], now: datetime, snoozed: Sequence[Item] = ()
+        self,
+        person: str,
+        items: list[Item],
+        now: datetime,
+        snoozed: Sequence[Item] = (),
+        outages: Sequence[Outage] = (),
     ) -> Action:
         items = sorted(items, key=lambda i: (-i.cost_hours, i.task.id))
+        entries = _entries(items, outages)
         snoozed = sorted(snoozed, key=lambda i: (_until(i, now), i.task.id))
         total = _total(items)
         # held: the tasks waiting on the person and those behind them, as the items count
@@ -428,17 +473,18 @@ class NeedsYou:
         planned = sorted({tid for i in items for tid in i.planned} - set(waiting))
         since = now - max(i.waiting for i in items)
         severity = Severity.CRITICAL if total >= self.critical_after_hours else Severity.WARNING
-        listed = "; ".join(_described(i) for i in items[:_SHOWN])
-        more = f"; and {len(items) - _SHOWN} more" if len(items) > _SHOWN else ""
+        listed = "; ".join(e.describe() for e in entries[:_SHOWN])
+        more = f"; and {len(entries) - _SHOWN} more" if len(entries) > _SHOWN else ""
         who = "Nobody is assigned to approve these" if person == UNASSIGNED else person
         aside = f" Snoozed, not counted: {len(snoozed)} item(s)." if snoozed else ""
         return Action(
             ActionKind.ESCALATE,
             NAME,
-            f"Needs you ({who}): {len(items)} item(s) hold {len(blocked)} agent task(s), "
+            f"Needs you ({who}): {len(entries)} item(s) hold {len(blocked)} agent task(s), "
             f"{total:.1f} agent-hours waited so far. By cost of delay: {listed}{more}.{aside}",
             severity=severity,
-            key=f"{NAME}:{person}:{','.join(sorted(i.task.id for i in items))}",
+            # A storm is one entry: a task joining it is the storm's news, not the digest's.
+            key=f"{NAME}:{person}:{','.join(sorted(e.key for e in entries))}",
             state=f"{NAME}:{person}",
             since=since,
             params={
@@ -456,24 +502,24 @@ class NeedsYou:
                 "cost_hours": round(total, 1),
                 # The alert's layout reads task_id, title, needed, since and blocking; the
                 # daily report reads task (and the ledger holds the rest as it always has).
-                "items_total": len(items),
-                "items": [
-                    {
-                        "kind": i.kind,
-                        "task_id": i.task.id,
-                        "task": i.task.id,
-                        "title": i.task.title,
-                        "needed": i.needed,
-                        "since": (now - i.waiting).isoformat(),
-                        "blocking": i.blocking,
-                        "behind": list(i.behind[: _SHOWN * 2]),
-                        "waiting_minutes": int(i.waiting.total_seconds() // 60),
-                        "cost_hours": round(i.cost_hours, 1),
-                        **({"snooze": i.snooze.params()} if i.snooze is not None else {}),
-                        # what a chat snooze button would hold (#176): not a broken block
-                        **({} if i.broken else {"snooze_task": i.task.id}),
-                    }
-                    for i in items[:MAX_ITEMS]
+                # The catalog's digest line counts items, and a storm is one item:
+                # count tasks instead.
+                **(
+                    alert_params(
+                        f"Waiting for you: {counted(len(items), 'task')}, "
+                        f"{sum(len(e.items) for e in entries if e.storm)} of them in "
+                        f"{counted(len(stormy), 'block storm')}"
+                    )
+                    if (stormy := [e for e in entries if e.storm is not None])
+                    else {}
+                ),
+                "items_total": len(entries),
+                "items": [e.params(now) for e in entries[:MAX_ITEMS]],
+                # Items folded under rule 4's block storms: one entry each in ``items``.
+                "storms": [
+                    {"state": e.storm.state, "tasks": [i.task.id for i in e.items]}
+                    for e in entries
+                    if e.storm is not None
                 ],
                 # Items a snooze holds: out of everything above, listed in the footer (#176)
                 "snoozed_total": len(snoozed),
@@ -494,6 +540,87 @@ class NeedsYou:
                 ],
             },
         )
+
+
+@dataclass(frozen=True, slots=True)
+class _Entry:
+    """One line of the digest: an item, or the person's items in one block storm."""
+
+    items: tuple[Item, ...]
+    storm: Outage | None = None
+
+    @property
+    def cost_hours(self) -> float:
+        return sum(i.cost_hours for i in self.items)
+
+    @property
+    def key(self) -> str:
+        return self.storm.state if self.storm is not None else self.items[0].task.id
+
+    def describe(self) -> str:
+        if self.storm is None:
+            return _described(self.items[0])
+        ids = ", ".join(i.task.id for i in self.items[:_SHOWN])
+        more = f" (+{len(self.items) - _SHOWN} more)" if len(self.items) > _SHOWN else ""
+        return (
+            f'block storm on "{self.storm.signature}": {len(self.items)} task(s) ({ids}{more})'
+            f", one answer for all: {self.cost_hours:.1f} agent-hours"
+        )
+
+    def params(self, now: datetime) -> dict[str, Any]:
+        if self.storm is None:
+            return _item_params(self.items[0], now)
+        first = min(self.items, key=lambda i: (now - i.waiting, i.task.id))
+        tasks = [i.task.id for i in self.items]
+        return {
+            "kind": "block_storm",
+            "task_id": first.task.id,
+            "task": first.task.id,
+            "title": f"Block storm: {len(tasks)} tasks blocked on the same reason",
+            "needed": self.storm.signature,
+            "since": (now - first.waiting).isoformat(),
+            # as for an approval: the tasks waiting behind the blocked ones
+            "blocking": len({t for i in self.items for t in i.held} - set(tasks)),
+            "behind": tasks[: _SHOWN * 2],
+            "waiting_minutes": int(first.waiting.total_seconds() // 60),
+            "cost_hours": round(self.cost_hours, 1),
+            "storm": self.storm.state,
+            "tasks": tasks,
+        }
+
+
+def _entries(items: Sequence[Item], outages: Sequence[Outage]) -> list[_Entry]:
+    """The digest's lines, by cost of delay: each item, except that the items whose tasks
+    are in a block storm are one line for the storm (in the first storm that has them)."""
+    folded: dict[str, list[Item]] = {}
+    alone: list[_Entry] = []
+    by_state = {o.state: o for o in outages}
+    for item in items:
+        storm = next((o for o in outages if item.task.id in o.tasks), None)
+        if storm is None:
+            alone.append(_Entry((item,)))
+        else:
+            folded.setdefault(storm.state, []).append(item)
+    entries = alone + [_Entry(tuple(found), by_state[s]) for s, found in folded.items()]
+    return sorted(entries, key=lambda e: (-e.cost_hours, e.key))
+
+
+def _item_params(i: Item, now: datetime) -> dict[str, Any]:
+    return {
+        "kind": i.kind,
+        "task_id": i.task.id,
+        "task": i.task.id,
+        "title": i.task.title,
+        "needed": i.needed,
+        "since": (now - i.waiting).isoformat(),
+        "blocking": i.blocking,
+        "behind": list(i.behind[: _SHOWN * 2]),
+        "waiting_minutes": int(i.waiting.total_seconds() // 60),
+        "cost_hours": round(i.cost_hours, 1),
+        **({"snooze": i.snooze.params()} if i.snooze is not None else {}),
+        # what a chat snooze button would hold (#176): not a broken block
+        **({} if i.broken else {"snooze_task": i.task.id}),
+    }
 
 
 def _described(item: Item) -> str:
@@ -685,6 +812,23 @@ def build(config: dict[str, Any]) -> NeedsYou:
         if isinstance(hours, bool) or not isinstance(hours, int | float) or hours <= 0:
             raise ValueError("critical_after_hours must be a positive number")
         kwargs["critical_after_hours"] = float(hours)
+    if "block_storms" in config:
+        kwargs.update(_block_storms(config.pop("block_storms")))
     if config:
         raise ValueError(f"unknown parameters: {sorted(config)}")
     return NeedsYou(**kwargs)
+
+
+def _block_storms(value: Any) -> dict[str, Any]:
+    """Rule 4's storm settings, as ``kelpie.app`` passes them: ``min_tasks`` and ``window``."""
+    if not isinstance(value, Mapping) or set(value) != {"min_tasks", "window"}:
+        raise ValueError("block_storms must hold min_tasks and window")
+    found = value["min_tasks"]
+    if isinstance(found, bool) or not isinstance(found, int) or found < 0:
+        raise ValueError("block_storms.min_tasks must be a whole number >= 0")
+    return {
+        "storm_min_tasks": found,
+        "storm_window": window
+        if isinstance(window := value["window"], timedelta) and window > timedelta(0)
+        else _duration(window, "block_storms.window"),
+    }

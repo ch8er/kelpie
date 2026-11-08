@@ -26,7 +26,9 @@ class Rule(Protocol):
     A hook that also takes ``last_key`` (``resolved(state_id, snapshot, last_key=None)``) is
     given the key of the alert that last announced the state, for a rule whose state is
     described by several kinds of alert; one that takes ``since`` is given when the state
-    began, for a rule that describes only what happened since."""
+    began, for a rule that describes only what happened since; one that takes ``summary`` is
+    given the reason of that alert, for a rule that reports how much of what it announced
+    is left (a block storm: "5 of 7 tasks unblocked")."""
 
     name: str
 

@@ -663,3 +663,74 @@ def test_planned_params_dedupe_skip_people_and_cap() -> None:
     assert "P-2" not in esc.params[PLANNED_TASKS]  # a person's own task is no agent work
     assert esc.params[PLANNED_AGENT_TASKS] == 26  # P-1 once, across both human tasks
     assert len(esc.params[PLANNED_TASKS]) == 20  # capped
+
+
+# --- block storms fold the person's items (#229) ------------------------------------------
+
+
+def _storm_farm(n: int = 5) -> Snapshot:
+    from kelpie.core.model import Block, Owner, OwnerKind
+
+    since = NOW - timedelta(hours=2)
+    tasks = tuple(
+        Task(
+            f"S-{i}",
+            f"task {i}",
+            Status.BLOCKED,
+            since + i * timedelta(minutes=5),
+            role="developer",
+            block=Block("needs_input: waiting for CEO (Xcode first launch)", since),
+        )
+        for i in range(n)
+    )
+    other = Task(
+        "Q-1",
+        "pricing",
+        Status.BLOCKED,
+        since,
+        role="developer",
+        block=Block("needs_input: CEO to approve the pricing copy", since),
+    )
+    owners = (Owner("ceo", "ceo", OwnerKind.HUMAN),)
+    return Snapshot(now=NOW, tasks=(*tasks, other), owners=owners)
+
+
+def test_a_storm_is_one_line_of_the_digest() -> None:
+    from kelpie.rules.needs_you import build as build_inbox
+
+    rule = build_inbox(
+        {"default_approver": "ceo", "block_storms": {"min_tasks": 3, "window": "2h"}}
+    )
+    (esc,) = rule.evaluate(_storm_farm())
+    items = esc.params["items"]
+    assert [i["kind"] for i in items] == ["block_storm", "approval"]
+    assert items[0]["tasks"] == [f"S-{i}" for i in range(5)]
+    assert items[0]["needed"] == "needs_input: waiting for CEO (Xcode first launch)"
+    assert "snooze_task" not in items[0]  # snoozing one task does not answer the storm
+    assert esc.params["headline"] == "Waiting for you: 6 tasks, 5 of them in 1 block storm"
+    assert "Needs you (ceo): 2 item(s)" in esc.reason
+    assert esc.params["items_total"] == 2 and esc.params["waiting_agent_tasks"] == 6
+    assert len(esc.params["approvals"]) == 6  # every task is still the person's
+    # A task joining the storm is the storm's news, not a new digest.
+    (bigger,) = rule.evaluate(_storm_farm(6))
+    assert bigger.key == esc.key
+    # Without rule 4's storm settings, every block is its own item, as before.
+    (plain,) = build_inbox({"default_approver": "ceo"}).evaluate(_storm_farm())
+    assert plain.params["items_total"] == 6 and "storms" in plain.params
+    assert plain.params["storms"] == []
+    assert "headline" not in plain.params  # the catalog's digest line, as before
+
+
+def test_block_storms_config() -> None:
+    from kelpie.rules.needs_you import build as build_inbox
+
+    rule = build_inbox({"block_storms": {"min_tasks": 4, "window": timedelta(hours=1)}})
+    assert rule.storm_min_tasks == 4 and rule.storm_window == timedelta(hours=1)
+    for bad in (
+        {"min_tasks": 3},
+        {"min_tasks": -1, "window": "2h"},
+        {"min_tasks": 3, "window": "0s"},
+        [],
+    ):
+        with pytest.raises(ValueError, match="block_storms"):
+            build_inbox({"block_storms": bad})
