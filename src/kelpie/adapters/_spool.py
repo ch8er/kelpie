@@ -4,12 +4,15 @@ Shared by the Claude Code and OpenClaw adapters. Agents can write next to the sp
 file is opened without following a symlink or blocking on a FIFO, checked to be a regular
 file on the open descriptor, and read up to a byte limit with overlong lines skipped.
 :func:`open_regular` is also the safe open for any other file agents can write (stop
-markers, the doctors' reads of settings and config files).
+markers, the doctors' reads of settings and config files). :func:`write_in_dir` is the
+matching write: every step relative to one handle on the directory.
 """
 
 from __future__ import annotations
 
+import contextlib
 import os
+import secrets
 import stat
 from collections.abc import Iterator
 from datetime import datetime
@@ -27,6 +30,42 @@ def open_regular(path: Path) -> int:
         os.close(fd)
         raise
     return fd
+
+
+def write_in_dir(directory: Path, name: str, body: bytes, prefix: str = ".tmp-") -> Path:
+    """Write ``<directory>/<name>`` atomically (mode 0600), replacing an older file, with
+    every step relative to one descriptor on the directory: the directory is opened without
+    following a symlink (its last component), checked on the descriptor, and the temporary
+    file is created (``O_EXCL``, ``O_NOFOLLOW``) and renamed through that descriptor. So an
+    agent that can write where the directory lives cannot swap it for a symlink between the
+    check and the write and make Kelpie write elsewhere. A symlink at ``name`` is replaced,
+    never followed. The directory is created (0700) when missing; its parents are trusted.
+    Raises OSError when the directory is a symlink or not a directory."""
+    if not name or "/" in name or name in (".", ".."):
+        raise ValueError(f"not a plain file name: {name!r}")
+    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+    try:
+        dfd = os.open(directory, flags)
+    except OSError as exc:
+        raise OSError(f"{directory} is not a plain directory ({exc.strerror})") from None
+    try:
+        if not stat.S_ISDIR(os.fstat(dfd).st_mode):  # defence in depth: O_DIRECTORY did
+            raise OSError(f"{directory} is not a plain directory")
+        tmp = f"{prefix}{secrets.token_hex(8)}.tmp"
+        create = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+        fd = os.open(tmp, create | getattr(os, "O_CLOEXEC", 0), 0o600, dir_fd=dfd)
+        try:
+            with os.fdopen(fd, "wb") as f:
+                f.write(body)
+            os.replace(tmp, name, src_dir_fd=dfd, dst_dir_fd=dfd)
+        except BaseException:
+            with contextlib.suppress(OSError):
+                os.unlink(tmp, dir_fd=dfd)
+            raise
+    finally:
+        os.close(dfd)
+    return directory / name
 
 
 def read_lines(path: Path, limit: int, max_line: int) -> Iterator[str]:
