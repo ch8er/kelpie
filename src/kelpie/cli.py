@@ -184,6 +184,20 @@ def main(argv: Sequence[str] | None = None) -> int:
         action="store_true",
         help="also read network connectors (GitHub) as a tick would; default: offline",
     )
+    run_once = sub.add_parser(
+        "run-once",
+        help="print the actions every rule asks for on one snapshot, and exit (with --dry-run; "
+        "dispatches and writes nothing)",
+    )
+    run_once.add_argument(
+        "--dry-run", action="store_true", help="required: print the actions, carry none out"
+    )
+    run_once.add_argument("--json", action="store_true", help="machine-readable output")
+    run_once.add_argument(
+        "--refresh",
+        action="store_true",
+        help="also read network connectors (GitHub) as a tick would; default: offline",
+    )
     sub.add_parser(
         "ci-config",
         help="rule 9's CI configuration proposals as diffs (reads GitHub; writes nothing)",
@@ -332,6 +346,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             out, err, code = run_why(
                 settings, args.task, args.json, max(0, args.entries), refresh=args.refresh
             )
+            sys.stdout.write(out)
+            sys.stderr.write(err)
+            return code
+        if args.command == "run-once":
+            from kelpie.run_once import run as run_once_
+
+            out, err, code = run_once_(settings, args.dry_run, args.json, refresh=args.refresh)
             sys.stdout.write(out)
             sys.stderr.write(err)
             return code

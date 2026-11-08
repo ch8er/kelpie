@@ -133,6 +133,7 @@ source_modules = [
     "kelpie.doctor",
     "kelpie.why",
     "kelpie.snooze",
+    "kelpie.run_once",
     "kelpie.view",
 ]
 forbidden_modules = ["kelpie.sim", "kelpie.demo"]

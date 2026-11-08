@@ -206,6 +206,9 @@ farm throughput metrics from traces.
   evaluated against it (observe), and the task's status and age, owner, labels and sessions,
   conditions (each with its PR target, last check and result), what it waits for up to the
   first dead end, the rule findings, its open alert states and latest ledger entries.
+  `kelpie run-once --dry-run` evaluates every rule on the same kind of snapshot and prints
+  all their actions with each rule's mode (`--json`, `--refresh`); it dispatches and writes
+  nothing, and serve's ledger may hold some of them back (cooldowns, transitions only).
 - **Farm throughput** (`kelpie.report.throughput`): per role, tasks completed per hour,
   hand-offs per hour, utilization, mean and current queue length, rework rate and cost per
   completed task, plus task-hours by stage (working, queue, review, waiting for conditions,
@@ -567,6 +570,7 @@ uv sync
 cp kelpie.example.toml kelpie.toml   # optional; every key has a safe default
 uv run kelpie status                 # rules that would load, with their mode
 uv run kelpie why T-101               # why a task is not moving (read-only; --json)
+uv run kelpie run-once --dry-run      # every rule's actions on one snapshot (writes nothing; --json)
 uv run kelpie snooze T-101 --until 2026-10-25 --reason "deferred to the release"
 uv run kelpie snoozes                # active snoozes; kelpie unsnooze T-101 removes one
 uv run kelpie ci-config               # rule 9's workflow changes as diffs (reads GitHub; writes nothing)
