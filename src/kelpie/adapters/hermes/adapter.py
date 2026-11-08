@@ -227,6 +227,7 @@ MAX_SPOOL_READ = 64 * 1024 * 1024  # bytes read per spool file and snapshot
 WRITER_ATTRIBUTE = "_kelpie.writer"  # a line's (pid, pid_start) until it is checked
 MAX_SPOOL_LINE = 16 * 1024  # a longer spool line is skipped (the plugin writes under 2 KB)
 FUTURE_SKEW = timedelta(minutes=5)  # spool lines dated further ahead are dropped
+MAX_DURATION_MS = 7 * 24 * 3600 * 1000  # a tool call's duration is cut to a week
 DEFAULT_LOOKBACK = timedelta(hours=24)
 DEFAULT_GIT_TIMEOUT = timedelta(seconds=DEFAULT_TIMEOUT)
 # Branches task work starts from: a task's files are what it changed since its newest
@@ -2083,6 +2084,7 @@ def _event_from_line(
             return None
         duration = rec.get("duration_ms")
         millis = duration if isinstance(duration, int | float) and duration >= 0 else 0
+        millis = min(millis, MAX_DURATION_MS)  # a huge one overflowed the datetimes
         run_id = rec.get("run_id")
         task_id = rec.get("task_id")
         tool = rec.get("tool")

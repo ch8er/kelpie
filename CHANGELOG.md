@@ -110,6 +110,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
   from any agent left the adapter's whole snapshot out of every tick, and `kelpie spool
   scrub` aborted. OTLP tool arguments nested that deep are hashed as text, no longer
   rejecting the span as malformed (#364).
+- A Claude Code or OpenClaw spool line whose `type` is a JSON list or object, and a Hermes
+  or Claude Code tool call with a duration too large for the datetimes, no longer raise out
+  of the adapter's snapshot: the first is skipped, a tool call's duration is cut to a week,
+  as OpenClaw already did (#383).
 - Stop markers of the Claude Code and OpenClaw adapters are written relative to a handle
   on the stop folder, opened without following a symlink: an agent can no longer swap the
   folder for a symlink between Kelpie's check and its write (audit L4, #336).

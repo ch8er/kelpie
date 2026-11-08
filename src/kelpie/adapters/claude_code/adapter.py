@@ -134,6 +134,7 @@ MAX_MARKER = 4096
 SPOOL_TAIL = 65536  # bytes read from the end of the spool to find its newest line
 MAX_SPOOL_READ = 64 * 1024 * 1024  # bytes read per spool file and snapshot
 MAX_LINE = 16 * 1024  # a longer spool line is skipped (the hook writes well under 2 KB)
+MAX_DURATION_MS = 7 * 24 * 3600 * 1000  # a tool call's duration is cut to a week
 
 UNSUPPORTED = (
     "Claude Code has no operator command for this action; "
@@ -240,7 +241,9 @@ def parse_line(line: str, cutoff: datetime, until: datetime | None = None) -> Sp
         rec = json.loads(line)
     except (ValueError, RecursionError):  # agents can write the spool
         return None
-    if not isinstance(rec, dict) or rec.get("type") not in _EVENT_TYPES:
+    if not isinstance(rec, dict) or not isinstance(rec.get("type"), str):
+        return None
+    if rec["type"] not in _EVENT_TYPES:
         return None
     at = _utc(rec.get("at"))
     session = _text(rec.get("session_id"))
@@ -267,7 +270,7 @@ def parse_line(line: str, cutoff: datetime, until: datetime | None = None) -> Sp
         command=_text(rec.get("command")),
         runners=spool_runners(rec.get("runners")),
         outcome=outcome if outcome in ("ok", "error") else None,
-        duration_ms=duration
+        duration_ms=min(duration, MAX_DURATION_MS)  # a huge one overflowed the datetimes
         if isinstance(duration, int) and not isinstance(duration, bool) and duration >= 0
         else 0,
         output_chars=chars
