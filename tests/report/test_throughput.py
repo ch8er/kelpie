@@ -376,3 +376,20 @@ def test_no_bottleneck_without_an_hour_waited() -> None:
     ]
     found = bottleneck(tie)
     assert found is not None and (found.role, found.stage) == ("a", "review")
+
+
+def test_the_throughput_section_names_the_days_bottleneck() -> None:
+    from datetime import UTC, date, datetime, timedelta
+
+    from kelpie.core.model import Owner, Status, Task
+    from kelpie.report.daily import ReportInputs, build_report, render_markdown
+
+    start = datetime(2026, 3, 8, tzinfo=UTC)
+    queued = Task("T-9", "queued", Status.READY, start - timedelta(hours=2), role="developer")
+    review = Task("T-8", "in review", Status.REVIEW, start + timedelta(hours=18), role="ops")
+    inputs = ReportInputs(day=date(2026, 3, 8), tz=UTC, tasks=(queued, review),
+                          owners=(Owner("dev-1", "developer"),))  # fmt: skip
+    markdown = render_markdown(build_report(inputs))
+    line = next(x for x in markdown.splitlines() if x.startswith("**Bottleneck of the day**"))
+    assert "developer in queue, 24.0 task-hours waited (80% of all" in line
+    assert "its agents busy 0%" in line and "Next: ops in review, 6.0 task-hours." in line

@@ -6,7 +6,7 @@ from __future__ import annotations
 from collections import defaultdict
 
 from kelpie.core.spans import TokenUsage, usage
-from kelpie.core.stages import STAGES
+from kelpie.core.stages import STAGES, UNKNOWN_ROLE
 from kelpie.core.transitions import history
 from kelpie.report import md
 from kelpie.report.attribution import CallOwners, call_owners
@@ -107,6 +107,10 @@ def _rework_lines(ctx: SectionContext, owners: CallOwners, est: str) -> list[str
     return lines
 
 
+def _role(role: str) -> str:
+    return "tasks of no known role" if role == UNKNOWN_ROLE else md.text(role)
+
+
 def _bottleneck_lines(found: Bottleneck | None) -> list[str]:
     """The day's bottleneck, first in the section: where tasks waited longest."""
     if found is None:
@@ -115,9 +119,10 @@ def _bottleneck_lines(found: Bottleneck | None) -> list[str]:
     nxt = ""
     if found.runner_up is not None:
         role, stage, hours = found.runner_up
-        nxt = f" Next: {md.text(role)} in {STAGE_NAMES[stage]}, {hours:.1f} task-hours."
+        nxt = f" Next: {_role(role)} in {STAGE_NAMES[stage].lower()}, {hours:.1f} task-hours."
     return [
-        f"**Bottleneck of the day**: {md.text(found.role)} in {STAGE_NAMES[found.stage]}, "
+        f"**Bottleneck of the day**: {_role(found.role)} in "
+        f"{STAGE_NAMES[found.stage].lower()}, "
         f"{found.hours:.1f} task-hours waited ({found.share:.0%} of all task-hours waited "
         f"in any role and stage){util}.{nxt}",
         "",

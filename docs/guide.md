@@ -391,10 +391,12 @@ board the report is unchanged.
   them gets a recommendation for a lighter path, with the evidence (n reviews, k with
   findings) and the tokens a day it would save; under 20 it is "direction only"; above
   the threshold, nothing. Kelpie only recommends: it never changes how tasks are reviewed.
-- **Unanswered asks** (#297): agent-hours that agents' questions to other agents (what rule
-  `unanswered_asks` keeps open) stayed unanswered within the day, by the agent asked, with
-  the asking tasks. Read as of the day's end: an answer after the day leaves the ask open
-  within it; an ask answered within the day is not counted, so it is a lower bound.
+- **Unanswered asks** (#297): agent-hours that agents' questions to other agents (asks as
+  rule `unanswered_asks` reads them, also those on blocked or waiting tasks it leaves to
+  other rules) stayed unanswered within the day, by the agent asked, with the asking tasks.
+  Comments are read as of the day's end (an answer after the day leaves the ask open within
+  it); a task finished since counts as open until its finish. An ask answered within the day
+  is not counted, so it is a lower bound.
 - **Instruction files** (with `[instructions]`, incident 21): the files each role loads that
   cost the most tokens a day, as measured when the report runs (the 24 hours before), with
   where the figure comes from (counted skill loads, or size times sessions: an *estimate*,

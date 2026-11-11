@@ -846,12 +846,13 @@ labels: P1, week-3, area:report
 Turn throughput metrics into recommendations following the theory of constraints: find the
 bottleneck, relieve it, subordinate the rest, elevate it.
 
-Not started. The inputs exist: time per stage and role (#78), the top-3 list in the daily
-report (#52) and `kelpie fix` before/after (#54, #258).
+Started: the day's bottleneck is named in the report (#423). The inputs for the rest exist:
+time per stage and role (#78), the top-3 list in the daily report (#52) and `kelpie fix`
+before/after (#54, #258).
 
 **Acceptance criteria**
 - [x] The current bottleneck role or stage identified each day (the "Bottleneck of the day" line of Farm throughput; #423)
-- [x] Recommendations ranked and fed into the top 3 of the daily report (sections' advice competes with the built-in ones, ranked by dollars and hours; already in main, ticked in #423)
+- [ ] Recommendations ranked and fed into the top 3 of the daily report (the ranking exists for sections' advice; the bottleneck gives no recommendation of its own yet)
 - [ ] Before/after verification applies to accepted recommendations
 
 ### docs: install, configuration and extension guides

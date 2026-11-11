@@ -78,8 +78,31 @@ def test_nothing_to_say_without_open_asks() -> None:
     assert "## Unanswered asks" not in report(task("T-1", person), done, plain)
 
 
-def test_the_throughput_section_names_the_days_bottleneck() -> None:
-    waiting = Task("T-9", "queued", Status.READY, START - timedelta(hours=2), role="developer")
-    markdown = report(waiting)
-    line = next(x for x in markdown.splitlines() if x.startswith("**Bottleneck of the day**"))
-    assert "developer in Queue, 24.0 task-hours waited (100% of all" in line
+def test_a_task_finished_after_the_day_was_open_all_of_it() -> None:
+    noon = START + timedelta(hours=12)
+    later = Task("T-1", "t", Status.DONE, END + timedelta(hours=3), owner_id="dev-1",
+                 comments=(said("dev-1", "@ops-1 can I restart?", noon),))  # fmt: skip
+    within = Task("T-2", "t", Status.DONE, noon + timedelta(hours=2), owner_id="dev-1",
+                  comments=(said("dev-1", "@ops-1 and now?", noon),))  # fmt: skip
+    before = Task("T-3", "t", Status.DONE, START - timedelta(hours=1), owner_id="dev-1",
+                  comments=(said("dev-1", "@ops-1 old?", START - timedelta(hours=5)),))  # fmt: skip
+    assert "| ops-1 | 2 | 14.0 | `T-1`, `T-2` |" in section(report(later, within, before))
+
+
+def test_an_answer_at_midnight_belongs_to_the_next_day() -> None:
+    asked = START + timedelta(hours=20)
+    t = task("T-1", said("dev-1", "@ops-1 ok?", asked), said("ops-1", "yes", END))
+    assert "| ops-1 | 1 | 4.0 |" in section(report(t))
+
+
+def test_ties_go_by_name_and_task_ids_are_escaped() -> None:
+    noon = START + timedelta(hours=12)
+    tie = section(
+        report(
+            task("T-1", said("dev-1", "@ops-1 ok?", noon)),
+            task("T-2", said("dev-1", "@architect-1 ok?", noon)),
+        )
+    )
+    assert tie.index("architect-1") < tie.index("ops-1")
+    odd = section(report(task("T|3", said("dev-1", "@ops-1 and?", START))))
+    assert "| ops-1 | 1 | 24.0 | `T\\|3` |" in odd
