@@ -1,0 +1,18 @@
+# Dependabot keeps the Dockerfile's base-image digests current (audit L14, #336): the
+# images are pinned as image:tag@sha256:<index digest>, and a weekly PR moves the digest
+# when the tag gets a rebuild (Debian security fixes). The PRs go through ci-ok like any
+# other; nobody copies a digest by hand. The first pins come from the pin-base-images
+# workflow (scripts/pin_base_images.py).
+version: 2
+updates:
+  - package-ecosystem: docker
+    directory: "/"
+    schedule:
+      interval: weekly
+    ignore:
+      # Python 3.12 on Debian bookworm is a deliberate choice (pyproject, CI): only the
+      # digest (and patch releases) move here, never the minor or major version.
+      - dependency-name: python
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
+    commit-message:
+      prefix: "chore(docker)"
