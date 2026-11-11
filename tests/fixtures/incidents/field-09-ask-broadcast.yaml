@@ -1,0 +1,44 @@
+id: "field-09-ask-broadcast"
+incident: null
+title: "One comment asks seven agents at once"
+description: >
+  An agent asked seven other agents the same question in one comment ("anyone?"). Each
+  idle recipient owes an answer, so each gets a reminder; but the reminders must not use
+  up the task's hourly action budget, or a stop or a requeue of that task by another rule
+  would be held back (#390). The reminders carry a budget of their own (checked in
+  tests/rules/test_unanswered_asks.py). A recipient that already answered, and a person
+  mentioned in the comment, get none.
+rule: unanswered_asks
+config: {}
+snapshot:
+  now: "2026-03-02T15:00:00+00:00"
+  owners:
+    - {id: agent-dev-1, role: developer}
+    - {id: agent-dev-2, role: developer}
+    - {id: agent-dev-3, role: developer}
+    - {id: agent-dev-4, role: developer}
+    - {id: agent-dev-5, role: developer}
+    - {id: agent-dev-6, role: developer}
+    - {id: agent-dev-7, role: developer}
+    - {id: agent-dev-8, role: developer}
+    - {id: human-owner, role: owner, kind: human}
+  tasks:
+    - id: T-911
+      title: "Pick the queue library"
+      status: in_progress
+      status_since: "2026-03-02T11:00:00+00:00"
+      role: developer
+      owner_id: agent-dev-1
+      comments:
+        - {author: agent-dev-1, text: "@agent-dev-2 @agent-dev-3 @agent-dev-4 @agent-dev-5 @agent-dev-6 @agent-dev-7 @agent-dev-8 @human-owner anyone used the new queue library?", at: "2026-03-02T12:00:00+00:00"}
+        - {author: agent-dev-8, text: "Not me, sorry.", at: "2026-03-02T12:20:00+00:00"}
+expected_actions:
+  - {kind: alert, task_id: T-911, severity: info, params: {asker: agent-dev-1, recipient: agent-dev-2, step: 1}}
+  - {kind: alert, task_id: T-911, params: {recipient: agent-dev-3}}
+  - {kind: alert, task_id: T-911, params: {recipient: agent-dev-4}}
+  - {kind: alert, task_id: T-911, params: {recipient: agent-dev-5}}
+  - {kind: alert, task_id: T-911, params: {recipient: agent-dev-6}}
+  - {kind: alert, task_id: T-911, params: {recipient: agent-dev-7}}
+not_expected_actions:
+  - {kind: alert, task_id: T-911, params: {recipient: agent-dev-8}}
+  - {kind: alert, task_id: T-911, params: {recipient: human-owner}}

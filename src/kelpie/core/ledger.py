@@ -11,8 +11,9 @@ Before an action is handled the ledger may suppress it:
 - **cooldown**: the same fingerprint was handled in the same effective mode within
   ``cooldown`` (``retry_after`` if that attempt failed). Matching on mode means that
   switching a rule from observe to act, or turning dry-run off, takes effect at once.
-- **rate limit**: its subject (task, else session, else executor and rule) already had
-  ``max_per_subject_per_hour`` actions with an effect in the last hour. The first such
+- **rate limit**: its subject (task, else session, else executor and rule; rule and task
+  for an ``Action.own_budget`` alert) already had ``max_per_subject_per_hour`` actions
+  with an effect in the last hour. The first such
   suppression per subject and hour is flagged so the engine can tell a human once.
 - **once**: an action with ``Action.once`` (a WIP commit, a resume note) is done at most
   once per fingerprint and mode within ``once_window``, not again after the cooldown. A
@@ -141,6 +142,8 @@ OBSERVE_ONLY = "observe_only"
 
 def subject(action: Action) -> str:
     """What the rate limit counts against."""
+    if action.own_budget:  # never the task's own budget (#390)
+        return f"rule:{action.rule}:task:{action.task_id or ''}"
     if action.task_id:
         return f"task:{action.task_id}"
     if session_id := action.params.get("session_id"):

@@ -120,7 +120,7 @@ Variables named by `token_env`, `webhook_env`, `headers_env`, `cancel_token_env`
 | `default_mode` | `"observe"` | mode | Mode of rules without their own `mode`. |
 | `cooldown` | `"30m"` | duration, >= 0 | The same action (same fingerprint) is not repeated within this window. |
 | `retry_after` | `"5m"` | duration, >= 0 | A failed action may be retried after this, inside the cooldown. |
-| `max_actions_per_task_per_hour` | `6` | count, >= 1 | Actions with an effect (suggested, alerted, executed, not executed, failed) per subject per hour: the task, else the session, else the rule. Further actions are suppressed and one warning is sent. |
+| `max_actions_per_task_per_hour` | `6` | count, >= 1 | Actions with an effect (suggested, alerted, executed, not executed, failed) per subject per hour: the task, else the session, else the rule. Further actions are suppressed and one warning is sent. Reminders of `unanswered_asks` count on a budget of their own per task (one comment can mention many agents), so they never hold back another rule's action on that task. |
 | `once_window` | `"7d"` | duration, > 0 | One-off actions (WIP commit, resume note, conflict comment) are carried out once per fingerprint within this window. |
 | `once_attempts` | `3` | count, >= 1 | A one-off action is given up after this many failed attempts. |
 | `state_escalations` | `["4h", "12h", "24h"]` | list of durations, increasing | Alerts about a lasting condition are sent again when its age passes each of these. |

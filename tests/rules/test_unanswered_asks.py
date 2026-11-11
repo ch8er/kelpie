@@ -1,11 +1,12 @@
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from kelpie.core.actions import Action, Severity
+from kelpie.core.actions import Action, ActionKind, Severity
 from kelpie.core.config import EngineConfig, Mode
 from kelpie.core.engine import Engine
-from kelpie.core.ledger import Outcome
+from kelpie.core.ledger import Outcome, Suppression, subject
 from kelpie.core.model import (
     Block,
     Comment,
@@ -264,3 +265,47 @@ def test_an_older_mention_elsewhere_does_not_hide_a_newer_answer() -> None:
     newer = task(Comment("arch-1", "@dev-1 v4.", NOW - H), tid="T-3")
     older = task(Comment("arch-1", "@dev-1 earlier note", NOW - 3 * H), tid="T-2")
     assert run(task(ask()), newer, older) == []
+
+
+BROADCAST_OWNERS = OWNERS + tuple(Owner(f"dev-{i}", "developer") for i in range(2, 9))
+BROADCAST = "@dev-2 @dev-3 @dev-4 @dev-5 @dev-6 @dev-7 @dev-8 anyone?"
+
+
+def test_reminders_have_a_budget_of_their_own() -> None:
+    actions = run(task(ask(BROADCAST)), owners=BROADCAST_OWNERS)
+    assert len(actions) == 7
+    assert all(a.own_budget for a in actions)
+    assert {subject(a) for a in actions} == {"rule:unanswered_asks:task:T-1"}
+
+
+def test_a_broadcast_question_cannot_suppress_another_rules_action() -> None:
+    """One comment mentioning seven agents gives seven reminders on the task; a requeue of
+    that task five minutes later is not rate-limited by them (#390)."""
+
+    @dataclass(frozen=True)
+    class Requeue:
+        name: str = "requeue_rule"
+
+        def evaluate(self, snapshot: Snapshot) -> list[Action]:
+            if snapshot.now == NOW:
+                return []  # asks first, the requeue on the next tick
+            return [Action(ActionKind.REQUEUE, self.name, "stuck", task_id="T-1")]
+
+    alerter = FakeAlerter()
+    engine = Engine(
+        [UnansweredAsks(), Requeue()],
+        adapters=[FakeAdapter()],
+        alerter=alerter,
+        config=EngineConfig(dry_run=False, default_mode=Mode.SUGGEST),
+    )
+    snap = Snapshot(now=NOW, tasks=(task(ask(BROADCAST)),), owners=BROADCAST_OWNERS)
+    first = engine.tick(lambda: snap)
+    alerted = [d for d in first if d.outcome is Outcome.ALERTED]
+    limited = [d for d in first if d.suppression is Suppression.RATE_LIMIT]
+    assert len(alerted) == 6 and len(limited) == 1  # the reminders' own budget: 6/hour
+    (notice,) = [e.reason for e in alerter.events if "Rate limit" in e.reason]
+    assert "unanswered_asks alerts on task T-1" in notice
+    assert "other actions on the task are not" in notice
+    later = replace(snap, now=NOW + 5 * M)
+    (requeue,) = [d for d in engine.tick(lambda: later) if d.action.rule == "requeue_rule"]
+    assert requeue.outcome is Outcome.SUGGESTED

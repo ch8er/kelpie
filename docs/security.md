@@ -133,6 +133,12 @@ make up (audit L10). `unknown` and the configured `[report] review_roles` never 
 place. A farm with more than 32 roles sees the later ones as `other` until `kelpie serve`
 restarts. A pre-work platform status label is cut to 64 characters too.
 
+An agent's text can also multiply alerts: a comment that mentions seven agents with a
+question gives seven `unanswered_asks` reminders on its task. Those reminders count toward
+`[engine] max_actions_per_task_per_hour` on a budget of their own (per rule and task), so
+however many there are, they never rate-limit another rule's action on that task: an agent
+cannot dodge a stop or a requeue of its task by asking everyone something (#390).
+
 ### Spools
 
 The hook spools are append-only files any agent on the host can write to, past the hooks'

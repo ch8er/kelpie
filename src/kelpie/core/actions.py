@@ -81,6 +81,10 @@ class Action:
     ``observe_only`` makes the engine handle the action as in observe mode whatever its
     rule's mode: a new check inside a rule that already runs live stays in observe until its
     own setting switches it on.
+
+    ``own_budget`` gives an alert that agents' text can multiply (one per agent a comment
+    mentions) a rate-limit budget of its own, per rule and task, instead of the task's: it
+    can never use up the budget a stop or a requeue of that task needs (#390).
     """
 
     kind: ActionKind
@@ -97,3 +101,4 @@ class Action:
     once_per_key: bool = False
     about_wait: bool = False
     observe_only: bool = False
+    own_budget: bool = False
