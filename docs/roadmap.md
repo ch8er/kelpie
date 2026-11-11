@@ -1168,9 +1168,9 @@ One Kelpie now watches several boards (#198), but metrics carry no board label a
 has no per-board view, so two projects on one farm read as one.
 
 **Acceptance criteria**
-- [x] A `board` label on per-task and per-adapter metrics (bounded: configured board names only) (#283; ticked in #PRNUM)
-- [x] Daily report: cost of chaos, throughput and biggest wait per board, plus the farm total (#283; ticked in #PRNUM)
-- [x] Alerts and `kelpie why` show the board name, not only the id prefix (#283; ticked in #PRNUM)
+- [x] A `board` label on per-task and per-adapter metrics (bounded: configured board names only) (#283; ticked in #422)
+- [x] Daily report: cost of chaos, throughput and biggest wait per board, plus the farm total (#283; ticked in #422)
+- [x] Alerts and `kelpie why` show the board name, not only the id prefix (#283; ticked in #422)
 
 ### report: backlog-release spike and toolchain version in outages (#193 follow-up)
 labels: P1, area:core
