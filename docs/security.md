@@ -705,6 +705,33 @@ Settled while building it:
   words: an adapter's error (paths, CLI output) stays in the ledger and the log.
 - **Act locks**: with answers on, `kelpie serve` takes the act lock of every board of its
   adapters, as it does when any rule acts, not only of the boards that opted in.
+- **Options only where a press can work**: an item keeps the agent's options (and gets
+  buttons) only when its task's board opted in; other boards' items, and other adapters'
+  (Linear reads comments too, but its adapter has no re-check), stay plain items.
+- **Not on a multi-host farm**: `chat_answers` on a `kelpie agent` stops it at startup.
+- **`answer_users` and an unassigned item**: with `answer_users` set, an item rule 13
+  lists under nobody can be answered by nobody ("This question is for -").
+- **What is in the ledger**: every confirm that passes the checks (and every dry-run
+  confirm, once per confirm button); option presses and refused presses are counted in
+  `kelpie_chat_rejected_total` and logged, not written to the ledger.
+- **`answer_buttons` turned off since**: no desk takes answer presses any more, so an old
+  button is `bad_ref`, not `not_enabled`.
+- **`unanswered_asks`** does not read answers: it never reminds about a blocked task (rule
+  13's), which is where answers apply.
+- **Shutdown**: answers queued but not carried out when Kelpie stops are recorded
+  `not_executed` and their questions given back; a confirm after that is refused. A crash
+  between the claim and the ledger entry leaves a claim without an entry (milliseconds):
+  that question answers "Already answered" until its claim ages out (30 days); delete
+  `kelpie.buttons.db` to clear it.
+- **Mentions in the comment**: Kelpie puts a word joiner after every `@`; Hermes' CLI turns
+  invisible characters into spaces, so on the board it reads "@ name": inert either way.
+- **Residual: who wrote a comment.** Hermes takes a comment's author from the caller
+  (`--author`), so an agent able to run `hermes kanban comment` can sign as another agent
+  and plant options on that agent's blocked task, or sign as a person to withdraw an offer.
+  The owner check holds only as far as the board's attribution does. What limits it: the
+  person sees every option's full text twice (digest and confirmation), options with links,
+  mentions, code or a leading `/` are refused, and the comment quotes the option as the
+  agent's own words, back to the task it was offered on.
 - **Residual window**: the adapter's re-read and Hermes' own `kanban comment` are two steps
   (milliseconds plus the CLI's start). A comment or a new block that lands between them is
   not caught; the unblock after it re-checks the block again, so at worst the comment

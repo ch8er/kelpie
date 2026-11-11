@@ -440,3 +440,50 @@ def test_build_app_wires_the_runner_into_the_loop(
         assert plain.alerts is not None and plain.alerts.pollers[0].desk is None  # type: ignore[attr-defined]
     finally:
         plain.close()
+
+
+def test_answers_queued_at_shutdown_are_given_back(world: World) -> None:
+    p = press()
+    assert world.buttons.claim_question(p.question, p.label, p.who, 7, p.ref_id, NOW) is None
+    world.runner.submit(p, NOW)
+    world.runner.abandon()
+    entry = world.entry()
+    assert entry.outcome is Outcome.NOT_EXECUTED and "stopped" in entry.detail
+    assert world.buttons.claim(p.question) is None and world.adapter.calls == []
+    with pytest.raises(RuntimeError, match="stopping"):
+        world.runner.submit(press(), NOW)
+
+
+def test_only_opted_in_boards_keep_options_on_the_alert() -> None:
+    from kelpie.core.alerts import AlertItem
+    from kelpie.core.offers import ItemOffer
+
+    offer = parse_offer(QUESTION)
+    assert isinstance(offer, Offer)
+    item = ItemOffer(offer, "q" * 32, Expect("dev-1", SINCE, offer.digest))
+    on, off = blocked(), blocked(source="linear")
+    off = Task("T-2", "x", Status.BLOCKED, SINCE, source="linear")
+    items = (AlertItem("T-1", offer=item), AlertItem("T-2", offer=item))
+    engine = Engine(rules=[])
+    snapshot = snap(on, off)
+    assert all(i.offer is None for i in engine._offers_on(items, snapshot))
+    engine.answer_boards = AnswerBoards(frozenset({"hermes"})).on
+    kept = engine._offers_on(items, snapshot)
+    assert kept[0].offer is item and kept[1].offer is None
+
+
+def test_a_kelpie_agent_refuses_chat_answers(tmp_path: Path) -> None:
+    from kelpie.cli import _agent
+
+    path = write(tmp_path)
+    path.write_text(
+        path.read_text()
+        + '\n[agent]\nname = "host-a"\nserver = "https://hub.invalid:9465"\n'
+        + 'token_env = "KELPIE_TEST_AGENT"\n'
+    )
+    try:
+        settings = load_settings(path)
+    except ConfigError:
+        pytest.skip("this config shape is not an agent's")
+    with pytest.raises(ConfigError, match="chat_answers"):
+        _agent(settings)

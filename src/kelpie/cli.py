@@ -473,13 +473,18 @@ def _agent(settings: Settings) -> int:
     import signal
     import threading
 
-    from kelpie.app import sleep_watch, utc_now
+    from kelpie.app import answer_boards, sleep_watch, utc_now
     from kelpie.remote.agent import Agent, tls_context
     from kelpie.remote.relay import Relay
 
     config = settings.agent
     if config is None:
         raise ConfigError("kelpie agent needs an [agent] section (name, server, token_env)")
+    if answer_boards(settings):
+        raise ConfigError(
+            "chat_answers is set on this kelpie agent: answers from the chat (#300) are not "
+            "supported on a multi-host farm yet; remove chat_answers"
+        )
     relay = None
     try:
         token = config.token()

@@ -343,6 +343,9 @@ class AnswerDesk:
         # nothing); the confirm, which would write, is recorded with dry_run and refused,
         # and the question stays open.
         if name is not None and self.control.dry_run():
+            if not self.store.use_answer_ref(ref.id, now):  # one record per confirm
+                self._reject("used_ref", query_id)
+                return False
             press = self._press(ref, offer, expect, index, user, name)
             try:
                 self.control.record_dry_run(press, now)

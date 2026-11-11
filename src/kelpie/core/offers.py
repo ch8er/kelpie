@@ -64,7 +64,14 @@ _HEADER = re.compile(r"\s*options\s*:\s*", re.IGNORECASE)
 _HEADER_ANY = re.compile(r"\s*options\s*:", re.IGNORECASE)
 _RECOMMEND = re.compile(r"\s*recommend(?:ed)?\s*:\s*(.*?)\s*", re.IGNORECASE)
 _LABEL = re.compile(r"\s*([A-D]|[1-4])([).])\s+(.*?)\s*")
-_LINK = re.compile(r"(?i)\b[a-z][a-z0-9+.-]*://|\bwww\.|\bt\.me/|\bmailto:")
+_LINK = re.compile(
+    r"(?i)\b[a-z][a-z0-9+.-]*://|\bwww\.|\bt\.me/|\bmailto:"
+    r"|\b[a-z0-9-]+(?:\.[a-z0-9-]+)*\.[a-z]{2,}/"  # a bare domain with a path
+    r"|\b[a-z0-9-]+(?:\.[a-z0-9-]+)*\.(?:com|org|net|io|dev|app|me|co|info|xyz|ru|example)\b"
+)
+# Characters that look like "@" or show as nothing though Unicode calls them letters or
+# symbols (Hangul fillers, the braille blank): an option must read as what it is.
+_LOOKALIKES = frozenset("\uff20\ufe6b\u3164\u115f\u1160\uffa0\u2800")
 _BAD_CATEGORIES = frozenset({"Cc", "Cf", "Cs", "Co", "Zl", "Zp"})
 WORD_JOINER = "\u2060"
 
@@ -176,8 +183,10 @@ def _option_problem(text: str) -> str | None:
         return "a control or invisible character"
     if text.startswith("/"):
         return "starts with /"
-    if "@" in text or "\uff20" in text:
+    if "@" in text or "\uff20" in text or "\ufe6b" in text:
         return "an @ mention"
+    if any(c in _LOOKALIKES for c in text):
+        return "a character that hides what it says"
     if "`" in text:
         return "a backtick"
     if _LINK.search(text):
@@ -188,6 +197,13 @@ def _option_problem(text: str) -> str | None:
 def _local(name: str) -> str:
     """A name without a host prefix (``host-a:dev-1`` -> ``dev-1``), case-folded."""
     return name.strip().rsplit(":", 1)[-1].casefold()
+
+
+def _same(author: str, owner: str) -> bool:
+    """Whether a comment's author is the task's owner: the same name, or, on a multi-host
+    farm where owner ids are ``<host>:<id>`` and comment authors are not, its local id."""
+    a, o = author.strip().casefold(), owner.strip().casefold()
+    return a == o or (":" in o and ":" not in a and a == _local(o))
 
 
 def task_owner(task: Task) -> str | None:
@@ -204,11 +220,10 @@ def find_offer(task: Task) -> Found | None:
     owner = task_owner(task)
     if not owner:
         return None
-    mine = _local(owner)
     earliest = task.block.since - OFFER_LEAD
     latest: Comment | None = None
     for c in task.comments:  # oldest first
-        if c.human or _local(c.author) != mine or c.at < earliest:
+        if c.human or not _same(c.author, owner) or c.at < earliest:
             continue
         if latest is None or c.at >= latest.at:
             latest = c
@@ -268,7 +283,7 @@ def stale(task: Task | None, expect: Expect) -> str | None:
     if task.status is not Status.BLOCKED or task.block is None:
         return f"the task is {task.status.value}, not blocked"
     owner = task_owner(task)
-    if owner is None or _local(owner) != _local(expect.owner):
+    if owner is None or owner.strip().casefold() != expect.owner.strip().casefold():
         return "another agent holds the task"
     if abs((task.block.since - expect.block_since).total_seconds()) >= 1:
         return "the task was blocked again"

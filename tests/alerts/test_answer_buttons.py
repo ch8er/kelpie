@@ -537,6 +537,8 @@ def test_dry_run_records_the_confirm_and_keeps_the_question(make: Callable[..., 
     assert rig.toasts()[-1] == "Kelpie is in dry-run: nothing was sent."
     assert [p.label for p in answers.dry_runs] == ["B"] and answers.submitted == []
     assert rig.store.claim(offer_item().question) is None  # not used up
+    rig.press(confirmation, 0, 0)  # the same confirm again: recorded once
+    assert len(answers.dry_runs) == 1 and rig.rejected() == {"dry_run": 1, "used_ref": 1}
 
 
 def test_dry_run_records_nothing_for_a_refused_person_or_a_changed_question(

@@ -79,6 +79,7 @@ class AnswerRunner:
     wake: Callable[[], None] = lambda: None
     desks: dict[str, AnswerDesk] = field(default_factory=dict)  # by channel name
     _queue: deque[tuple[AnswerPress, str]] = field(default_factory=deque)
+    _closed: bool = False
 
     def control(self) -> AnswerControl:
         return AnswerControl(
@@ -109,6 +110,8 @@ class AnswerRunner:
     def submit(self, press: AnswerPress, now: datetime) -> None:
         """Record the answer ``pending`` and queue it for the control loop; raises (nothing
         recorded) when the queue is full or the ledger cannot be written."""
+        if self._closed:
+            raise RuntimeError("Kelpie is stopping")
         if len(self._queue) >= MAX_QUEUED:
             raise RuntimeError("too many answers waiting")
         entry = _entry(press, now, Outcome.PENDING)
@@ -121,6 +124,19 @@ class AnswerRunner:
         self.store.append(_entry(press, now, Outcome.DRY_RUN))
 
     # --- the control loop ------------------------------------------------------------------
+
+    def abandon(self) -> None:
+        """Kelpie stops: every answer still queued was not written, so its entry becomes
+        ``not_executed`` and its question is given back (nothing is told to the chat, whose
+        poller is stopping too)."""
+        self._closed = True
+        self.desks = {}
+        while self._queue:
+            press, fingerprint = self._queue.popleft()
+            try:
+                self._refused(press, fingerprint, _params(press), "Kelpie stopped before writing")
+            except Exception:
+                log.exception("chat answer on %s not given back", one_line(press.task_id, 100))
 
     def drain(self, snapshot: Snapshot) -> None:
         """Carry out every queued answer (in the control loop's thread)."""

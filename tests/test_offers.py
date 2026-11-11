@@ -112,6 +112,11 @@ def test_a_question_without_an_options_line_is_no_offer() -> None:
         ("Options:\nA) run `rm -rf`\nB) b", "backtick"),
         ("Options:\nA) see https://example.invalid/x\nB) b", "link"),
         ("Options:\nA) see www.example.invalid\nB) b", "link"),
+        ("Options:\nA) log in at evil.example.com/login\nB) b", "link"),
+        ("Options:\nA) mail ops.example.org\nB) b", "link"),
+        ("Options:\nA) ask " + chr(0xFE6B) + "lead\nB) b", "@ mention"),
+        ("Options:\nA) " + chr(0x3164) + "\nB) b", "hides"),
+        ("Options:\nA) a" + chr(0x2800) + "\nB) b", "hides"),
         ("Options:\nA) a\nB) b" + CUT_MARK, "cut"),
         ("Options:\nA) a\nB) b\n" + "x" * MAX_OFFER_COMMENT, "cut"),
     ],
@@ -123,6 +128,16 @@ def test_a_broken_offer_is_refused_as_a_whole(text: str, why: str) -> None:
         return
     assert isinstance(result, Refused), result
     assert why in result.why
+
+
+def test_versions_and_file_names_are_not_links() -> None:
+    offer = parse_offer("Options:\nA) keep v2.1\nB) edit config.py and schema.v3")
+    assert isinstance(offer, Offer)
+
+
+def test_a_host_prefix_is_ignored_only_where_owners_carry_one() -> None:
+    assert find_offer(task(said(QUESTION, by="anything:dev-1"))) is None
+    assert find_offer(task(said(QUESTION, by="DEV-1"))) is not None
 
 
 def test_an_injected_option_cannot_reach_another_style_or_command() -> None:

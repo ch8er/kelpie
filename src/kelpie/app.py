@@ -1729,6 +1729,8 @@ class ControlLoop:
     # Carries out answers from the chat (#300) in this thread: on a fresh snapshot before
     # the rules run, and on a wake between ticks with the last one. None: no answers.
     answers: Callable[[Snapshot], object] | None = None
+    # Run once the loop has stopped (answers queued but not carried out are given back).
+    on_stop: Callable[[], object] | None = None
     _woken: threading.Event = field(default_factory=threading.Event)
 
     def wake(self) -> None:
@@ -1795,6 +1797,12 @@ class ControlLoop:
             self._thread.join(timeout)
             if self._thread.is_alive():
                 log.warning("control loop still busy after %.1fs; exiting anyway", timeout)
+                return
+        if self.on_stop is not None:
+            try:
+                self.on_stop()
+            except Exception:
+                log.exception("control loop shutdown step failed")
 
     @property
     def running(self) -> bool:
@@ -2380,12 +2388,15 @@ def _start_alerts(
         raise ConfigError(str(exc)) from exc
     if alerts is not None:
         engine.alerter = alerts.alerter()
+    if runner is not None:
+        engine.answer_boards = runner.boards.on  # options only where a press can work
     if runner is not None and loop is not None:
         if control is not None:
             runner.buttons = control.store
         runner.latest = lambda: loop.last_snapshot
         runner.wake = loop.wake
         loop.answers = runner.drain
+        loop.on_stop = runner.abandon
         loop.snapshot_source = _with_answers(loop.snapshot_source, runner, clock)
         for poller in alerts.pollers if alerts is not None else ():
             desk = getattr(poller, "desk", None)
