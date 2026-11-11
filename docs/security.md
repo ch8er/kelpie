@@ -412,8 +412,15 @@ way the multi-host hub limits each `kelpie agent` to its own host:
 Every workflow action is pinned to a commit. Checkouts keep no token in `.git/config`
 (`persist-credentials: false`), except the CI job that picks which checks a change needs,
 whose filter may fetch the base branch with the job's read-only token (audit L14). The
-Docker image's base images (`python:3.12-slim-bookworm`, `ghcr.io/astral-sh/uv`) are
-pinned by tag, not yet by digest.
+Docker image's base images (`python:3.12-slim-bookworm`, `ghcr.io/astral-sh/uv`) are to be
+pinned by digest, as `image:tag@sha256:<index digest>` (audit L14, #336). No digest is
+copied by hand: the `pin-base-images` workflow resolves each image's multi-platform index
+with `docker buildx imagetools inspect` on GitHub Actions (refusing one without
+`linux/amd64` or `linux/arm64`, which the release builds), prints the digests in its job
+summary and opens a PR that writes them (`scripts/pin_base_images.py`). Dependabot's
+`docker` ecosystem then moves the digests weekly through ordinary PRs, so the image still
+picks up Debian security fixes, and keeps Python on 3.12. Until that first PR is merged
+the Dockerfile still names its bases by tag.
 
 ## One acting instance per board
 
@@ -814,5 +821,7 @@ or `suggest` ([act-checklist.md](act-checklist.md)), or give them separate farms
   ([above](#one-acting-instance-per-board)), not across machines for a GitHub repository
   or Linear team, nor across users for those. Run one acting Kelpie per tracker.
 - **What is left of L14** ([#336](https://github.com/ch8er/kelpie/issues/336)): the
-  Dockerfile pins its base images by tag, not digest. (L4 and L13 are fixed: [Files Kelpie
+  digest pins come from the `pin-base-images` workflow's PR ([CI and release
+  workflows](#ci-and-release-workflows)); until it is merged the Dockerfile pins its base
+  images by tag. (L4 and L13 are fixed: [Files Kelpie
   writes](#files-kelpie-writes), [Outbound connections](#outbound-connections).)

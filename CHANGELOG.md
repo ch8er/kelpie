@@ -166,6 +166,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ### Security
 
+- The Docker image's base images are pinned by digest without hand-copied values: the new
+  `pin-base-images` workflow resolves each base image's multi-platform index digest on
+  GitHub Actions (`docker buildx imagetools inspect`, checked for linux/amd64 and
+  linux/arm64) and opens a PR writing `image:tag@sha256:…` into the Dockerfile
+  (`scripts/pin_base_images.py`); Dependabot's `docker` ecosystem keeps the digests current
+  (audit L14, #336).
 - Every listener bound to loopback (the main port's `/metrics`, `/healthz` and
   `/v1/traces`, a loopback hub, `[view]` and the `kelpie agent` OTLP relay) answers 421 to
   a request addressed to a name other than `localhost`, a loopback IP, its bind address or
