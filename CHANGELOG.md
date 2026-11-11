@@ -155,6 +155,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
   `/etc/hosts` alias, or a reverse proxy or tunnel on that host that passes the client's
   `Host` on to a loopback listener, needs that name in `[server] hosts`; listeners off
   loopback are unchanged (#406).
+- The Hermes, Claude Code and OpenClaw adapters read the hook spool incrementally: each
+  tick parses only the lines appended since the last one (an offset per file, by inode, so
+  a rotation keeps it; a truncated or rewritten file is read again), instead of up to
+  2 × 64 MiB every tick. An agent appending past the hook's rotation is capped, each cap
+  counted and logged once: the newest 64 MiB read per file and tick, 400,000 lines parsed
+  per tick and kept between ticks (at most 128 MiB of them), and 20,000 tool calls per
+  named run or session in a snapshot (the newest, and the run's first line). A spool the
+  hooks rotate at 20 MiB reaches none of them, so rule 10 sees the same evidence (#392).
 - A block storm's "Block storm over" notice counts the tasks Kelpie listed, not a list an
   agent wrote into its block reason (#404).
 - The `[view]` listener on loopback answers only requests addressed to a loopback name or
