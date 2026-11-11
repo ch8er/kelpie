@@ -430,7 +430,13 @@ def _with_offers(
         note: str | None = None
         answerable = None
         if (done := item.offer.answered) is not None:
-            key = "answer.pending" if done.pending else "answer.answered"
+            key = (
+                "answer.failed"
+                if done.failed
+                else "answer.pending"
+                if done.pending
+                else "answer.answered"
+            )
             when = done.at.astimezone(settings.tz).strftime("%Y-%m-%d %H:%M %Z")
             who = one_line(done.by, MAX_BY)
             label = one_line(done.label, 4)

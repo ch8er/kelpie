@@ -2095,8 +2095,12 @@ class HermesAdapter:
         try:
             with self._connect() as conn:
                 tasks = self._tasks(conn, self.clock() - self.lookback, publish=False)[0]
-        except sqlite3.Error as exc:
-            raise HermesError(f"cannot read Hermes kanban database {self.db_path}: {exc}") from exc
+        except (sqlite3.Error, HermesError) as exc:
+            # Nothing was written: the answer is refused and its question given back.
+            log.warning("hermes: answer to %s not checked: %s", task_id, exc)
+            raise StaleAnswer(
+                f"task {task_id}: the board could not be read; nothing written"
+            ) from exc
         task = next((t for t in tasks if t.id == task_id), None)
         if (why := stale(task, expect)) is not None:
             raise StaleAnswer(f"task {task_id}: {why}; nothing written")

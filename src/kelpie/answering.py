@@ -155,7 +155,7 @@ class AnswerRunner:
         try:
             done = executor.execute(comment)
         except StaleAnswer as exc:
-            self._refused(press, fingerprint, params, str(exc))
+            self._refused(press, fingerprint, params, str(exc), "the question changed")
             return
         except Exception as exc:  # it may have reached the board: the claim stays
             detail = f"the comment failed: {type(exc).__name__}: {exc}"
@@ -188,7 +188,12 @@ class AnswerRunner:
         self._finish(press, fingerprint, Outcome.EXECUTED, None, params, written=True)
 
     def _refused(
-        self, press: AnswerPress, fingerprint: str, params: dict[str, object], why: str
+        self,
+        press: AnswerPress,
+        fingerprint: str,
+        params: dict[str, object],
+        why: str,
+        chat: str | None = None,
     ) -> None:
         """Nothing reached the board: the question is free again."""
         if self.buttons is not None:
@@ -197,7 +202,9 @@ class AnswerRunner:
             except Exception as exc:
                 log.error("chat answer: question not released: %s", type(exc).__name__)
         params["comment"] = "not_executed"
-        self._finish(press, fingerprint, Outcome.NOT_EXECUTED, why, params, written=False)
+        self._finish(
+            press, fingerprint, Outcome.NOT_EXECUTED, why, params, written=False, chat=chat
+        )
 
     def _finish(
         self,
@@ -208,6 +215,7 @@ class AnswerRunner:
         params: dict[str, object],
         *,
         written: bool,
+        chat: str | None = None,
     ) -> None:
         try:
             if not self.store.answer_outcome(fingerprint, outcome, detail, dict(params)):
@@ -229,7 +237,13 @@ class AnswerRunner:
             key = "chat.answer.unblocked" if params.get("unblock") == "executed" else None
             text = _text(desk, key or "chat.answer.done", press.label, task)
         else:
-            text = _text(desk, "chat.answer.failed", press.label, task, one_line(detail or "", 200))
+            # Kelpie's fixed words only: an adapter's error (paths, CLI output) stays in the
+            # ledger and the log.
+            if outcome is Outcome.FAILED:
+                why = "the write failed, it may or may not be on the task; see the Kelpie log"
+            else:
+                why = chat or detail or ""
+            text = _text(desk, "chat.answer.failed", press.label, task, one_line(why, 200))
         try:
             desk.finished(press, written, text)
         except Exception as exc:

@@ -72,6 +72,7 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 CONFIRM_TTL = timedelta(minutes=2)  # a confirm button's life
+REPORT_TIMEOUT = 3.0  # seconds per Bot API call reporting an outcome (on the control loop)
 SKEW = timedelta(minutes=5)  # a reference issued this far "in the future" is still taken
 REASONS = ("stale_offer", "not_enabled", "dry_run", "not_approver", "used_question")
 
@@ -311,23 +312,15 @@ class AnswerDesk:
         name: str | None,
         now: datetime,
     ) -> bool:
-        """The guards both presses pass (an answered question, the opt-ins, dry-run, the
-        item's person, a changed question); a refused press is answered and counted."""
+        """The guards both presses pass (an answered question, the board's opt-in, the
+        item's person, a changed question), and for the confirm (``name`` set) the global
+        dry-run; a refused press is answered and counted."""
         lang = self.rendering.language
         if (claim := self.store.claim(ref.question)) is not None:
             self._reject("used_question", query_id, self._already(claim))
             return False
         if not self.control.enabled(ref.task_id):
             self._reject("not_enabled", query_id, i18n.text(lang, "chat.not_enabled"))
-            return False
-        if self.control.dry_run():
-            if name is not None:  # the confirm press is what would have written: recorded
-                press = self._press(ref, offer, expect, index, user, name)
-                try:
-                    self.control.record_dry_run(press, now)
-                except Exception as exc:
-                    log.error("telegram answer: dry-run press not recorded: %s", type(exc).__name__)
-            self._reject("dry_run", query_id, i18n.text(lang, "chat.dry_run"))
             return False
         approver = ref.offer.get("approver")
         if self.answer_users:
@@ -345,6 +338,17 @@ class AnswerDesk:
         if (why := self.control.stale(ref.task_id, expect)) is not None:
             log.info("telegram answer: %s changed: %s", one_line(ref.task_id, MAX_ID), why)
             self._reject("stale_offer", query_id, i18n.text(lang, "chat.stale_offer"))
+            return False
+        # Under the global dry-run the option press still gets its confirmation (it writes
+        # nothing); the confirm, which would write, is recorded with dry_run and refused,
+        # and the question stays open.
+        if name is not None and self.control.dry_run():
+            press = self._press(ref, offer, expect, index, user, name)
+            try:
+                self.control.record_dry_run(press, now)
+            except Exception as exc:
+                log.error("telegram answer: dry-run press not recorded: %s", type(exc).__name__)
+            self._reject("dry_run", query_id, i18n.text(lang, "chat.dry_run"))
             return False
         return True
 
@@ -439,7 +443,7 @@ class AnswerDesk:
             "text": full,
             "link_preview_options": {"is_disabled": True},
         }
-        if self.poller._call("editMessageText", body) is None:
+        if self.poller._call("editMessageText", body, REPORT_TIMEOUT) is None:
             reply = {
                 "chat_id": self.chat_id,
                 "text": full,
@@ -450,7 +454,7 @@ class AnswerDesk:
                 "link_preview_options": {"is_disabled": True},
                 "disable_notification": True,
             }
-            self.poller._call("sendMessage", reply)
+            self.poller._call("sendMessage", reply, REPORT_TIMEOUT)
 
     def _expired(self, query_id: object, message_id: int | None) -> None:
         """A genuine answer button that has expired: say so, and take that message's

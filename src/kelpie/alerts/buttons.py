@@ -1311,10 +1311,10 @@ class ButtonPoller:
         self._call("editMessageReplyMarkup", body)
         self._reject("expired_ref", query_id, text)  # answered, then counted once handled
 
-    def _call(self, method: str, body: Mapping[str, Any]) -> Any:
+    def _call(self, method: str, body: Mapping[str, Any], timeout: float | None = None) -> Any:
         """A Bot API call whose failure is only counted and logged (None then)."""
         try:
-            return self.api.call(method, body)
+            return self.api.call(method, body, timeout)
         except ApiError as exc:
             self._api_error(method, exc)
             return None

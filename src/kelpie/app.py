@@ -3536,6 +3536,28 @@ def _human_tasks_status(settings: Settings) -> list[str]:
     return [f"human_tasks: human_task conditions on the board, {who}"]
 
 
+def _chat_answers_status(settings: Settings) -> list[str]:
+    """Answers to agents' questions from the chat (#300): a farm-changing chat control."""
+    channels, boards = answer_channels(settings), answer_boards(settings)
+    if not channels and not boards:
+        return []
+    names = sorted(boards.adapters | {f"{a}:{b}" for a, b in boards.boards})
+    if chat_answers_on(settings):
+        own, anyone = "only the person each item is for", "any allowed user"
+        who = ", ".join(f"{c.name} ({own if c.answer_users else anyone})" for c in channels)
+        return [f"chat answers: on for {', '.join(names)}, from {who}"]
+    why = (
+        "no Telegram channel has answer_buttons"
+        if not channels
+        else "no board has chat_answers"
+        if not boards
+        else "the global dry-run is on"
+        if settings.engine.dry_run
+        else "not supported with [hub]"
+    )
+    return [f"chat answers: off ({why})"]
+
+
 def _human_decisions_status(settings: Settings) -> list[str]:
     """Who may record a person's decisions on the Hermes board: a trust setting."""
     hermes = settings.hermes
@@ -3612,6 +3634,7 @@ def render_status(
         *_github_status(settings),
         *_human_tasks_status(settings),
         *_human_decisions_status(settings),
+        *_chat_answers_status(settings),
         f"providers: {_providers_status(settings.llm_quotas)}",
         f"cost reports: {_cost_reports_status(settings)}",
         *_alerts_status(settings.alerts),

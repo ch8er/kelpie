@@ -324,6 +324,7 @@ def offer_params(
             "by": answer.by,
             "at": answer.at.isoformat(),
             "pending": answer.outcome == Outcome.PENDING.value,
+            "failed": answer.outcome == Outcome.FAILED.value,
         }
     return {"offer": out}
 
@@ -355,7 +356,9 @@ def offer_from_params(value: object) -> Offer | None:
 
 def answers_from_ledger(entries: Iterable[LedgerEntry]) -> tuple[Answer, ...]:
     """``Snapshot.answers`` from the ledger's chat answer entries (kind ``answer``): those
-    written or still pending. A refused, failed or dry-run answer gave the question back."""
+    written, still pending, or whose write failed (it may have reached the board: the
+    question stays claimed for a person to look at). A refused or dry-run answer gave the
+    question back."""
     out = []
     for e in entries:
         if e.kind is not ActionKind.ANSWER or e.outcome not in _KEPT or e.task_id is None:
@@ -368,7 +371,7 @@ def answers_from_ledger(entries: Iterable[LedgerEntry]) -> tuple[Answer, ...]:
     return tuple(out)
 
 
-_KEPT = frozenset({Outcome.PENDING, Outcome.EXECUTED})
+_KEPT = frozenset({Outcome.PENDING, Outcome.EXECUTED, Outcome.FAILED})
 
 
 @dataclass(frozen=True, slots=True)
@@ -380,6 +383,7 @@ class Answered:
     by: str
     at: datetime
     pending: bool = False
+    failed: bool = False  # the write failed: it may or may not be on the task
 
 
 @dataclass(frozen=True, slots=True)
@@ -425,5 +429,7 @@ def item_offer(value: object) -> ItemOffer | None:
             except ValueError:
                 when = None
             if when is not None and when.tzinfo is not None:
-                answered = Answered(label, by, when, raw.get("pending") is True)
+                answered = Answered(
+                    label, by, when, raw.get("pending") is True, raw.get("failed") is True
+                )
     return ItemOffer(offer, question, expect, approver, answered)

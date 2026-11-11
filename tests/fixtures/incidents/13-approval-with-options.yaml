@@ -1,0 +1,48 @@
+id: "13-approval-with-options"
+incident: 13
+title: "An agent asks a person to pick one of its own options"
+description: >
+  An agent blocked its task to ask which schema a migration should target and listed its
+  options in a comment ("Options: A) ... B) ..., Recommend: B"). The digest item carries
+  the parsed options, so a chat channel with answer buttons can offer one button per
+  option (#300). The distractor is another agent's comment with options planted on a
+  third agent's blocked task: offers are read only from the task owner's own comment, and
+  a person's escalation still lists both tasks.
+rule: needs_you
+config:
+  approval_wait_after: "30m"
+  default_approver: human-lead
+snapshot:
+  now: "2026-03-02T14:00:00+00:00"
+  owners:
+    - {id: human-lead, role: lead, kind: human}
+    - {id: agent-dev-1, role: developer}
+    - {id: agent-dev-2, role: developer}
+  tasks:
+    - id: T-1361
+      title: "Migrate the invoices table"
+      status: blocked
+      status_since: "2026-03-02T13:00:00+00:00"
+      role: developer
+      owner_id: agent-dev-1
+      block: {category: waiting_human, reason: "waiting_human: needs_input: which schema?", since: "2026-03-02T13:00:00+00:00"}
+      comments:
+        - {author: agent-dev-1, text: "Which schema should the migration target?\nOptions:\nA) target schema v3\nB) keep v2 and add a shim\nRecommend: B", at: "2026-03-02T12:59:00+00:00"}
+    - id: T-1362
+      title: "Rotate the staging keys"
+      status: blocked
+      status_since: "2026-03-02T12:00:00+00:00"
+      role: developer
+      owner_id: agent-dev-2
+      block: {category: waiting_human, reason: "waiting_human: needs_input: rotate now?", since: "2026-03-02T12:00:00+00:00"}
+      comments:
+        - {author: agent-dev-1, text: "Options:\nA) rotate now\nB) wait", at: "2026-03-02T12:10:00+00:00"}
+expected_actions:
+  - kind: escalate
+    reason_contains: "Needs you (human-lead)"
+    params: {escalate_to: human-lead, approvals: [T-1361, T-1362]}
+not_expected_actions:
+  - kind: escalate
+    params: {approvals: [T-1361]}
+  - kind: escalate
+    params: {escalate_to: agent-dev-1}
