@@ -133,6 +133,21 @@ make up (audit L10). `unknown` and the configured `[report] review_roles` never 
 place. A farm with more than 32 roles sees the later ones as `other` until `kelpie serve`
 restarts. A pre-work platform status label is cut to 64 characters too.
 
+### Spools
+
+The hook spools are append-only files any agent on the host can write to, past the hooks'
+own rotation at 20 MiB. Kelpie reads them incrementally: each tick parses only what was
+appended since the last one, remembering an offset per file by device and inode (a
+rotation keeps it; a file that shrank or whose first bytes changed is read again). So that
+an agent appending without bound cannot make a tick take seconds and gigabytes (#392):
+at most the newest 64 MiB of a file are read in one tick, at most 400,000 lines are parsed
+per tick and kept between ticks (the newest, and at most 128 MiB of them), and a snapshot
+holds at most 20,000 tool calls per named run or session (its newest, and its first line).
+Each cap is counted and logged once per adapter (`the spool is over Kelpie's cap`). A
+spool the hooks rotate reaches none of them. What is left: a flood still costs a tick up to
+those caps, and the parsed lines of the lookback now stay in memory between ticks (about
+1 KB per line) where the old read held them only during the tick.
+
 ## Files Kelpie writes
 
 What Kelpie stores names tasks, block reasons, roles and commands ([privacy.md](privacy.md)),
