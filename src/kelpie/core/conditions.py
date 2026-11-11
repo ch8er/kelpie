@@ -7,7 +7,15 @@ from collections import Counter
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 
-from kelpie.core.model import Block, Condition, ConditionKind, Snapshot, Status, Task
+from kelpie.core.model import (
+    Block,
+    Condition,
+    ConditionKind,
+    ProviderStatus,
+    Snapshot,
+    Status,
+    Task,
+)
 
 # Keys :func:`check_task_status` writes into ``Condition.params``; cleared before each check.
 _TASK_STATUS_RESULTS = ("observed_status", "error", "terminal")
@@ -92,6 +100,100 @@ def _check_task_status(condition: Condition, snapshot: Snapshot) -> Condition:
     return replace(
         condition, params=params, satisfied=False, satisfied_at=None, checked_at=snapshot.now
     )
+
+
+# --- quota_reset ---------------------------------------------------------------------------
+
+# Keys :func:`check_quota_reset` writes into ``Condition.params``; cleared before each check.
+_QUOTA_RESULTS = ("error", "observed_remaining", "observed_resets_at", "observed_at")
+
+
+def check_quota_reset(snapshot: Snapshot) -> Snapshot:
+    """Evaluate ``quota_reset`` conditions, as a snapshot step run after the provider probes
+    (``Snapshot.providers``, ``[connectors.llm_quotas]``). Pure: the probes are the evidence.
+
+    A condition names its provider (``params.provider``, as in ``[connectors.llm_quotas]``)
+    and holds once that provider's latest probe reads quota left (``remaining`` above 0) with
+    its credential not rejected; it does not hold while the probe reads none left (the probe
+    is taken again on its own schedule, so a reset that passed counts only once a probe sees
+    it). Without a probe of the provider, a condition that says when the quota resets
+    (``params.resets_at``, ISO 8601 with a zone) holds from then; otherwise, and when the
+    probe failed or could not read the quota, it is unknown (``satisfied`` None,
+    ``params.error``: ``not_found``, ``probe_failed``, ``no_reading`` or
+    ``invalid_params``). ``observed_*`` record what was read."""
+    if not any(c.kind is ConditionKind.QUOTA_RESET for c in snapshot.conditions):
+        return snapshot
+    probes = {p.name.casefold(): p for p in snapshot.providers}
+    return replace(
+        snapshot,
+        conditions=tuple(
+            _check_quota(c, snapshot, probes) if c.kind is ConditionKind.QUOTA_RESET else c
+            for c in snapshot.conditions
+        ),
+    )
+
+
+def _check_quota(
+    condition: Condition, snapshot: Snapshot, probes: dict[str, ProviderStatus]
+) -> Condition:
+    params = {k: v for k, v in condition.params.items() if k not in _QUOTA_RESULTS}
+    provider, at = params.get("provider"), params.get("resets_at")
+    resets_at = _aware(at) if at is not None else None
+    if (
+        (provider is not None and (not isinstance(provider, str) or not provider.strip()))
+        or (at is not None and resets_at is None)
+        or (provider is None and at is None)
+    ):
+        return _unknown(condition, params, "invalid_params", snapshot.now)
+    probe = probes.get(provider.strip().casefold()) if isinstance(provider, str) else None
+    if probe is None:
+        if resets_at is None:
+            return _unknown(condition, params, "not_found", snapshot.now)
+        held = snapshot.now >= resets_at
+        return replace(
+            condition,
+            params=params,
+            satisfied=held,
+            satisfied_at=resets_at if held else None,
+            checked_at=snapshot.now,
+        )
+    if probe.checked_at is not None:
+        params["observed_at"] = probe.checked_at.isoformat()
+    if not probe.ok and probe.error_kind != "rate_limited":
+        return _unknown(condition, params, "probe_failed", snapshot.now)
+    if probe.auth_ok is False:
+        return _unknown(condition, params, "probe_failed", snapshot.now)
+    if probe.remaining is None:
+        return _unknown(condition, params, "no_reading", snapshot.now)
+    params["observed_remaining"] = probe.remaining
+    if probe.resets_at is not None:
+        params["observed_resets_at"] = probe.resets_at.isoformat()
+    left = probe.remaining > 0
+    since = condition.satisfied_at if condition.satisfied else None
+    return replace(
+        condition,
+        params=params,
+        satisfied=left,
+        satisfied_at=(since or probe.checked_at or snapshot.now) if left else None,
+        checked_at=probe.checked_at or snapshot.now,
+    )
+
+
+def _unknown(
+    condition: Condition, params: dict[str, object], error: str, now: datetime
+) -> Condition:
+    params["error"] = error
+    return replace(condition, params=params, satisfied=None, satisfied_at=None, checked_at=now)
+
+
+def _aware(value: object) -> datetime | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        at = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    return at if at.tzinfo is not None else None
 
 
 # --- carrying a failed step's conditions forward ------------------------------------------

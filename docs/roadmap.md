@@ -643,7 +643,7 @@ Read rate-limit and quota state and credential expiry for configured LLM provide
 provider APIs where available and from trace errors otherwise.
 
 **Acceptance criteria**
-- [ ] `quota_reset` conditions evaluated (the kind exists; no connector evaluates it)
+- [x] `quota_reset` conditions evaluated from the provider probes, or a reset time the condition carries (#PR)
 - [ ] Limit hits from spans counted per provider (hits come from the status probes and are counted per provider, #35; none from spans)
 - [x] Credential expiry exposed in the snapshot (`ProviderStatus.expires_at` from the status probe, not a `Resource`; alerted by rule 7; #35)
 - [ ] Provider usage and cost APIs fed to budgets as a spend source: the same criterion as "Spend sources" in "core: budgets and spend" and tracked there (the cost reports are read and reconciled, #204, #205)

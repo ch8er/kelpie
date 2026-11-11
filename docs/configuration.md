@@ -1971,6 +1971,16 @@ values are header names; the default is `remaining = "ratelimit-remaining"`,
 it as a whole. For `status_url` the values are dotted JSON paths and `fields` is required.
 `remaining` is `limit - used` when only `used` is given.
 
+**`quota_reset` conditions.** A task can wait on a provider's quota (a park with a
+`quota_reset` condition, `params.provider` naming one of these probes). Each tick, after the
+probes, Kelpie evaluates it: it holds once the provider's latest probe reads quota left
+(`remaining` above 0, the key not rejected), and does not hold while none is left; rule 2
+then wakes the task. A reset that passed counts only once a probe sees it (the next probe
+within `interval`). Without a probe of that provider, a condition that carries
+`params.resets_at` (ISO 8601 with a zone) holds from that time; otherwise, and when the
+probe failed or read no quota, it is unknown (`params.error`: `not_found`, `probe_failed`,
+`no_reading`, `invalid_params`) and the task stays parked.
+
 ## [connectors.cost_reports]
 
 Reads what each provider's cost report says was spent per day (the bill), so the spend

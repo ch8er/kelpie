@@ -14,6 +14,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
   and waiting stage where tasks waited the most task-hours, with its share, the role's
   utilization and the runner-up; a new "Unanswered asks" section counts the agent-hours
   agents' questions to other agents stayed open within the day, by the agent asked.
+- `quota_reset` conditions are evaluated: a task parked on a provider's quota is woken once
+  that provider's latest `[connectors.llm_quotas]` probe reads quota left (or, without a
+  probe, from the reset time the condition carries); a failed or empty probe is unknown.
 
 - `kelpie run-once --dry-run` prints the actions every loaded rule asks for on one snapshot
   (built as `kelpie why` builds it: offline, `--refresh` adds GitHub; the open alert states
