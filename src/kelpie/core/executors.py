@@ -9,9 +9,11 @@ from typing import Protocol
 from kelpie.core.actions import Action, ActionKind, ActionResult
 from kelpie.core.ledger import Outcome
 from kelpie.core.model import Condition, ConditionKind
+from kelpie.core.offers import Expect
 from kelpie.core.ports import (
     ActionConnector,
     PlatformAdapter,
+    SupportsAnswerCheck,
     SupportsClose,
     SupportsReassign,
     SupportsStop,
@@ -21,6 +23,9 @@ from kelpie.core.ports import (
 )
 
 log = logging.getLogger(__name__)
+
+# The kinds an answer from the chat writes (#300), each re-checked by the adapter first.
+_CHECKED = frozenset({ActionKind.COMMENT, ActionKind.UNBLOCK})
 
 
 class Executor(Protocol):
@@ -80,6 +85,14 @@ class PlatformExecutor:
         tid = action.task_id
         if tid is None:
             return False
+        if "expect" in action.params:  # an answer from the chat (#300): re-checked first
+            expect = Expect.from_params(action.params["expect"])
+            if expect is None or action.kind not in _CHECKED:
+                return False
+            if not isinstance(adapter, SupportsAnswerCheck):
+                log.warning("%s cannot re-check an answer; not written", self.name)
+                return False
+            adapter.check_answer(tid, expect)  # StaleAnswer: nothing written
         match action.kind:
             case ActionKind.REQUEUE | ActionKind.WAKE:
                 # Waking a task means putting it back in the ready queue.

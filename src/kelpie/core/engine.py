@@ -43,6 +43,7 @@ from kelpie.core.ledger import (
     subject,
 )
 from kelpie.core.model import HostSleep, Snapshot
+from kelpie.core.offers import item_offer
 from kelpie.core.ports import ActionConnector, Alerter, Deferred, NothingToDo, PlatformAdapter
 from kelpie.core.rule import Rule
 from kelpie.core.states import MemoryStateStore, OpenState, StateStore, StateTracker, Transition
@@ -969,7 +970,14 @@ def _item(entry: object, snapshot: Snapshot) -> AlertItem | None:
         _snooze_note(entry.get("snooze")),
         _task_ref(entry.get("snooze_task")),
         _board(task_id, snapshot),
+        item_offer(entry.get("offer")),
+        _refused(entry.get("offer_refused")),
     )
+
+
+def _refused(value: object) -> str | None:
+    """Why an agent's ``Options:`` line was not offered as buttons (#300), if said."""
+    return value.strip()[:200] if isinstance(value, str) and value.strip() else None
 
 
 MAX_TASK_REF = 200  # characters of a ``snooze_task``; a longer one is dropped

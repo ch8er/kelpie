@@ -56,6 +56,9 @@ class Outcome(StrEnum):
     DROPPED = "dropped"  # should have reached a human, but no alerter is configured
     SUPPRESSED = "suppressed"  # held back by the ledger
     DEFERRED = "deferred"  # the executor could not take it this tick; never recorded
+    # A chat answer (#300) claimed and recorded, its write not finished yet; a crash leaves
+    # it so, for a person to look at (``kelpie why``, ``kelpie doctor``).
+    PENDING = "pending"
 
 
 # Outcomes that touched the outside world or a human; they count against the rate limit.

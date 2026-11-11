@@ -38,6 +38,7 @@ from kelpie.adapters.issues.config import (
 )
 from kelpie.adapters.openclaw.adapter import OpenClawAdapter
 from kelpie.adapters.openclaw.config import OpenClawSettings, load_openclaw
+from kelpie.alerts.answers import AnswerDesk
 from kelpie.alerts.buttons import (
     AlreadySnoozed,
     ButtonStore,
@@ -47,6 +48,8 @@ from kelpie.alerts.buttons import (
 )
 from kelpie.alerts.config import AlertSettings, load_alerts
 from kelpie.alerts.delivery import Delivery
+from kelpie.alerts.telegram import TelegramSettings
+from kelpie.answering import AnswerBoards, AnswerRunner
 from kelpie.configpaths import expand, read_config
 from kelpie.connectors.cost_reports import CostReportsSettings, load_cost_reports
 from kelpie.connectors.github import (
@@ -205,6 +208,9 @@ class HermesBoardSettings:
     # Signs Kelpie's parks and stops on this board; None: hermes-wait-<name>.key next to
     # the ledger (see _with_wait_key).
     wait_key: Path | None = None
+    # Answers to agents' questions from the chat (#300) on this board; None: as
+    # [adapters.hermes] chat_answers says.
+    chat_answers: bool | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -242,6 +248,20 @@ class HermesSettings:
     # Hermes' home: its profiles' state.db (waits inside sessions); None: not read
     state_home: Path | None = hermes.DEFAULT_HOME
     state_sources: tuple[str, ...] = hermes.DEFAULT_SOURCES  # Hermes session sources read
+    # Answers to agents' questions from the chat (#300): off by default; with boards, the
+    # default of every board (each may say otherwise).
+    chat_answers: bool = False
+
+    def answer_boards(self, adapter: str = "hermes") -> AnswerBoards:
+        """The boards that opted in to answers from the chat (#300)."""
+        if not self.boards:
+            return AnswerBoards(frozenset({adapter}) if self.chat_answers else frozenset())
+        on = frozenset(
+            (adapter, b.name)
+            for b in self.boards
+            if (self.chat_answers if b.chat_answers is None else b.chat_answers)
+        )
+        return AnswerBoards(boards=on)
 
     def build(self) -> hermes.HermesAdapter | HermesBoards:
         if not self.boards:
@@ -520,8 +540,12 @@ def _load_hermes(adapters: Any) -> HermesSettings | None:
         "boards",
         "state_home",
         "state_sources",
+        "chat_answers",
     }:
         raise ConfigError(f"unknown [adapters.hermes] keys: {sorted(extra)}")
+    chat_answers = section.get("chat_answers", False)
+    if not isinstance(chat_answers, bool):
+        raise ConfigError("[adapters.hermes] chat_answers must be true or false")
     boards = _hermes_boards(section)
     paths: dict[str, Path | None] = {}
     for key, default in (("db_path", hermes.DEFAULT_DB), ("spool", hermes.DEFAULT_SPOOL)):
@@ -706,6 +730,7 @@ def _load_hermes(adapters: Any) -> HermesSettings | None:
         boards,
         None if state_home is False else Path(state_home),
         tuple(dict.fromkeys(x.strip() for x in sources)),
+        chat_answers,
     )
 
 
@@ -726,8 +751,11 @@ def _hermes_boards(section: Mapping[str, Any]) -> tuple[HermesBoardSettings, ...
         )
     boards: list[HermesBoardSettings] = []
     for entry in raw:
-        if extra := set(entry) - {"name", "db_path", "wait_key"}:
+        if extra := set(entry) - {"name", "db_path", "wait_key", "chat_answers"}:
             raise ConfigError(f"unknown {where} keys: {sorted(extra)}")
+        answers = entry.get("chat_answers")
+        if answers is not None and not isinstance(answers, bool):
+            raise ConfigError(f"{where}: chat_answers must be true or false")
         name = entry.get("name")
         if not isinstance(name, str) or not _BOARD_NAME.fullmatch(name):
             raise ConfigError(
@@ -745,7 +773,7 @@ def _hermes_boards(section: Mapping[str, Any]) -> tuple[HermesBoardSettings, ...
                 values[key] = Path(value)
         db_path = values["db_path"]
         assert db_path is not None
-        boards.append(HermesBoardSettings(name, db_path, values["wait_key"]))
+        boards.append(HermesBoardSettings(name, db_path, values["wait_key"], answers))
     names = [b.name for b in boards]
     if twice := sorted({n for n in names if names.count(n) > 1}):
         raise ConfigError(f"{where} names {', '.join(twice)} twice")
@@ -1698,6 +1726,22 @@ class ControlLoop:
     _thread: threading.Thread | None = None
     # The snapshot of the last tick that built one (the read-only farm view, [view]).
     last_snapshot: Snapshot | None = None
+    # Carries out answers from the chat (#300) in this thread: on a fresh snapshot before
+    # the rules run, and on a wake between ticks with the last one. None: no answers.
+    answers: Callable[[Snapshot], object] | None = None
+    _woken: threading.Event = field(default_factory=threading.Event)
+
+    def wake(self) -> None:
+        """An answer from the chat waits (#300): carry it out before the next tick."""
+        self._woken.set()
+
+    def _answers(self, snapshot: Snapshot | None) -> None:
+        if self.answers is None or snapshot is None:
+            return
+        try:
+            self.answers(snapshot)
+        except Exception:
+            log.exception("chat answers failed")
 
     def tick_once(self) -> None:
         started = time.monotonic()
@@ -1705,6 +1749,7 @@ class ControlLoop:
 
         def source() -> Snapshot:
             taken.append(self.snapshot_source())
+            self._answers(taken[-1])
             return taken[-1]
 
         try:
@@ -1729,7 +1774,13 @@ class ControlLoop:
                     self.housekeeping()
                 except Exception:
                     log.exception("housekeeping failed")
-            self._stop.wait(max(0.0, interval - (time.monotonic() - started)))
+            while not self._stop.is_set():
+                rest = interval - (time.monotonic() - started)
+                if rest <= 0 or not self._woken.wait(rest):
+                    break
+                self._woken.clear()
+                if not self._stop.is_set():
+                    self._answers(self.last_snapshot)
 
     def start(self) -> None:
         if self._thread is not None:
@@ -1739,6 +1790,7 @@ class ControlLoop:
 
     def stop(self, timeout: float = 5.0) -> None:
         self._stop.set()
+        self._woken.set()
         if self._thread is not None:
             self._thread.join(timeout)
             if self._thread.is_alive():
@@ -2085,7 +2137,7 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
             loop,
             metrics,
             store,
-            alerts=_start_alerts(settings, engine, metrics, store, clock),
+            alerts=_start_alerts(settings, engine, metrics, store, clock, loop),
             ledger_retention=ledger_retention,
         )
         return _with_hub(app, hub)
@@ -2168,7 +2220,7 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
         metrics,
         housekeeping=_both(retention.maybe_start, ledger_retention.maybe_start),
     )
-    alerts = _start_alerts(settings, engine, metrics, store, clock)
+    alerts = _start_alerts(settings, engine, metrics, store, clock, loop)
     if hub is not None:
         # A span whose ids no agent token vouches for could be forged into any host's
         # namespace: with a hub, spans come only through the agents.
@@ -2311,11 +2363,15 @@ def _start_alerts(
     metrics: Metrics,
     store: LedgerStore,
     clock: Callable[[], datetime],
+    loop: ControlLoop | None = None,
 ) -> Delivery | None:
-    """Start the alert channels (their worker threads, and the snooze button poller of a
-    Telegram channel with ``buttons = true``) and give the engine its alerter. Done last in
-    ``build_app``, so a startup error before this point leaves no thread behind."""
-    control = _chat_control(settings, store, metrics, clock)
+    """Start the alert channels (their worker threads, and the button poller of a Telegram
+    channel with ``buttons`` or ``answer_buttons``) and give the engine its alerter. With
+    answers from the chat (#300) the control loop carries them out and its snapshots carry
+    them. Done last in ``build_app``, so a startup error before this point leaves no thread
+    behind."""
+    runner = _answer_runner(settings, store, engine, clock)
+    control = _chat_control(settings, store, metrics, clock, runner)
     try:
         alerts = settings.alerts.build(metrics, control=control)
     except ValueError as exc:
@@ -2324,21 +2380,97 @@ def _start_alerts(
         raise ConfigError(str(exc)) from exc
     if alerts is not None:
         engine.alerter = alerts.alerter()
+    if runner is not None and loop is not None:
+        if control is not None:
+            runner.buttons = control.store
+        runner.latest = lambda: loop.last_snapshot
+        runner.wake = loop.wake
+        loop.answers = runner.drain
+        loop.snapshot_source = _with_answers(loop.snapshot_source, runner, clock)
+        for poller in alerts.pollers if alerts is not None else ():
+            desk = getattr(poller, "desk", None)
+            if isinstance(desk, AnswerDesk):
+                runner.desks[desk.channel] = desk
     return alerts
 
 
+def answer_boards(settings: Settings) -> AnswerBoards:
+    """The boards that opted in to answers from the chat (#300; Hermes first)."""
+    return settings.hermes.answer_boards() if settings.hermes is not None else AnswerBoards()
+
+
+def answer_channels(settings: Settings) -> list[TelegramSettings]:
+    return [
+        c for c in settings.alerts.channels if isinstance(c, TelegramSettings) and c.answer_buttons
+    ]
+
+
+def chat_answers_on(settings: Settings) -> bool:
+    """Whether answers from the chat are on (#300): a Telegram channel with
+    ``answer_buttons``, a board with ``chat_answers`` and the global dry-run off. The
+    instance then acts on those boards (their act locks)."""
+    return (
+        bool(answer_channels(settings))
+        and bool(answer_boards(settings))
+        and not settings.engine.dry_run
+        and settings.hub is None
+    )
+
+
+def _answer_runner(
+    settings: Settings, store: LedgerStore, engine: Engine, clock: Callable[[], datetime]
+) -> AnswerRunner | None:
+    """What carries out answers from the chat (#300), or None when no channel has answer
+    buttons or no board opted in."""
+    if not answer_channels(settings) or not answer_boards(settings):
+        return None
+    if settings.hub is not None:
+        raise ConfigError(
+            "chat_answers needs the board's adapter inside kelpie serve: with [hub] the "
+            "boards are the agents', and answers from the chat are not supported there yet"
+        )
+    if not isinstance(store, SqliteLedgerStore):
+        raise ConfigError(
+            '[alerts] answer buttons need a database: set [storage] path (not ":memory:")'
+        )
+    return AnswerRunner(store, engine, answer_boards(settings), settings.engine.dry_run, clock)
+
+
+def _with_answers(
+    source: Callable[[], Snapshot], runner: AnswerRunner, clock: Callable[[], datetime]
+) -> Callable[[], Snapshot]:
+    """``source`` with ``Snapshot.answers`` filled from the ledger (#300); a failed read is
+    logged and leaves them empty (the digest then offers buttons for a question answered
+    already, and the button store's claim still refuses a second answer)."""
+
+    def read() -> Snapshot:
+        snapshot = source()
+        try:
+            answers = runner.answers(snapshot.now)
+        except Exception as exc:
+            log.error("chat answers not read from the ledger: %s", type(exc).__name__)
+            return snapshot
+        return replace(snapshot, answers=answers) if answers else snapshot
+
+    return read
+
+
 def _chat_control(
-    settings: Settings, store: LedgerStore, metrics: Metrics, clock: Callable[[], datetime]
+    settings: Settings,
+    store: LedgerStore,
+    metrics: Metrics,
+    clock: Callable[[], datetime],
+    runner: AnswerRunner | None = None,
 ) -> ChatControl | None:
-    """What snooze buttons need (#176): their store beside the database, and the callback
-    that writes a press's snooze and its ledger entry to Kelpie's store. None when no
-    channel has buttons."""
+    """What chat buttons need (#176, #300): their store beside the database, the callback
+    that writes a press's snooze and its ledger entry to Kelpie's store, and (``runner``)
+    what takes answers. None when no channel has buttons."""
     channels = settings.alerts.button_channels
     if not channels:
         return None
     if settings.db_path is None or not isinstance(store, SqliteLedgerStore):
         raise ConfigError(
-            '[alerts] snooze buttons need a database: set [storage] path (not ":memory:")'
+            '[alerts] chat buttons need a database: set [storage] path (not ":memory:")'
         )
     path = button_store_path(settings.db_path)
     try:
@@ -2365,7 +2497,8 @@ def _chat_control(
         return record.until
 
     metrics.set_chat_channels(c.name for c in channels)
-    return ChatControl(buttons, snooze, clock, metrics)
+    answers = runner.control() if runner is not None else None
+    return ChatControl(buttons, snooze, clock, metrics, answers=answers)
 
 
 def connector_steps(
@@ -3018,7 +3151,8 @@ def serve_act_locks(settings: Settings) -> HeldLocks:
     acts, none when every rule observes or suggests (or under dry-run). With ``[hub]`` there
     are no in-process adapters: each ``kelpie agent`` locks its own boards."""
     loaded = load_rules(settings.engine)
-    if not acting_rules(settings, loaded) or settings.hub is not None:
+    acting = bool(acting_rules(settings, loaded)) or chat_answers_on(settings)
+    if not acting or settings.hub is not None:
         return HeldLocks()
     return take_act_locks(board_locks(build_adapters(settings)))
 

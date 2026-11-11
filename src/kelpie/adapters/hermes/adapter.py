@@ -204,7 +204,8 @@ from kelpie.core.model import (
     Status,
     Task,
 )
-from kelpie.core.ports import NothingToDo, PlatformEvent, UnsupportedAction
+from kelpie.core.offers import Expect, stale
+from kelpie.core.ports import NothingToDo, PlatformEvent, StaleAnswer, UnsupportedAction
 from kelpie.core.spans import UNVERIFIED_ATTRIBUTE
 from kelpie.core.tools import (
     COMMAND_COMPLETE_ATTRIBUTE,
@@ -1167,7 +1168,7 @@ class HermesAdapter:
             return None
 
     def _tasks(
-        self, conn: _Connection, cutoff: datetime
+        self, conn: _Connection, cutoff: datetime, publish: bool = True
     ) -> tuple[tuple[Task, ...], set[str], dict[str, sqlite3.Row], tuple[Condition, ...]]:
         rows = conn.execute(
             "SELECT * FROM tasks WHERE status != 'archived'"
@@ -1284,7 +1285,8 @@ class HermesAdapter:
                     reopened_at=reopens.get(row["id"], ()),
                 )
             )
-        self._seen, self._blocks, self._assignees = seen, marks, assignees
+        if publish:  # a re-read for a check only (check_answer) leaves the snapshot's
+            self._seen, self._blocks, self._assignees = seen, marks, assignees
         return tuple(tasks), owners, known, tuple(waits)
 
     def _human(self, name: object) -> bool:
@@ -2083,6 +2085,21 @@ class HermesAdapter:
         self, task_id: str, message: str, *, branch: str | None = None, draft_pr: bool = False
     ) -> None:
         raise NotImplementedError(NOT_IMPLEMENTED)
+
+    def check_answer(self, task_id: str, expect: Expect) -> None:
+        """Before an answer from the chat is written (#300): re-read the task from the board,
+        never from a snapshot, and raise :class:`StaleAnswer` unless it is still blocked with
+        the block the press referred to, held by the same owner, and its owner's latest
+        comment offers the same options (:func:`kelpie.core.offers.stale`). Reads only; the
+        state the last snapshot left for ``unblock`` and ``reassign`` is kept."""
+        try:
+            with self._connect() as conn:
+                tasks = self._tasks(conn, self.clock() - self.lookback, publish=False)[0]
+        except sqlite3.Error as exc:
+            raise HermesError(f"cannot read Hermes kanban database {self.db_path}: {exc}") from exc
+        task = next((t for t in tasks if t.id == task_id), None)
+        if (why := stale(task, expect)) is not None:
+            raise StaleAnswer(f"task {task_id}: {why}; nothing written")
 
 
 def _own_spans(conn: _Connection, spans: tuple[Span, ...]) -> tuple[Span, ...]:

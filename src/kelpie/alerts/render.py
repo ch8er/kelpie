@@ -68,6 +68,7 @@ from urllib.parse import quote, urlsplit
 
 from kelpie.alerts import i18n
 from kelpie.core.alerts import AlertEvent, AlertItem, Did, SnoozeNote, SnoozeState, Transition
+from kelpie.core.offers import ItemOffer
 from kelpie.core.snooze import snooze_end
 
 MAX_TEXT = 4096  # Telegram's limit, in UTF-16 units
@@ -133,6 +134,9 @@ class RenderSettings:
     language: str = i18n.DEFAULT
     task_url: str | None = None
     tz: tzinfo = UTC
+    # Show the agents' own options on digest items (#300): a Telegram channel with
+    # answer_buttons, which puts a button per option under them.
+    answers: bool = False
 
 
 DEFAULT_RENDERING = RenderSettings()
@@ -220,6 +224,11 @@ class ItemView:
     snooze_task: str | None = None  # the task a snooze from the chat would set (raw id)
     command: str | None = None  # Slack: "kelpie snooze <task> --until <date>"
     board: str | None = None  # "Board: qr", on a farm with several boards (#283)
+    # The agent's own options (#300), each "A) <text>", and the recommended one's index
+    options: tuple[str, ...] = ()
+    recommended: int | None = None
+    answer_note: str | None = None  # "Answered B by …", "Answer in the next digest."
+    offer: ItemOffer | None = None  # set only on an item that gets answer buttons
 
 
 @dataclass(frozen=True, slots=True)
@@ -292,6 +301,8 @@ def layout(event: AlertEvent, settings: RenderSettings = DEFAULT_RENDERING) -> L
     )
     body = _cut_words(rest, MAX_REASON) if rest and not replaced else None
     items = tuple(_item(n, item, settings) for n, item in enumerate(event.items[:MAX_ITEMS], 1))
+    if settings.answers and event.transition is not Transition.RESOLVED:
+        items = _with_offers(items, event.items, settings)
     rule = _cut_words(_flat(defang(event.rule)), MAX_RULE)
     snoozed = tuple(_snoozed(i, settings) for i in event.snoozed[:MAX_SNOOZED])
     if event.at is not None and event.transition is not Transition.RESOLVED:
@@ -389,6 +400,53 @@ def _item(number: int, item: AlertItem, settings: RenderSettings) -> ItemView:
         snooze_task=item.snooze_task,
         board=_board(item.board, lang),
     )
+
+
+MAX_ANSWERABLE = 3  # items of one digest message that get answer buttons (#300)
+
+
+def _with_offers(
+    items: tuple[ItemView, ...], raw: Sequence[AlertItem], settings: RenderSettings
+) -> tuple[ItemView, ...]:
+    """The items with the agents' own options shown (#300): every option's full text, the
+    recommended one marked, and the answer, once given. The first :data:`MAX_ANSWERABLE`
+    unanswered offers get buttons; the others say to answer in the next digest."""
+    lang = settings.language
+    out = []
+    room = MAX_ANSWERABLE
+    for view, item in zip(items, raw, strict=False):
+        if item.offer is None:
+            if item.offer_refused:
+                why = _cut_words(_flat(defang(item.offer_refused)), MAX_NOTE)
+                view = replace(view, answer_note=i18n.text(lang, "answer.refused", why=why))
+            out.append(view)
+            continue
+        offer = item.offer.offer
+        options = tuple(
+            _cut_words(_flat(defang(offer.quoted(i))), MAX_OPTION_SHOWN)
+            for i in range(len(offer.options))
+        )
+        rec = next((i for i, o in enumerate(offer.options) if o.label == offer.recommended), None)
+        note: str | None = None
+        answerable = None
+        if (done := item.offer.answered) is not None:
+            key = "answer.pending" if done.pending else "answer.answered"
+            when = done.at.astimezone(settings.tz).strftime("%Y-%m-%d %H:%M %Z")
+            who = one_line(done.by, MAX_BY)
+            label = one_line(done.label, 4)
+            note = i18n.text(lang, key, label=label, who=who, at=when)
+        elif room > 0:
+            room -= 1
+            answerable = item.offer
+        else:
+            note = i18n.text(lang, "answer.next_digest")
+        out.append(
+            replace(view, options=options, recommended=rec, answer_note=note, offer=answerable)
+        )
+    return tuple(out)
+
+
+MAX_OPTION_SHOWN = 210  # an option is at most 200 characters, plus its label
 
 
 def _board(board: str | None, lang: str) -> str | None:
@@ -686,7 +744,9 @@ def _head_line(view: Layout, style: Style) -> str:
     return line
 
 
-def _item_lines(item: ItemView, style: Style, needed_label: str) -> list[str]:
+def _item_lines(
+    item: ItemView, style: Style, needed_label: str, language: str = i18n.DEFAULT
+) -> list[str]:
     shown = style.code(fit(item.shown_id, _BUDGET["id"], style))
     if item.title:
         first = f"{item.number}. {style.bold(fit(item.title, _BUDGET['title'], style))}"
@@ -699,6 +759,15 @@ def _item_lines(item: ItemView, style: Style, needed_label: str) -> list[str]:
         lines.append(f"{INDENT}{style.esc(needed_label)}: {note}")
     if item.snooze:
         lines.append(f"{INDENT}{fit(item.snooze, _BUDGET['snooze'], style)}")
+    if item.options:
+        lines.append(f"{INDENT}{style.esc(i18n.text(language, 'label.options'))}:")
+        for n, option in enumerate(item.options):
+            line = f"{INDENT}{style.code(fit(option, MAX_OPTION_SHOWN * 2, style))}"
+            if n == item.recommended:
+                line += f" {style.esc(i18n.text(language, 'answer.recommended'))}"
+            lines.append(line)
+    if item.answer_note:
+        lines.append(f"{INDENT}{fit(item.answer_note, _BUDGET['note'], style)}")
     parts = [style.esc(item.board)] if item.board else []
     if item.blocking:
         parts.append(style.esc(item.blocking))
@@ -748,7 +817,7 @@ def _text(view: Layout, style: Style, limit: int) -> tuple[str, bool]:
     """The text, and whether the reason (if any) got the room it needs."""
     lines = [_head_line(view, style), ""]
     for item in view.items:
-        lines += _item_lines(item, style, view.needed_label)
+        lines += _item_lines(item, style, view.needed_label, view.language)
     if view.more:
         lines.append(style.esc(view.more))
     lines += [fit(line, _BUDGET["snooze"], style) for line in view.footer()]
@@ -796,6 +865,26 @@ def telegram_message(
 ) -> tuple[dict[str, Any], tuple[SnoozeTarget, ...]]:
     """:func:`telegram_payload`, and the items it shows that a snooze would quiet (none in
     a resolved alert): the channel puts snooze buttons on those (:func:`keyboard`)."""
+    fields, targets, _ = telegram_message_full(event, settings, html_format=html_format)
+    return fields, targets
+
+
+@dataclass(frozen=True, slots=True)
+class AnswerTarget:
+    """A shown item a person may answer from the chat (#300): its number in the message,
+    its task (raw id) and the agent's offer, as the item carries it."""
+
+    number: int
+    task_id: str
+    offer: ItemOffer
+    board: str | None = None
+
+
+def telegram_message_full(
+    event: AlertEvent, settings: RenderSettings = DEFAULT_RENDERING, *, html_format: bool = True
+) -> tuple[dict[str, Any], tuple[SnoozeTarget, ...], tuple[AnswerTarget, ...]]:
+    """:func:`telegram_message`, and the shown items that get answer buttons (#300; only
+    with ``settings.answers``, never in a resolved alert)."""
     view = layout(event, settings)
     style = TELEGRAM_HTML if html_format else PLAIN
     out, shown = fitted(view, style)
@@ -803,13 +892,19 @@ def telegram_message(
     if html_format:
         fields["parse_mode"] = "HTML"
     if event.transition is Transition.RESOLVED:
-        return fields, ()
+        return fields, (), ()
     targets = tuple(
         SnoozeTarget(i.number, i.snooze_task, i.snooze_task != i.task_id)
         for i in shown.items
         if i.snooze_task is not None
     )
-    return fields, targets
+    boards = {n: item.board for n, item in enumerate(event.items, 1)}
+    answers = tuple(
+        AnswerTarget(i.number, i.task_id, i.offer, boards.get(i.number))
+        for i in shown.items
+        if i.offer is not None
+    )
+    return fields, targets, answers
 
 
 MAX_BUTTON = 64  # characters of a button's label (Telegram shows short ones best)
@@ -833,6 +928,26 @@ def keyboard(
         if row:
             out.append(row)
     return {"inline_keyboard": out}
+
+
+def answer_rows(
+    rows: Sequence[tuple[AnswerTarget, Sequence[str]]], language: str = i18n.DEFAULT
+) -> list[list[dict[str, str]]]:
+    """Keyboard rows of answer buttons (#300): one row per target, a button per option
+    ("1. A", "1. B"), each with its callback data (in the order of the options)."""
+    out = []
+    for target, data in rows:
+        labels = [o.label for o in target.offer.offer.options]
+        row = [
+            {
+                "text": i18n.text(language, "button.answer", n=target.number, label=label),
+                "callback_data": d,
+            }
+            for label, d in zip(labels, data, strict=True)
+        ]
+        if row:
+            out.append(row)
+    return out
 
 
 def el(text: str, **style: bool) -> dict[str, Any]:

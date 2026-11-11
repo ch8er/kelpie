@@ -30,6 +30,9 @@ class ActionKind(StrEnum):
     # A person snoozed a task from a chat button (#176). Ledger only: recorded with the
     # press (who, what, until); no rule emits it and no executor carries it out.
     SNOOZE = "snooze"
+    # A person answered an agent's question from a chat button (#300). Ledger only: the
+    # audit line around the comment (and unblock) the answer writes; no rule emits it.
+    ANSWER = "answer"
 
 
 class ActionResult(StrEnum):

@@ -23,6 +23,7 @@ from kelpie.core.model import (
     Task,
     ToolchainChange,
 )
+from kelpie.core.offers import Expect
 
 if TYPE_CHECKING:
     from kelpie.core.transitions import StatusChange
@@ -142,6 +143,22 @@ class SupportsWait(Protocol):
     """
 
     def wait(self, task_id: str, conditions: Sequence[Condition], reason: str) -> None: ...
+
+
+class StaleAnswer(Exception):
+    """Raised by :meth:`SupportsAnswerCheck.check_answer`: the question a person answered
+    from the chat changed since the press (the text says how); nothing was written."""
+
+
+@runtime_checkable
+class SupportsAnswerCheck(Protocol):
+    """Optional adapter capability (#300): re-read a task right before an answer from the
+    chat is written to it, and raise :class:`StaleAnswer` unless it is still blocked with
+    the same block, held by the same owner, whose latest comment still offers the same
+    options (:func:`kelpie.core.offers.stale`). An action that carries ``params.expect``
+    is carried out only by an adapter with this capability, after the check."""
+
+    def check_answer(self, task_id: str, expect: Expect) -> None: ...
 
 
 @runtime_checkable

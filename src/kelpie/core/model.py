@@ -958,6 +958,22 @@ def _no_snoozes() -> Mapping[str, Snooze]:
 
 
 @dataclass(frozen=True, slots=True)
+class Answer:
+    """A person answered an agent's question from the chat (#300): which of the agent's own
+    options (``label``) for the question ``question`` (:func:`kelpie.core.offers.question_key`)
+    on ``task_id``, who (Kelpie's own words for them: an owner id, or "Telegram user <id>")
+    and when. ``outcome`` is the ledger's: ``pending`` until the comment was written,
+    ``executed`` once it was. Filled on the server from the ledger, as snoozes are."""
+
+    task_id: str
+    question: str
+    label: str
+    by: str
+    at: datetime
+    outcome: str = "executed"
+
+
+@dataclass(frozen=True, slots=True)
 class HostSleep:
     """A stretch when a machine running agents was suspended (a laptop lid closed), issue
     #296. Found from a wall-clock jump against the monotonic clock between two ticks of the
@@ -1080,6 +1096,10 @@ class Snapshot:
     # block reasons, a stored one winning over a marker. Active ones and those that expired
     # within the last 7 days; :func:`active_snooze` tells them apart.
     snoozes: Mapping[str, Snooze] = field(default_factory=_no_snoozes)
+    # Answers people gave from the chat to agents' questions (#300), filled on the server
+    # from the ledger (never from an agent's board): rule 13 shows an answered item as
+    # answered, without buttons.
+    answers: tuple[Answer, ...] = ()
     # Recent stretches when a host running agents slept (issue #296), the engine's own from
     # its clocks and the agents' from their reports: rules count an age in awake time
     # (``slept``), so a gap the host slept through raises no stale-session alert.
