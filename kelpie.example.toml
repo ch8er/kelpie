@@ -873,6 +873,8 @@ commands = true           # keep the prefix of shell commands on tool spans ("ma
 # header_timeout = "3s"                 # accept -> end of headers (TLS included)
 # read_timeout = "30s"                  # each socket read or write
 # body_timeout = "60s"                  # a whole request body
+# hosts = []                            # on loopback, further Host names to answer (an
+#                                       # /etc/hosts alias); others get 421 (DNS rebinding)
 
 # --- Farm view (docs/configuration.md#view) ------------------------------------------------
 # A read-only listener: a page for a phone (GET /: needs you, stuck, running long, per

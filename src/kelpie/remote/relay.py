@@ -6,7 +6,9 @@ hub's answer back. The hub puts the spans in the agent's namespace.
 
 It listens on loopback only and asks nothing of local senders, like the hooks' spool:
 anything on the host that can reach it can add spans to this host's traces, which is what
-the host's own users can do anyway.
+the host's own users can do anyway. A web page in a browser on the host is not such a
+sender: a request naming any host but a loopback one (or a ``[server] hosts`` name) gets
+421, as on every listener of ``kelpie serve`` (DNS rebinding, #406).
 """
 
 from __future__ import annotations
@@ -22,6 +24,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
 from kelpie import net
+from kelpie.httpguard import host_allowed
 
 log = logging.getLogger(__name__)
 
@@ -42,8 +45,11 @@ class Relay(ThreadingHTTPServer):
         timeout: float = 30.0,
         context: ssl.SSLContext | None = None,
         post: Callable[..., net.Response] = net.post,
+        hosts: tuple[str, ...] = (),
     ) -> None:
         self.target = server
+        self.hosts = hosts  # [server] hosts: further names exporters reach the relay by
+        self.warned_at = -60.0  # monotonic time of the last refused-host warning
         self.token = token
         self.max_body_bytes = max_body_bytes
         self.timeout_seconds = timeout
@@ -83,10 +89,33 @@ class RelayHandler(BaseHTTPRequestHandler):
     timeout = 30
     body_deadline = 60.0
 
+    def parse_request(self) -> bool:
+        if not super().parse_request():
+            return False
+        host = self.headers.get("Host")
+        if host is None or host_allowed(host, self.server.server_address[0], self.server.hosts):
+            return True
+        self.close_connection = True
+        now = time.monotonic()
+        if now - self.server.warned_at >= 60.0:  # a page retrying must not flood the log
+            self.server.warned_at = now
+            log.warning(
+                "relay: refused a request for host %r (DNS rebinding?); a name exporters "
+                "should reach the relay by goes in [server] hosts",
+                host[:100],
+            )
+        self._reply(421, b"unexpected host: use the address the relay is on\n", "text/plain")
+        return False
+
     def do_POST(self) -> None:
         self.close_connection = True
         if self.path.split("?")[0] != PATH:
             self._reply(404, b"not found\n", "text/plain")
+            return
+        if self.headers.get("Origin") is not None:
+            # No exporter sends an Origin; a browser does on every cross-site POST, and the
+            # relay adds the agent's token to whatever it forwards (#406).
+            self._reply(403, b"requests from a web page are refused\n", "text/plain")
             return
         raw = self.headers.get("Content-Length")
         try:

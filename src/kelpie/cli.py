@@ -495,7 +495,12 @@ def _agent(settings: Settings) -> int:
         )
         if config.relay is not None:
             relay = Relay(
-                config.relay, config.server, token, config.max_body_bytes, context=context
+                config.relay,
+                config.server,
+                token,
+                config.max_body_bytes,
+                context=context,
+                hosts=settings.server.hosts,
             )
     except ValueError as exc:
         raise ConfigError(str(exc)) from exc

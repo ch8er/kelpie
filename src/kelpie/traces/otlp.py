@@ -317,6 +317,7 @@ def encode_response(content_type: str, rejected: int = 0, message: str = "") -> 
 # google.rpc.Code values used in error responses.
 INVALID_ARGUMENT = 3
 UNAUTHENTICATED = 16
+PERMISSION_DENIED = 7
 RESOURCE_EXHAUSTED = 8
 UNAVAILABLE = 14
 

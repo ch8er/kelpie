@@ -148,7 +148,9 @@ def test_a_short_body_is_not_forwarded(hub_server: HubServer, sink: Sink) -> Non
     threading.Thread(target=relay.serve_forever, daemon=True).start()
     try:
         with socket.create_connection(("127.0.0.1", relay.server_address[1]), timeout=5) as s:
-            s.sendall(b"POST /v1/traces HTTP/1.1\r\nHost: x\r\nContent-Length: 100\r\n\r\nshort")
+            s.sendall(
+                b"POST /v1/traces HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 100\r\n\r\nshort"
+            )
             s.shutdown(socket.SHUT_WR)
             assert s.recv(100).startswith(b"HTTP/1.0 400")
         assert sink.calls == []

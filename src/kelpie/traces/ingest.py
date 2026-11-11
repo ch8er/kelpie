@@ -13,8 +13,10 @@ loop: the span store has its own lock and writes in short batches.
 Status codes follow the OTLP/HTTP specification: 200 with an ``ExportTraceServiceResponse``
 in the request's encoding (``partial_success`` when spans were rejected), 400 for a body
 that cannot be decoded, 401 for a missing or wrong bearer token, 411/413 for a missing or
-too large ``Content-Length``, 415 for an unsupported media type or content encoding, 503
-when all ingest slots are busy or the store cannot be written (exporters retry). Error
+too large ``Content-Length``, 403 for a request with an ``Origin`` header when no token is
+needed (a web page, not an exporter: #406), 415 for an unsupported media type or content
+encoding, 503 when all ingest slots are busy or the store cannot be written (exporters
+retry). Error
 bodies are ``google.rpc.Status``. Replies sent before the body was read close the
 connection.
 """
@@ -143,6 +145,10 @@ class TraceIngest:
             self.observer.traces_request(reply.status)
         return reply
 
+    def _open(self) -> bool:
+        """No token is needed: every request is taken as the shared token's."""
+        return self.token is None and self.tokens is None and not self.scoped
+
     def _authorized(self, header: str | None) -> str | None:
         """Who sent the request: ``_SHARED`` for the shared token (or when no token is
         needed), a scoped token's name, or None (refused). Every token is compared, in
@@ -199,6 +205,11 @@ class TraceIngest:
         sender = _SHARED if authenticated else self._authorized(headers.get("Authorization"))
         if sender is None:
             return _error(401, encoding, otlp.UNAUTHENTICATED, "missing or invalid bearer token")
+        if not authenticated and self._open() and headers.get("Origin") is not None:
+            # No exporter sends an Origin; a browser does on every cross-site POST. Without
+            # a token to ask for, it is the one sign of a web page (#406).
+            message = "requests from a web page are refused (set a traces token to allow them)"
+            return _error(403, encoding, otlp.PERMISSION_DENIED, message)
         if media not in (otlp.JSON, otlp.PROTOBUF):
             message = f"unsupported content type {media!r}; use {otlp.PROTOBUF} or {otlp.JSON}"
             return _error(415, encoding, otlp.INVALID_ARGUMENT, message)
