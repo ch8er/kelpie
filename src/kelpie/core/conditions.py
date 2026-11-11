@@ -4,6 +4,7 @@ attach conditions during snapshot assembly, so both read the linkage alike."""
 from __future__ import annotations
 
 from collections import Counter
+from collections.abc import Collection
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 
@@ -108,33 +109,39 @@ def _check_task_status(condition: Condition, snapshot: Snapshot) -> Condition:
 _QUOTA_RESULTS = ("error", "observed_remaining", "observed_resets_at", "observed_at")
 
 
-def check_quota_reset(snapshot: Snapshot) -> Snapshot:
-    """Evaluate ``quota_reset`` conditions, as a snapshot step run after the provider probes
-    (``Snapshot.providers``, ``[connectors.llm_quotas]``). Pure: the probes are the evidence.
+def check_quota_reset(snapshot: Snapshot, configured: Collection[str] = ()) -> Snapshot:
+    """Evaluate ``quota_reset`` conditions, as a snapshot step run right after the provider
+    probes (``Snapshot.providers``, ``[connectors.llm_quotas]``); ``configured`` names the
+    probed providers. Pure: the probes and the clock in the snapshot are the evidence.
 
-    A condition names its provider (``params.provider``, as in ``[connectors.llm_quotas]``)
-    and holds once that provider's latest probe reads quota left (``remaining`` above 0) with
-    its credential not rejected; it does not hold while the probe reads none left (the probe
-    is taken again on its own schedule, so a reset that passed counts only once a probe sees
-    it). Without a probe of the provider, a condition that says when the quota resets
-    (``params.resets_at``, ISO 8601 with a zone) holds from then; otherwise, and when the
-    probe failed or could not read the quota, it is unknown (``satisfied`` None,
-    ``params.error``: ``not_found``, ``probe_failed``, ``no_reading`` or
-    ``invalid_params``). ``observed_*`` record what was read."""
+    A condition names its provider (``params.provider``) and may say when the quota resets
+    (``params.resets_at``, ISO 8601 with a zone). With a probe of the provider it holds once
+    the latest probe reads quota left (``remaining`` above 0, the key not rejected) **and**
+    ``resets_at`` (if given) has passed: a probe can delay a wake, never bring one forward
+    (a probe often reads a short request window, not the quota the agent ran out of). It
+    does not hold while the probe reads none left. A configured provider without a usable
+    reading is unknown (``params.error``: ``not_probed`` before its first probe,
+    ``probe_failed``, ``no_reading``). A provider that is not configured at all (or none
+    named) goes by ``resets_at`` alone, else is unknown (``not_found``); bad params are
+    ``invalid_params``. ``observed_*`` record what was read."""
     if not any(c.kind is ConditionKind.QUOTA_RESET for c in snapshot.conditions):
         return snapshot
-    probes = {p.name.casefold(): p for p in snapshot.providers}
+    probes = {p.name.strip().casefold(): p for p in snapshot.providers}
+    names = {n.strip().casefold() for n in configured} | set(probes)
     return replace(
         snapshot,
         conditions=tuple(
-            _check_quota(c, snapshot, probes) if c.kind is ConditionKind.QUOTA_RESET else c
+            _check_quota(c, snapshot, probes, names) if c.kind is ConditionKind.QUOTA_RESET else c
             for c in snapshot.conditions
         ),
     )
 
 
 def _check_quota(
-    condition: Condition, snapshot: Snapshot, probes: dict[str, ProviderStatus]
+    condition: Condition,
+    snapshot: Snapshot,
+    probes: dict[str, ProviderStatus],
+    configured: set[str],
 ) -> Condition:
     params = {k: v for k, v in condition.params.items() if k not in _QUOTA_RESULTS}
     provider, at = params.get("provider"), params.get("resets_at")
@@ -145,37 +152,38 @@ def _check_quota(
         or (provider is None and at is None)
     ):
         return _unknown(condition, params, "invalid_params", snapshot.now)
-    probe = probes.get(provider.strip().casefold()) if isinstance(provider, str) else None
-    if probe is None:
+    name = provider.strip().casefold() if isinstance(provider, str) else None
+    reset_passed = resets_at is None or snapshot.now >= resets_at
+    since = condition.satisfied_at if condition.satisfied else None
+    if name is None or name not in configured:
         if resets_at is None:
             return _unknown(condition, params, "not_found", snapshot.now)
-        held = snapshot.now >= resets_at
         return replace(
             condition,
             params=params,
-            satisfied=held,
-            satisfied_at=resets_at if held else None,
+            satisfied=reset_passed,
+            satisfied_at=resets_at if reset_passed else None,
             checked_at=snapshot.now,
         )
-    if probe.checked_at is not None:
-        params["observed_at"] = probe.checked_at.isoformat()
-    if not probe.ok and probe.error_kind != "rate_limited":
-        return _unknown(condition, params, "probe_failed", snapshot.now)
-    if probe.auth_ok is False:
-        return _unknown(condition, params, "probe_failed", snapshot.now)
+    probe = probes.get(name)
+    if probe is None:
+        return _unknown(condition, params, "not_probed", snapshot.now)
+    seen = probe.checked_at or snapshot.now
+    params["observed_at"] = seen.isoformat()
+    if not probe.ok or probe.auth_ok is False:
+        return _unknown(condition, params, "probe_failed", seen)
     if probe.remaining is None:
-        return _unknown(condition, params, "no_reading", snapshot.now)
+        return _unknown(condition, params, "no_reading", seen)
     params["observed_remaining"] = probe.remaining
     if probe.resets_at is not None:
         params["observed_resets_at"] = probe.resets_at.isoformat()
-    left = probe.remaining > 0
-    since = condition.satisfied_at if condition.satisfied else None
+    held = probe.remaining > 0 and reset_passed
     return replace(
         condition,
         params=params,
-        satisfied=left,
-        satisfied_at=(since or probe.checked_at or snapshot.now) if left else None,
-        checked_at=probe.checked_at or snapshot.now,
+        satisfied=held,
+        satisfied_at=(since or seen) if held else None,
+        checked_at=seen,
     )
 
 

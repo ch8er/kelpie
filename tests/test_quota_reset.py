@@ -31,8 +31,10 @@ def probe(remaining: float | None, **kw: object) -> ProviderStatus:
     return ProviderStatus(**fields)  # type: ignore[arg-type]
 
 
-def checked(c: Condition, *providers: ProviderStatus) -> Condition:
-    (out,) = check_quota_reset(board(c, providers=providers)).conditions
+def checked(
+    c: Condition, *providers: ProviderStatus, configured: tuple[str, ...] = ("example-llm",)
+) -> Condition:
+    (out,) = check_quota_reset(board(c, providers=providers), configured).conditions
     return out
 
 
@@ -50,7 +52,7 @@ def test_it_holds_once_the_probe_reads_quota_left() -> None:
 
 
 def test_it_does_not_hold_while_none_is_left() -> None:
-    for p in (probe(0.0), probe(0.0, ok=False, error_kind="rate_limited")):
+    for p in (probe(0.0), probe(0.0, error_kind="rate_limited")):
         c = checked(quota(provider="example-llm"), p)
         assert c.satisfied is False and c.satisfied_at is None
         assert c.params["observed_resets_at"] == (NOW + H).isoformat()
@@ -69,13 +71,34 @@ def test_a_probe_without_a_reading_is_unknown(p: ProviderStatus, error: str) -> 
     assert c.satisfied is None and c.params["error"] == error
 
 
-def test_without_a_probe_a_reset_time_decides() -> None:
+def test_an_unconfigured_provider_goes_by_its_reset_time() -> None:
     later = quota(provider="elsewhere", resets_at=(NOW + H).isoformat())
     assert checked(later).satisfied is False
     past = quota(resets_at=(NOW - H).isoformat())
     c = checked(past)
     assert c.satisfied is True and c.satisfied_at == NOW - H
     assert checked(quota(provider="elsewhere")).params["error"] == "not_found"
+
+
+def test_a_configured_provider_not_probed_yet_is_unknown_whatever_the_clock() -> None:
+    c = checked(quota(provider="example-llm", resets_at=(NOW - H).isoformat()))
+    assert c.satisfied is None and c.params["error"] == "not_probed"
+
+
+def test_a_probe_never_brings_a_wake_before_the_reset_time() -> None:
+    early = quota(provider="example-llm", resets_at=(NOW + H).isoformat())
+    assert checked(early, probe(4999.0)).satisfied is False
+    late = quota(provider="example-llm", resets_at=(NOW - H).isoformat())
+    assert checked(late, probe(0.0)).satisfied is False
+    assert checked(late, probe(10.0)).satisfied is True
+
+
+def test_names_match_without_case_or_spaces_and_a_failure_resets_the_hold() -> None:
+    c = checked(quota(provider=" EXAMPLE-llm "), probe(5.0), configured=(" Example-LLM",))
+    assert c.satisfied is True
+    failed = checked(c, probe(None, ok=False, error_kind="timeout"))
+    assert failed.satisfied is None and failed.satisfied_at is None
+    assert failed.checked_at == NOW - timedelta(minutes=2)  # the probe's time
 
 
 @pytest.mark.parametrize(
@@ -106,9 +129,19 @@ def test_the_snapshot_checks_quota_conditions_after_the_probes() -> None:
             return board(quota(provider="example-llm"))
 
     class Probes:
+        providers = ()
+
         def read(self, now: datetime) -> tuple[list[ProviderStatus], list[LimitHit]]:
             return [probe(12.0)], []
+
+    class Broken(Probes):
+        def read(self, now: datetime) -> tuple[list[ProviderStatus], list[LimitHit]]:
+            raise RuntimeError("boom")
 
     snapshot = merged_snapshot([Parked()], Metrics(), lambda: NOW, providers=Probes())()
     (c,) = snapshot.conditions
     assert c.satisfied is True and c.params["observed_remaining"] == 12.0
+    for offline in (None, Broken()):  # kelpie why, run-once, a reader that raised
+        snapshot = merged_snapshot([Parked()], Metrics(), lambda: NOW, providers=offline)()
+        (c,) = snapshot.conditions
+        assert c.satisfied is None and c.checked_at is None  # left unchecked
