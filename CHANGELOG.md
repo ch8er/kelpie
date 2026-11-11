@@ -166,7 +166,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 - A Claude Code or OpenClaw stop marker dated far ahead or far back (year 9999, year 1) no
   longer raises `OverflowError` out of the adapter's snapshot, which blinded every rule on
   that adapter while the marker stayed: a marker dated outside the range in which it can
-  still say anything about the spool is ignored with one warning per session, and the
+  still flag a tool call of the spool is ignored (one dated ahead with one warning per
+  session, as the hook and plugin ignore it; one long expired quietly), and the
   unenforced-stop check compares differences instead of adding to the marker's date.
   Markers inside that range work exactly as before. An OpenClaw Workboard card moved to
   `blocked` at a time in year 1 no longer raises out of the board read either (#388).

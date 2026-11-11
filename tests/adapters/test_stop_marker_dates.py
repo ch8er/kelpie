@@ -4,7 +4,8 @@ Agents can write the stop directory. A marker dated in year 9999 used to raise
 ``OverflowError`` out of ``snapshot()`` (``marked + ttl``), taking the whole adapter offline
 while the marker stayed. A marker is now used only inside the range in which it can still say
 something about the spool's tool calls, and exactly as before there; outside it it is
-ignored with one warning per session. Malformed markers were already ignored and still are.
+ignored: with one warning per session when dated ahead, quietly (info) when long expired.
+Malformed markers were already ignored and still are.
 """
 
 from __future__ import annotations
@@ -18,7 +19,6 @@ from typing import Any
 
 import pytest
 
-from kelpie.adapters import _spool
 from kelpie.adapters.claude_code import ClaudeCodeAdapter, hook
 from kelpie.adapters.claude_code import adapter as claude_code
 from kelpie.adapters.hermes import adapter as hermes
@@ -54,21 +54,6 @@ MALFORMED: list[bytes] = [
     b'{"at": 1}' + b" " * 5000,  # over MAX_MARKER
     b"[" * 100_000,  # deep nesting
 ]
-
-
-# --- the range check --------------------------------------------------------------------
-
-
-def test_within_never_overflows() -> None:
-    now = datetime(2026, 11, 11, 12, tzinfo=UTC)
-    back, ahead = timedelta(days=9), timedelta(minutes=5)
-    assert _spool.within(now, now, back, ahead)
-    assert _spool.within(now + ahead, now, back, ahead)
-    assert _spool.within(now - back, now, back, ahead)
-    assert not _spool.within(now + ahead + timedelta(microseconds=1), now, back, ahead)
-    assert not _spool.within(now - back - timedelta(microseconds=1), now, back, ahead)
-    assert not _spool.within(datetime.max.replace(tzinfo=UTC), now, back, ahead)
-    assert not _spool.within(datetime.min.replace(tzinfo=UTC), now, back, ahead)
 
 
 # --- Claude Code --------------------------------------------------------------------------
@@ -123,19 +108,28 @@ def test_claude_code_expired_marker_is_no_miss(tmp_path: Path) -> None:
     assert cc_reason(tmp_path, now, lookback=timedelta(days=3)) is None
 
 
-@pytest.mark.parametrize("at", [YEAR_9999, YEAR_1, time.time() + 3600, 946684800])
+@pytest.mark.parametrize(
+    ("at", "level", "says"),
+    [
+        (YEAR_9999, logging.WARNING, "ahead"),
+        (time.time() + 3600, logging.WARNING, "ahead"),
+        (YEAR_1, logging.INFO, "expired long ago"),
+        (946684800, logging.INFO, "expired long ago"),
+    ],
+)
 def test_claude_code_out_of_range_marker_is_ignored_and_logged_once(
-    tmp_path: Path, caplog: pytest.LogCaptureFixture, at: float
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, at: float, level: int, says: str
 ) -> None:
     now = time.time()
     cc_session(tmp_path, now)
     cc_marker(tmp_path, json.dumps({"at": at, "reason": "x"}).encode())
     a = cc_adapter(tmp_path)
-    with caplog.at_level(logging.WARNING):
+    with caplog.at_level(logging.INFO):
         for _ in range(3):  # used to raise OverflowError on every tick
             (s,) = a.snapshot(datetime.fromtimestamp(now, UTC)).sessions
     assert s.exit_reason is None
-    assert sum("outside the range" in r.getMessage() for r in caplog.records) == 1
+    logged = [r for r in caplog.records if "stop marker" in r.getMessage()]
+    assert [(r.levelno, says in r.getMessage()) for r in logged] == [(level, True)]
 
 
 @pytest.mark.parametrize("body", MALFORMED)
@@ -148,26 +142,27 @@ def test_claude_code_malformed_marker_is_ignored(tmp_path: Path, body: bytes) ->
 
 def test_claude_code_marker_range_is_exact(tmp_path: Path) -> None:
     """The oldest marker kept is one whose TTL had not yet run out when the oldest possible
-    call in the lookback began: one older could never flag anything."""
+    call in the lookback began (a week long, ending at the cutoff): one older can never flag
+    anything, and one just inside still can."""
     now = datetime(2026, 11, 11, 12, tzinfo=UTC)
     a = cc_adapter(tmp_path)
-    back = a.lookback + timedelta(milliseconds=claude_code.MAX_DURATION_MS)
-    back += claude_code.MARKER_TTL
+    longest = timedelta(milliseconds=claude_code.MAX_DURATION_MS)
+    back = a.lookback + longest + claude_code.MARKER_TTL
     event = claude_code.SpoolEvent(type="tool", at=now, key="k", session_id=S1)
     for offset, kept in ((-back, True), (-back - timedelta(seconds=1), False)):
         claude_code.write_marker(tmp_path / "stop", S1, "x", (now + offset).timestamp())
         assert bool(a._markers([event], now)) is kept
-    # A call begun just inside the TTL of the oldest marker kept is still a miss.
-    marked = now - back
-    begun = marked + claude_code.MARKER_TTL - timedelta(seconds=1)
-    call = claude_code.SpoolEvent(
-        type="tool",
-        at=now - a.lookback,
-        key="k",
-        session_id=S1,
-        duration_ms=int((now - a.lookback - begun) / timedelta(milliseconds=1)),
-    )
-    assert claude_code._ignored_stop([call], marked)
+    # The longest call there can be, ending at the cutoff: a miss for a marker 2s inside.
+    line = {
+        "type": "tool",
+        "at": (now - a.lookback).timestamp(),
+        "session_id": S1,
+        "duration_ms": claude_code.MAX_DURATION_MS * 10,  # cut to MAX_DURATION_MS
+    }
+    call = claude_code.parse_line(json.dumps(line), now - a.lookback)
+    assert call is not None and call.duration_ms == claude_code.MAX_DURATION_MS
+    assert claude_code._ignored_stop([call], now - back + timedelta(seconds=2))
+    assert not claude_code._ignored_stop([call], now - back - timedelta(seconds=1))
 
 
 # --- OpenClaw -----------------------------------------------------------------------------
@@ -210,19 +205,48 @@ def test_openclaw_expired_marker_is_no_miss(tmp_path: Path, spool: Spool) -> Non
     assert s.exit_reason is None
 
 
-@pytest.mark.parametrize("at", [YEAR_9999, YEAR_1, time.time() + 3600, 946684800])
+@pytest.mark.parametrize(
+    ("at", "level", "says"),
+    [
+        (YEAR_9999, logging.WARNING, "ahead"),
+        (time.time() + 3600, logging.WARNING, "ahead"),
+        (YEAR_1, logging.INFO, "expired long ago"),
+        (946684800, logging.INFO, "expired long ago"),
+    ],
+)
 def test_openclaw_out_of_range_marker_is_ignored_and_logged_once(
-    tmp_path: Path, spool: Spool, caplog: pytest.LogCaptureFixture, at: float
+    tmp_path: Path,
+    spool: Spool,
+    caplog: pytest.LogCaptureFixture,
+    at: float,
+    level: int,
+    says: str,
 ) -> None:
     now = datetime.now(UTC)
     spool.tool(SID, now - timedelta(minutes=1))
     oc_marker(tmp_path, json.dumps({"at": at}).encode())
     a = oc_adapter(tmp_path, spool)
-    with caplog.at_level(logging.WARNING):
+    with caplog.at_level(logging.INFO):
         for _ in range(3):
             (s,) = a.snapshot(now).sessions
     assert s.exit_reason is None
-    assert sum("outside the range" in r.getMessage() for r in caplog.records) == 1
+    logged = [r for r in caplog.records if "stop marker" in r.getMessage()]
+    assert [(r.levelno, says in r.getMessage()) for r in logged] == [(level, True)]
+
+
+def test_openclaw_marker_far_ahead_is_not_shown_held(tmp_path: Path, spool: Spool) -> None:
+    """The one label that changes: a session the plugin refused before, whose marker is now
+    dated more than ``FUTURE_SKEW`` ahead (the plugin ignores it too), is no longer shown
+    "stopped by kelpie". Within the skew it still is."""
+    now = datetime.now(UTC)
+    spool.tool(SID, now - timedelta(minutes=2))
+    spool.write(
+        "kelpie_stopped", now - timedelta(minutes=1), {"event": "before_tool_call"}, sessionId=SID
+    )
+    for ahead, reason in ((timedelta(hours=1), None), (timedelta(minutes=4), "stopped by kelpie")):
+        oc_marker(tmp_path, json.dumps({"at": (now + ahead).timestamp()}).encode())
+        (s,) = oc_adapter(tmp_path, spool).snapshot(now).sessions
+        assert s.exit_reason == reason
 
 
 @pytest.mark.parametrize("body", MALFORMED)
@@ -234,15 +258,15 @@ def test_openclaw_malformed_marker_is_ignored(tmp_path: Path, spool: Spool, body
     assert s.exit_reason is None
 
 
-def test_openclaw_ignored_stop_takes_any_marker_date() -> None:
-    """Defence in depth: the check itself no longer adds to the marker's date."""
-    now = datetime(2026, 11, 11, 12, tzinfo=UTC)
-    call = openclaw.SpoolEvent(type="tool", at=now, key="k", session_id=SID)
-    for marked in (datetime.max.replace(tzinfo=UTC), datetime.min.replace(tzinfo=UTC)):
-        assert not openclaw._ignored_stop([call], marked, timedelta(days=1))
-        assert not claude_code._ignored_stop(
-            [claude_code.SpoolEvent(type="tool", at=now, key="k", session_id=S1)], marked
-        )
+def test_ignored_stop_takes_any_marker_date() -> None:
+    """Defence in depth: the check itself no longer adds to the marker's date, even with a
+    call after it."""
+    top, bottom = datetime.max.replace(tzinfo=UTC), datetime.min.replace(tzinfo=UTC)
+    for marked, at in ((top, top), (bottom, datetime(2026, 11, 11, 12, tzinfo=UTC))):
+        oc_call = openclaw.SpoolEvent(type="tool", at=at, key="k", session_id=SID)
+        cc_call = claude_code.SpoolEvent(type="tool", at=at, key="k", session_id=S1)
+        assert not openclaw._ignored_stop([oc_call], marked, timedelta(days=1))
+        assert not claude_code._ignored_stop([cc_call], marked)
 
 
 # --- other agent-written times next to a duration ---------------------------------------
@@ -253,9 +277,12 @@ def test_workboard_block_moved_in_year_1_does_not_raise(tmp_path: Path) -> None:
     board = Workboard(tmp_path / "workboard.sqlite")
     board.card("c1", "todo", now - timedelta(hours=1))
     board.move("c1", "blocked", datetime.fromtimestamp(YEAR_1, UTC))
-    board.attempt("c1", "blocked", now - timedelta(minutes=30), now - timedelta(minutes=20))
+    board.attempt(
+        "c1", "blocked", now - timedelta(minutes=30), now - timedelta(minutes=20), error="no key"
+    )
     (card,) = read_board(board.path, now - timedelta(days=1), now, "openclaw").cards
     assert card.task.status is Status.BLOCKED
+    assert card.task.block is not None and card.task.block.reason == "no key"
 
 
 @pytest.mark.parametrize("at", [YEAR_9999, YEAR_1])

@@ -424,11 +424,14 @@ class OpenClawAdapter:
         session's marker is opened by name: agents can fill the directory, so it is never
         listed.
 
-        For the same reason a marker dated outside the range in which it could still say
-        anything about the spool is ignored, with one warning per session: later than
-        ``FUTURE_SKEW`` ahead (the plugin ignores it too), or so old that ``stop_ttl`` ran out
-        before the oldest call in the lookback began. Inside that range a marker is used
-        exactly as before (#388)."""
+        For the same reason a marker is used only inside the range in which it can still
+        flag a tool call of the spool, and exactly as before there (#388). One dated more
+        than ``FUTURE_SKEW`` ahead is ignored with one warning per session: the plugin
+        ignores it too, so a session with such a marker is no longer shown "stopped by
+        kelpie". One so old that ``stop_ttl`` ran out before the oldest call in the lookback
+        began is ignored quietly (logged once at info: it may be Kelpie's own, never
+        cleared). Both are compared as differences from ``now``, which cannot overflow
+        whatever date a marker holds."""
         if self.stop_dir is None:
             return {}
         back = self.lookback + timedelta(milliseconds=MAX_DURATION_MS) + self.stop_ttl
@@ -436,16 +439,26 @@ class OpenClawAdapter:
         for sid in {e.session_id for e in events}:
             if (at := read_marker(self.stop_dir, sid)) is None:
                 continue
-            if _spool.within(at, now, back, FUTURE_SKEW):
-                found[sid] = at
-            else:
+            if at - now > FUTURE_SKEW:
                 self._warn(
-                    f"marker-range:{sid}",
-                    "openclaw: the stop marker of session %s is dated %s, outside the range a "
-                    "marker can hold in; it is ignored",
+                    f"marker-ahead:{sid}",
+                    "openclaw: the stop marker of session %s is dated %s, more than %s ahead; "
+                    "it is ignored, as the plugin ignores it",
                     sid,
                     at.isoformat(),
+                    FUTURE_SKEW,
                 )
+            elif now - at > back:
+                if f"marker-old:{sid}" not in self._warned:
+                    self._warned.add(f"marker-old:{sid}")
+                    log.info(
+                        "openclaw: the stop marker of session %s (%s) expired long ago; it is "
+                        "ignored",
+                        sid,
+                        at.isoformat(),
+                    )
+            else:
+                found[sid] = at
         return found
 
     def _sessions(
