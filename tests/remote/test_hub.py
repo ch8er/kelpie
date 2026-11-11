@@ -399,7 +399,7 @@ def raw_request(server: HubServer, data: bytes) -> bytes:
 
 
 def test_framing_errors(server: HubServer) -> None:
-    head = f"POST {REPORT_PATH} HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer {TOKEN}\r\n"
+    head = f"POST {REPORT_PATH} HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {TOKEN}\r\n"
     head += "Content-Type: application/json\r\n"
     assert raw_request(server, (head + "\r\n").encode()).startswith(b"HTTP/1.0 411")
     bad = head + "Content-Length: -5\r\n\r\n"
@@ -475,7 +475,7 @@ def test_peers_count_by_address_or_ipv6_64() -> None:
 def test_one_token_holds_few_requests(server: HubServer, hub: Hub) -> None:
     port = server.server_address[1]
     head = (
-        f"POST {ACTIONS_PATH} HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer {TOKEN}\r\n"
+        f"POST {ACTIONS_PATH} HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {TOKEN}\r\n"
         "Content-Type: application/json\r\nContent-Length: 50\r\n\r\n{"
     )
     stalled = []

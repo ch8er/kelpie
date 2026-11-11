@@ -20,6 +20,15 @@ Every connection, admitted or not, has ``read_timeout`` per socket read or write
 the endpoint's own limit (``[traces] max_body_bytes``, ``[hub] max_body_bytes``); a body is
 never read before the request is authorized.
 
+A listener bound to loopback also checks the ``Host`` header of every request (#406, as
+``[view]`` did since #396): a web page the operator opens can rebind its own name to
+127.0.0.1 and then talk to the listener as same-origin (DNS rebinding), but its requests
+carry its own name. Such a request gets 421 before anything else is looked at. Accepted:
+``localhost``, any loopback IP literal, the bind address and the names in ``[server]
+hosts`` (an ``/etc/hosts`` alias an exporter or scraper uses), each with an optional port;
+a request without a ``Host`` (HTTP/1.0) too. A listener off loopback checks no ``Host``:
+its tokens guard it.
+
 ``[server]`` configures the guards; see docs/configuration.md and docs/security.md. This
 module builds on the standard library and :mod:`kelpie.core.serde` only.
 """
@@ -29,12 +38,13 @@ from __future__ import annotations
 import contextlib
 import ipaddress
 import logging
+import re
 import socket
 import ssl
 import sys
 import threading
 import time
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -51,6 +61,7 @@ SERVER_KEYS = frozenset(
         "header_timeout",
         "read_timeout",
         "body_timeout",
+        "hosts",
     }
 )
 DEFAULT_MAX_CONNECTIONS = 64
@@ -59,6 +70,13 @@ DEFAULT_HEADER_TIMEOUT = 3.0
 DEFAULT_READ_TIMEOUT = 30.0
 DEFAULT_BODY_TIMEOUT = 60.0
 _LOG_EVERY = 60.0  # seconds between refusal warnings per peer
+MAX_HOSTS = 32  # [server] hosts
+# A Host header: a name or a bracketed IPv6 literal, then an optional numeric port.
+_HOST = re.compile(r"(?:\[(?P<v6>[0-9a-f:.]+)\]|(?P<name>[^:\[\]]+))(?::\d{1,5})?")
+# A configured name: a DNS name (no port, no scheme) or an IP literal.
+_NAME = re.compile(
+    r"[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?)*"
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,6 +88,9 @@ class Limits:
     header_timeout: float = DEFAULT_HEADER_TIMEOUT  # accept -> request line and headers
     read_timeout: float = DEFAULT_READ_TIMEOUT  # per socket read or write
     body_timeout: float = DEFAULT_BODY_TIMEOUT  # a whole request body
+    # Further names a loopback listener answers to (besides localhost, loopback IPs and its
+    # bind address); lower case, no port.
+    hosts: tuple[str, ...] = ()
 
 
 def load_server(section: Any) -> Limits:
@@ -89,7 +110,69 @@ def load_server(section: Any) -> Limits:
         raise ValueError("[server] max_connections_per_address must not exceed max_connections")
     if body < read:
         raise ValueError("[server] body_timeout must not be shorter than read_timeout")
-    return Limits(connections, per_address, header, read, body)
+    return Limits(connections, per_address, header, read, body, _hosts(section.get("hosts", [])))
+
+
+def _hosts(value: Any) -> tuple[str, ...]:
+    message = (
+        f'[server] hosts must be a list of at most {MAX_HOSTS} host names such as "kelpie.local"'
+        " (no port, no scheme)"
+    )
+    if not isinstance(value, list) or len(value) > MAX_HOSTS:
+        raise ValueError(message)
+    names: list[str] = []
+    for item in value:
+        if not isinstance(item, str):
+            raise ValueError(message)
+        name = _bare(item.strip().lower())
+        if not name or (_NAME.fullmatch(name) is None and not _ip_literal(name)):
+            raise ValueError(f"{message}; not {item!r}")
+        if name not in names:
+            names.append(name)
+    return tuple(names)
+
+
+def _bare(name: str) -> str:
+    """A host name without brackets and without the trailing dot of a fully qualified name."""
+    return name.strip("[]").rstrip(".")
+
+
+def _ip_literal(name: str) -> bool:
+    try:
+        ipaddress.ip_address(name)
+    except ValueError:
+        return False
+    return True
+
+
+def is_loopback(host: str) -> bool:
+    """Whether a bind address is loopback: ``localhost`` or a loopback IP literal."""
+    name = _bare(host.strip().lower())
+    return name == "localhost" or _loopback_ip(name)
+
+
+def _loopback_ip(name: str) -> bool:
+    """A loopback IP literal, IPv4-mapped ones included (``::ffff:127.0.0.1``)."""
+    try:
+        ip = ipaddress.ip_address(name)
+    except ValueError:
+        return False
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
+        return ip.ipv4_mapped.is_loopback
+    return ip.is_loopback
+
+
+def host_allowed(header: str, bind: str, names: Iterable[str] = ()) -> bool:
+    """Whether a ``Host`` header names a loopback listener bound to ``bind``: ``localhost``,
+    a loopback IP literal (in any form: a rebound name is never one), the bind address or
+    one of ``names``, each with an optional numeric port."""
+    m = _HOST.fullmatch(header.strip().lower())
+    if m is None:
+        return False
+    name = _bare(m["v6"] or m["name"])
+    if name == "localhost" or name == _bare(bind.strip().lower()) or name in names:
+        return True
+    return _loopback_ip(name)
 
 
 def _int(section: Mapping[str, Any], key: str, default: int, low: int, high: int) -> int:
@@ -143,7 +226,17 @@ class GuardedServer(ThreadingHTTPServer):
         self._pending: dict[int, _Pending] = {}  # id(socket) -> pending connection
         self._per_peer: dict[str, int] = {}
         self._warned: dict[str, float] = {}
+        # Loopback: every request must name a loopback host (DNS rebinding; see the module).
+        self.check_host = is_loopback(address[0])
+        self._bind = address[0]
         super().__init__(address, handler)
+
+    def host_ok(self, header: str | None) -> bool:
+        """Whether a request's ``Host`` header is one this listener answers. No ``Host``
+        (HTTP/1.0) is fine: browsers always send one."""
+        if not self.check_host or header is None:
+            return True
+        return host_allowed(header, self._bind, self.limits.hosts)
 
     def process_request(self, request: Any, client_address: Any) -> None:
         # Refused connections are closed before a thread is started for them.
@@ -263,6 +356,39 @@ class GuardedHandler(BaseHTTPRequestHandler):
 
     def _cut(self) -> None:
         self.server.cut(self.request)
+
+    def parse_request(self) -> bool:
+        """Read the request line and headers; on a loopback listener, answer 421 to a
+        request that names a host other than this one (DNS rebinding), whatever its method
+        and path, before the handler sees it."""
+        if not super().parse_request():
+            return False
+        host = self.headers.get("Host")
+        if self.server.host_ok(host):
+            return True
+        self.close_connection = True
+        peer = self.peer()
+        self.server.warn_once(
+            peer,
+            "%s: refused a request for host %r from %s (DNS rebinding?); a name that should "
+            "reach this listener goes in [server] hosts",
+            self.server.name,
+            (host or "")[:100],
+            peer,
+        )
+        self.misdirected()
+        return False
+
+    def misdirected(self) -> None:
+        """The 421 reply to a request for another host; subclasses may answer in their own
+        format."""
+        body = b"unexpected host: use the address this listener is on\n"
+        self.send_response(421)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Connection", "close")
+        self.end_headers()
+        self.wfile.write(body)
 
     def admit(self) -> None:
         """The request is authorized: it gives its pending slot back."""

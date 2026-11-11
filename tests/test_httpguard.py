@@ -89,14 +89,14 @@ def head(length: int, token: bool = True) -> bytes:
     """An OTLP export's request line and headers."""
     auth = f"Authorization: Bearer {TOKEN}\r\n" if token else ""
     return (
-        "POST /v1/traces HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\n"
+        "POST /v1/traces HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\n"
         f"{auth}Content-Length: {length}\r\n\r\n"
     ).encode()
 
 
 def get(server: GuardedServer, path: str = "/healthz", source: str = "127.0.0.1") -> bytes:
     with connect(server, source) as sock:
-        sock.sendall(f"GET {path} HTTP/1.1\r\nHost: x\r\n\r\n".encode())
+        sock.sendall(f"GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n".encode())
         data = b""
         while chunk := sock.recv(65536):
             data += chunk
@@ -215,7 +215,7 @@ def test_a_reader_that_never_reads_cannot_hold_the_main_port() -> None:
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1024)
             sock.bind((f"127.0.0.{i + 2}", 0))
             sock.connect(("127.0.0.1", running.server_address[1]))
-            sock.sendall(b"GET /metrics HTTP/1.1\r\nHost: x\r\n\r\n")
+            sock.sendall(b"GET /metrics HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
             stalled.append(sock)
         wait_pending(running, 3)
         time.sleep(0.3)  # the replies are stuck in the write
@@ -223,7 +223,7 @@ def test_a_reader_that_never_reads_cannot_hold_the_main_port() -> None:
         # Every slot is held by a stalled reader; a newcomer still gets in at once...
         started = time.monotonic()
         with connect(running, "127.0.0.9") as sock:
-            sock.sendall(b"GET /healthz HTTP/1.1\r\nHost: x\r\n\r\n")
+            sock.sendall(b"GET /healthz HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
             sock.settimeout(2)
             reply = b""
             while chunk := sock.recv(65536):

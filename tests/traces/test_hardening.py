@@ -323,7 +323,7 @@ def test_stalled_client_is_dropped_and_counted(tmp_path: Path) -> None:
     try:
         with socket.create_connection(server.server_address) as sock:
             sock.sendall(
-                b"POST /v1/traces HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\n"
+                b"POST /v1/traces HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\n"
                 b"Content-Length: 100\r\n\r\n{"
             )
             sock.settimeout(5)
@@ -349,7 +349,7 @@ def test_dripping_client_hits_the_body_deadline(tmp_path: Path) -> None:
     try:
         with socket.create_connection(server.server_address) as sock:
             sock.sendall(
-                b"POST /v1/traces HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\n"
+                b"POST /v1/traces HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\n"
                 b"Content-Length: 100\r\n\r\n"
             )
             closed = False

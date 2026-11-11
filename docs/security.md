@@ -44,6 +44,18 @@ a token to hold its threads:
   in. Someone with many addresses who opens connections faster than a client sends its
   headers can still crowd it out; firewall the port to the networks that need it where
   that matters.
+- **Host check on loopback (DNS rebinding, #406).** A web page the operator opens can rebind
+  its own name to 127.0.0.1 and then talk to a loopback listener as same-origin: read
+  `/metrics`, or post spans to a tokenless ingest. Its requests carry its own name in
+  `Host`, so every listener bound to loopback (the main port, a loopback hub, `[view]`
+  and the `kelpie agent` relay) answers 421 to a request addressed to anything but
+  `localhost`, a loopback IP literal, its bind address or a name in
+  [`[server] hosts`](configuration.md#server), before it looks at the path or the token.
+  An exporter or scraper that reaches Kelpie by an `/etc/hosts` alias needs that alias in
+  `[server] hosts`; the 421 is logged once a minute per address with the name it asked
+  for. A listener off loopback checks no `Host`: its tokens guard it. A tokenless ingest
+  also refuses (403) an export that carries an `Origin` header: no exporter sends one, a
+  browser does on every cross-site `POST`.
 - **Bodies.** With a token configured, a body is read only after the token checks out.
   Every body is read within `read_timeout` (30s) per read and `body_timeout` (60s) in all,
   and only up to the endpoint's limit (`[traces] max_body_bytes`, `[hub] max_body_bytes`),
@@ -63,9 +75,10 @@ you would not publish.
 same guards: task ids and titles, condition targets, alert summaries, ledger reasons and
 today's spend, which are farm data. It has no write endpoint (405 for every method but `GET`). On loopback without a
 token any local process can read it, as it can read `/metrics`: set the token on a shared
-machine. On loopback it answers only requests addressed to `localhost`, `127.0.0.1`, `::1`
-or its configured host (421 otherwise), so a web page that rebinds its own name to
-127.0.0.1 cannot read it through your browser (DNS rebinding, #395). It binds
+machine. On loopback it answers only requests addressed to `localhost`, a loopback address,
+its configured host or a `[server] hosts` name (421 otherwise), so a web page that rebinds
+its own name to 127.0.0.1 cannot read it through your browser (DNS rebinding, #395; the
+check is the listeners' own since #406, [above](#listeners)). It binds
 `127.0.0.1` by default; on any other address `kelpie serve` refuses to start unless
 `[view] token_env` holds a strong token, which every request must then carry as a bearer
 token or as the password of HTTP Basic auth (compared in constant time; over plain http a

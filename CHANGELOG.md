@@ -145,6 +145,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ### Security
 
+- Every listener bound to loopback (the main port's `/metrics`, `/healthz` and
+  `/v1/traces`, a loopback hub, `[view]` and the `kelpie agent` OTLP relay) answers 421 to
+  a request addressed to a name other than `localhost`, a loopback IP, its bind address or
+  a name in the new `[server] hosts`: a web page could rebind its own name to 127.0.0.1 and
+  read `/metrics` or post forged spans to a tokenless ingest through the operator's browser.
+  A tokenless ingest also refuses an export carrying an `Origin` header (403). **Upgrade
+  note:** an exporter or scraper on the Kelpie host that names it by an `/etc/hosts` alias
+  needs that alias in `[server] hosts`; listeners off loopback are unchanged (#406).
 - A block storm's "Block storm over" notice counts the tasks Kelpie listed, not a list an
   agent wrote into its block reason (#404).
 - The `[view]` listener on loopback answers only requests addressed to a loopback name or

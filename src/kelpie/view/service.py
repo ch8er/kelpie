@@ -25,10 +25,8 @@ from __future__ import annotations
 import base64
 import binascii
 import hmac
-import ipaddress
 import json
 import logging
-import re
 import threading
 import time
 from collections.abc import Callable
@@ -168,25 +166,6 @@ def _presented(header: str | None) -> bytes | None:
     return None
 
 
-_HOST = re.compile(r"(?:\[(?P<v6>[0-9a-f:.]+)\]|(?P<name>[^:\[\]]+))(?::\d{1,5})?")
-
-
-def _loopback_host(header: str, configured: str) -> bool:
-    """Whether a Host header names this loopback listener: ``localhost``, a loopback IP
-    literal (any form: a rebound name is never one) or the configured host, with an
-    optional numeric port."""
-    m = _HOST.fullmatch(header.strip().lower())
-    if m is None:
-        return False
-    name = (m["v6"] or m["name"]).rstrip(".")
-    if name in ("localhost", configured.strip().lower().strip("[]")):
-        return True
-    try:
-        return ipaddress.ip_address(name).is_loopback
-    except ValueError:
-        return False
-
-
 class ViewServer(GuardedServer):
     name = "view"
 
@@ -202,15 +181,6 @@ class ViewServer(GuardedServer):
         self.token = token
         super().__init__((settings.host, settings.port), ViewHandler, limits)
 
-    def host_ok(self, header: str | None) -> bool:
-        """On loopback, a request must name a loopback host (or the configured one): a web
-        page that rebinds its own name to 127.0.0.1 sends its name, and must not read the
-        farm through the operator's browser (DNS rebinding). No Host (HTTP/1.0) is fine:
-        browsers always send one."""
-        if not self.settings.loopback or header is None:
-            return True
-        return _loopback_host(header, self.settings.host)
-
     def authorized(self, header: str | None) -> bool:
         if self.token is None:
             return True
@@ -223,9 +193,6 @@ class ViewHandler(GuardedHandler):
 
     def do_GET(self) -> None:
         self.close_connection = True
-        if not self.server.host_ok(self.headers.get("Host")):
-            self._json(421, {"error": "unexpected host: use the address the view listens on"})
-            return
         path = self.path.split("?")[0]
         if not self.server.authorized(self.headers.get("Authorization")):
             # A browser asks for the password (the token) once and remembers it; one
@@ -251,6 +218,10 @@ class ViewHandler(GuardedHandler):
             self._send(200, page, "text/html; charset=utf-8", {"Content-Security-Policy": _CSP})
         else:
             self._json(200, to_dict(view))
+
+    def misdirected(self) -> None:
+        # The Host check itself is the listener's (kelpie.httpguard, on loopback: #396, #406).
+        self._json(421, {"error": "unexpected host: use the address the view listens on"})
 
     def _refuse(self) -> None:
         self.close_connection = True

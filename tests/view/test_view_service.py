@@ -16,9 +16,10 @@ from kelpie.app import ConfigError, Settings, check_exposure
 from kelpie.core.farmview import from_dict
 from kelpie.core.model import Snapshot, Status, Task
 from kelpie.doctor import check_view
+from kelpie.httpguard import host_allowed
 from kelpie.view.cli import fetch_view, plain_http_warning, run, server_url
 from kelpie.view.config import ViewSettings, load_view
-from kelpie.view.service import PATH, ViewServer, ViewSource, _loopback_host
+from kelpie.view.service import PATH, ViewServer, ViewSource
 from kelpie.view.text import render
 
 NOW = datetime(2026, 3, 2, 15, tzinfo=UTC)
@@ -156,7 +157,7 @@ def test_every_path_checks_the_host(listener: ViewServer, path: str) -> None:
     ],
 )
 def test_host_check_table(configured: str, header: str, ok: bool) -> None:
-    assert _loopback_host(header, configured) is ok
+    assert host_allowed(header, configured) is ok
 
 
 def test_a_request_without_host_is_served(listener: ViewServer) -> None:
