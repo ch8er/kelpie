@@ -921,3 +921,27 @@ def test_a_report_cannot_set_the_ingest_token_mark() -> None:
     (out,) = namespace_snapshot("laptop", "hermes", replace(board(), spans=(span,))).spans
     assert INGEST_MARK not in out.attributes
     assert out.attributes[UNVERIFIED_ATTRIBUTE] is True  # the agent's writer check stands
+
+
+def test_a_report_flood_of_ingest_marks_leaves_none() -> None:
+    """5,000 spans each claiming a different ingest mark: none survives the report, so the
+    hub's guard has nothing to log or delete for them; the keys an agent's own hooks set
+    stay (#374)."""
+    from kelpie.core.spans import INGEST_MARK
+
+    spans = tuple(
+        Span(
+            "tr",
+            f"sp{i}",
+            "x",
+            SpanKind.TOOL,
+            NOW,
+            session_id="s1",
+            attributes={INGEST_MARK: f"x{i}", "kelpie.source": "hooks"},
+        )
+        for i in range(5000)
+    )
+    out = namespace_snapshot("laptop", "hermes", replace(board(), spans=spans)).spans
+    assert len(out) == 5000
+    assert not any(INGEST_MARK in s.attributes for s in out)
+    assert all(s.attributes["kelpie.source"] == "hooks" for s in out)

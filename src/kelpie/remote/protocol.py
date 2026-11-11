@@ -888,7 +888,10 @@ def namespace_snapshot(agent: str, adapter: str, part: Snapshot) -> Snapshot:
 def namespace_span(agent: str, span: Span) -> Span:
     """A span in the agent's namespace: its trace and span ids too, so links are only
     inherited, and hook and OTLP tool calls only merged, within one host. The ingest
-    token mark is the hub's own (set by its ingest, never by an agent's report): dropped."""
+    token mark is the hub's own (set by its ingest, never by an agent's report): dropped.
+    The other keys OTLP ingest reserves stay: an agent's own adapters and hooks set them
+    (``kelpie.source``, the writer check, tool output sizes), and dropping the writer check
+    would make an unverified hook line verified (#374)."""
     ns = partial(namespaced, agent)
     attributes = dict(span.attributes)
     attributes.pop(INGEST_MARK, None)

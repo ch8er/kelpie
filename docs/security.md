@@ -348,10 +348,16 @@ way the multi-host hub limits each `kelpie agent` to its own host:
   its times), and the totals and budget usage are read again, before rules and budgets see
   it. That check runs alone: a request judges and stores its spans with no check in
   between, so no span judged before a revocation is stored after it. A binding lasts for
-  the span retention after its last use; bindings are rebuilt from the store after a restart
-  (for the tokens still configured). Spans carry
+  the span retention after its last use, plus the hour a span may be dated ahead (the store prunes spans hourly, so a span can
+  outlast its binding by up to that hour; the snapshot check still judges it); bindings
+  are rebuilt from the store after a restart (for the tokens still configured). Kelpie
+  holds at most a million bindings; past that, those of names no longer configured go
+  first, then the token holding the most loses its least recently used ones, so a token
+  that floods ids evicts its own before those of any token holding fewer. Spans carry
   their token's name (`kelpie.ingest.token`, set by Kelpie; whatever a sender put there is
-  replaced or removed, and the hub drops it from the spans of a `kelpie agent` report), and a
+  replaced or removed, and the hub drops it from the spans of a `kelpie agent` report; the
+  other keys OTLP ingest reserves stay there, since the agent's own adapters and hooks set
+  them), and a
   span takes a missing session or task from its parent only
   when both came with the same scoped token. Hook spans are folded into OTLP spans before
   the snapshot check, so a fold that moves a span into another session is caught too.

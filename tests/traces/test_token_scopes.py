@@ -828,3 +828,97 @@ def test_unconfigured_token_names_share_one_log_slot(caplog: pytest.LogCaptureFi
     assert len(guard._logged) == 1
     (line,) = [r.message for r in caplog.records if "outside its scope" in r.message]
     assert "made-up-0" in line
+
+
+def test_a_flooding_token_evicts_its_own_bindings_not_anothers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Past MAX_BINDINGS the token holding the most loses its oldest: a token that floods
+    unplaced ids over days cannot evict another token's binding and then claim its id
+    (#374)."""
+    import kelpie.traces.scope as scope
+
+    monkeypatch.setattr(scope, "MAX_BINDINGS", 50)
+    monkeypatch.setattr(scope, "MAX_UNPLACED", 10)
+    guard = ScopeGuard(SCOPES, store=MemorySpanStore())
+    guard.index.update(board())
+    assert guard._bind("dev-2", [(SESSION, "new-2-victim")], NOW) is None
+    for day in range(20):  # 10 new ids a day, each day's beyond the 24h window of the last
+        at = NOW + timedelta(hours=25 * day)
+        for i in range(10):
+            assert guard._bind("dev-1", [(SESSION, f"flood-{day}-{i}")], at) is None
+    assert len(guard._bound) == 50
+    assert guard.bound(SESSION, "new-2-victim") == "dev-2"
+    assert guard.bound(SESSION, "flood-19-9") == "dev-1"
+    assert guard.bound(SESSION, "flood-0-0") is None  # the flooder's oldest went first
+    later = NOW + timedelta(hours=25 * 20)
+    assert guard._bind("dev-1", [(SESSION, "new-2-victim")], later) == OUT_OF_SCOPE
+
+
+def test_eviction_keeps_the_per_token_books_in_step(monkeypatch: pytest.MonkeyPatch) -> None:
+    import kelpie.traces.scope as scope
+
+    monkeypatch.setattr(scope, "MAX_BINDINGS", 4)
+    guard = ScopeGuard(SCOPES, store=MemorySpanStore())
+    for i in range(6):
+        guard._bind("dev-1" if i % 2 else "dev-2", [(SESSION, f"new-2-{i}")], NOW)
+    assert len(guard._bound) == 4
+    assert sum(len(o) for o in guard._owned.values()) == 4
+    assert all(guard._bound[k].token == t for t, o in guard._owned.items() for k in o)
+    assert all(k in guard._bound for a in guard._active.values() for k in a)
+
+
+def test_a_binding_outlives_retention_by_the_future_tolerance() -> None:
+    """A span dated up to an hour ahead is stored under its binding; the binding is kept
+    that much longer than retention, so a revocation still finds it (#374)."""
+    import kelpie.traces.scope as scope
+
+    guard = ScopeGuard(SCOPES, store=MemorySpanStore(), retention=timedelta(days=7))
+    guard._bind("dev-2", [(SESSION, "new-2-a")], NOW)
+    edge = NOW + timedelta(days=7) + scope.MAX_FUTURE
+    guard.check(Snapshot(now=edge))
+    assert guard.bound(SESSION, "new-2-a") == "dev-2"
+    guard.check(Snapshot(now=edge + timedelta(seconds=1)))
+    assert guard.bound(SESSION, "new-2-a") is None
+    assert not guard._owned and not guard._active.get("dev-2")
+
+
+def test_log_slots_past_their_minute_are_pruned() -> None:
+    guard = ScopeGuard(SCOPES, store=MemorySpanStore())
+    for i in range(1000):
+        guard._due(f"name-{i}", NOW + timedelta(minutes=2 * i))
+    assert len(guard._logged) <= len(SCOPES) + 1
+    assert guard._due("name-999", NOW + timedelta(minutes=1998, seconds=30)) is False
+
+
+class _Marks(MemorySpanStore):
+    def __init__(self, rows: list[tuple[str | None, str | None, str]]) -> None:
+        super().__init__()
+        self.rows = rows
+
+    def marked_ids(
+        self, after: datetime, attribute: str
+    ) -> list[tuple[str | None, str | None, str]]:
+        return self.rows
+
+
+def test_restore_past_the_cap_evicts_removed_names_first_and_stays_fast(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A restore of many marks of names no longer configured holds them in one pool: never
+    more than the cap, evicted before configured tokens' bindings, in linear time (#374)."""
+    import time
+
+    import kelpie.traces.scope as scope
+
+    monkeypatch.setattr(scope, "MAX_BINDINGS", 10_000)
+    rows: list[tuple[str | None, str | None, str]] = [("new-2-keep", None, "dev-2")]
+    rows += [(f"gone-{i}", None, f"removed-{i}") for i in range(40_000)]
+    guard = ScopeGuard(SCOPES, store=_Marks(rows))
+    started = time.monotonic()
+    bound = guard.restore(NOW - timedelta(days=1), NOW)
+    assert time.monotonic() - started < 5
+    assert bound == len(guard._bound) == 10_000
+    assert set(guard._owned) == {"dev-2", scope.REMOVED_TOKEN}
+    assert guard.bound(SESSION, "new-2-keep") == "dev-2"
+    assert sum(len(o) for o in guard._owned.values()) == 10_000
