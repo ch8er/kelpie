@@ -277,6 +277,15 @@ class OpenClawAdapter:
     _last_board: tuple[datetime, workboard.Board] | None = field(
         default=None, init=False, repr=False, compare=False
     )
+    # The spool read incrementally, tick to tick (#392).
+    _spool_cache: _spool.SpoolCache[SpoolEvent] = field(
+        default_factory=lambda: _spool.SpoolCache(
+            NAME, parse_line, MAX_SPOOL_READ, MAX_LINE, capped=lambda e: e.type == "tool"
+        ),
+        init=False,
+        repr=False,
+        compare=False,
+    )
 
     def __post_init__(self) -> None:
         self.state_dir = Path(self.state_dir).expanduser()
@@ -387,7 +396,9 @@ class OpenClawAdapter:
         if now.tzinfo is None:
             raise ValueError("now must be timezone-aware")
         cutoff = now - self.lookback
-        events = sorted(self._events(cutoff, now + FUTURE_SKEW), key=lambda e: e.at)
+        until = now + FUTURE_SKEW  # read incrementally (#392)
+        events = self._spool_cache.items(self.spool, cutoff)
+        events = sorted((e for e in events if e.at <= until), key=lambda e: e.at)
         board = self._board_or_last(now)
         sessions = self._sessions(events, board.cards, now, self._markers(events, now))
         tasks = tuple(c.task for c in board.cards)

@@ -115,7 +115,7 @@ import re
 import sqlite3
 import time
 import unicodedata
-from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
@@ -756,6 +756,11 @@ class HermesAdapter:
     _assignees: dict[str, str | None] = field(
         default_factory=dict, init=False, repr=False, compare=False
     )
+    # The spool read incrementally, tick to tick (#392). An init field, so the copy that
+    # ``HermesBoards`` reads the home's spool with (``replace``) shares it.
+    spool_cache: _spool.SpoolCache[HookEvent] | None = field(
+        default=None, repr=False, compare=False
+    )
 
     def __post_init__(self) -> None:
         self.db_path = Path(self.db_path).expanduser()
@@ -770,6 +775,14 @@ class HermesAdapter:
         if self.state_home is not None:
             self.state_home = Path(self.state_home).expanduser()
         self.wait_key = Path(self.wait_key).expanduser()
+        if self.spool_cache is None:
+            self.spool_cache = _spool.SpoolCache(
+                "hermes",
+                _event_from_line,
+                MAX_SPOOL_READ,
+                MAX_SPOOL_LINE,
+                capped=lambda e: e.kind == TOOL,
+            )
 
     def role_of(self, profile: str) -> str:
         """The role of a Hermes profile: ``roles``, else the name without a trailing
@@ -1611,13 +1624,14 @@ class HermesAdapter:
 
     # --- hooks spool ---------------------------------------------------------------------
 
-    def _spool_lines(self, cutoff: datetime) -> Iterator[str]:
-        # Agents write next to the spool: no symlink, no FIFO, a byte and a line cap.
-        return _spool.spool_lines(self.spool, cutoff, MAX_SPOOL_READ, MAX_SPOOL_LINE)
-
     def _spans(self, cutoff: datetime, until: datetime | None = None) -> tuple[Span, ...]:
-        events = (_event_from_line(line, cutoff, until) for line in self._spool_lines(cutoff))
-        return spans_from_hook_events((e for e in events if e is not None), prefix="hermes")
+        """Spans of the spool's lines from ``cutoff`` to ``until``, read incrementally
+        (only what was appended since the last call is parsed, #392)."""
+        assert self.spool_cache is not None  # __post_init__
+        events = self.spool_cache.items(self.spool, cutoff)
+        if until is not None:
+            events = [e for e in events if e.at <= until]
+        return spans_from_hook_events(events, prefix="hermes")
 
     def _check_writers(self, conn: _Connection, spans: tuple[Span, ...]) -> tuple[Span, ...]:
         """Each spool span's writer (the plugin's pid and Hermes-style process fingerprint)

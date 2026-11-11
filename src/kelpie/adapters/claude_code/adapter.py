@@ -335,6 +335,20 @@ class ClaudeCodeAdapter:
     _watched: dict[str, _Watched] = field(
         default_factory=dict, init=False, repr=False, compare=False
     )
+    # The spool read incrementally, tick to tick (#392); a session's task claims and skill
+    # loads never count toward its cap of tool calls.
+    _spool_cache: _spool.SpoolCache[SpoolEvent] = field(
+        default_factory=lambda: _spool.SpoolCache(
+            NAME,
+            parse_line,
+            MAX_SPOOL_READ,
+            MAX_LINE,
+            capped=lambda e: e.type == "tool" and e.task is None and e.skill is None,
+        ),
+        init=False,
+        repr=False,
+        compare=False,
+    )
 
     def __post_init__(self) -> None:
         self.tasks_dir = Path(self.tasks_dir).expanduser()
@@ -413,7 +427,9 @@ class ClaudeCodeAdapter:
         if now.tzinfo is None:
             raise ValueError("now must be timezone-aware")
         cutoff = now - self.lookback
-        events = sorted(self._events(cutoff, now + FUTURE_SKEW), key=lambda e: e.at)
+        until = now + FUTURE_SKEW  # read incrementally (#392)
+        events = self._spool_cache.items(self.spool, cutoff)
+        events = sorted((e for e in events if e.at <= until), key=lambda e: e.at)
         files = [f for tl in self.task_lists for f in self._read_list(tl)]
         updates = self._status_updates(events)
         tasks, dependencies = self._tasks(files, updates, cutoff)
