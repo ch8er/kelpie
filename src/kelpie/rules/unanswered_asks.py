@@ -68,6 +68,12 @@ from the second on, about the asking task, with ``params``: ``asker``, ``recipie
 ``unknown``), ``recipient_state`` (``idle``), ``step`` (1-based), ``open_hours`` (hours of
 awake time since the ask) and ``snooze`` when an expired or grown snooze sent it again. The
 rule only alerts; Kelpie never edits agents' instructions or writes to their sessions.
+
+**Rate limit.** The reminders are ``own_budget`` alerts: ``[engine]
+max_actions_per_task_per_hour`` counts them per rule and task, apart from the task's own
+budget. A comment that mentions many agents (an honest broadcast, or an agent trying to use
+up its task's budget to dodge a stop) gives many reminders, but none of them can hold back
+another rule's action on the task (#390).
 """
 
 from __future__ import annotations
@@ -229,6 +235,9 @@ class UnansweredAsks:
             since=min(asked_at, snapshot.now),
             once=True,
             once_per_key=True,
+            # One comment can mention many agents: these reminders get a budget of their
+            # own, so they never use up the task's for a stop or requeue (#390).
+            own_budget=True,
             params=params,
         )
 

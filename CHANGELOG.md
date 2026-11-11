@@ -178,6 +178,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
   any token holding fewer (whose ids it could otherwise claim). A binding is kept, past
   retention, the hour a span may be dated ahead. Log slots past their minute are pruned
   (#374).
+- `unanswered_asks` reminders count toward `[engine] max_actions_per_task_per_hour` on a
+  budget of their own per task (`Action.own_budget`), not the task's: one comment mentioning
+  many agents (an honest broadcast, or an agent dodging a stop) gave one alert per agent and
+  used up the task's hourly budget, so a stop or requeue of that task by another rule came
+  back rate-limited (#390).
 - A block storm's "Block storm over" notice counts the tasks Kelpie listed, not a list an
   agent wrote into its block reason (#404).
 - The `[view]` listener on loopback answers only requests addressed to a loopback name or
