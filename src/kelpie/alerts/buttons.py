@@ -105,7 +105,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 from kelpie.alerts import i18n, render
 from kelpie.alerts.render import (
@@ -113,18 +113,24 @@ from kelpie.alerts.render import (
     MAX_BUTTON,
     MAX_ID,
     MAX_TEXT,
+    AnswerTarget,
     RenderSettings,
     SnoozeTarget,
     one_line,
     utf16_len,
 )
 from kelpie.core.alerts import AlertEvent
+from kelpie.core.offers import ItemOffer
 from kelpie.core.snooze import CHAT_DAYS
+
+if TYPE_CHECKING:
+    from kelpie.alerts.answers import AnswerControl
 
 log = logging.getLogger(__name__)
 
 REF_TTL = timedelta(hours=24)  # a reference's life: the longest escalation step (4h, 12h, 24h)
 PRUNE_AFTER = timedelta(days=7)  # references kept after issue (expired ones say so till then)
+QUESTION_KEPT = timedelta(days=30)  # an answered question's claim (#300), as the ledger's
 PRUNE_EVERY = 3600.0  # seconds between two prunes by the poller
 RATE_LIMIT = 10  # presses one user may make...
 RATE_WINDOW = 60.0  # ...within this many seconds; more are dropped without an answer
@@ -143,7 +149,7 @@ _DATA = re.compile(rf"{ACTION}([0-9])\.([1-9a-f][0-9a-f]{{0,14}})\.([A-Za-z0-9_-
 _ENTITY_TYPES = frozenset(
     {"bold", "italic", "underline", "strikethrough", "code", "pre", "text_link", "url"}
 )
-OUTCOMES = ("snoozed", "rejected", "failed")
+OUTCOMES = ("snoozed", "confirming", "answered", "rejected", "failed")
 REASONS = (
     "unknown_user",
     "wrong_chat",
@@ -154,6 +160,12 @@ REASONS = (
     "rate_limited",
     "malformed",
     "not_callback",
+    # answers to agents' questions (#300)
+    "stale_offer",
+    "not_enabled",
+    "dry_run",
+    "not_approver",
+    "used_question",
 )
 
 
@@ -194,6 +206,82 @@ def _ref_id(data: object) -> int | None:
     """The record id of what looks like a Kelpie button (signature not checked)."""
     m = _DATA.fullmatch(data) if isinstance(data, str) else None
     return int(m[2], 16) if m else None
+
+
+# --- answer references (#300) ---------------------------------------------------------------
+
+_ANSWER_TAG = b"kelpie/telegram-answer/v1"
+OPTION = "a"  # an option button on a digest: a<index>.<id>.<mac>
+CONFIRM = "c"  # the confirm button of a confirmation: c.<id>.<mac>
+_ANSWER_DATA = re.compile(r"(?:a([0-3])|c)\.([1-9a-f][0-9a-f]{0,14})\.([A-Za-z0-9_-]{22})")
+
+
+def _answer_mac(key: bytes, chat_id: str, kind: str, index: int | None, ref_id: int) -> str:
+    message = b"\n".join(
+        (
+            _ANSWER_TAG,
+            chat_id.encode(),
+            kind.encode(),
+            b"-" if index is None else str(index).encode(),
+            str(ref_id).encode(),
+        )
+    )
+    digest = hmac.new(key, message, hashlib.sha256).digest()[:16]
+    return base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
+
+
+def answer_data(key: bytes, chat_id: str, kind: str, index: int | None, ref_id: int) -> str:
+    """The ``callback_data`` of an answer button: ``a<index>.<id hex>.<mac>`` for an option,
+    ``c.<id hex>.<mac>`` for a confirm; no task id, no option text (at most 40 bytes)."""
+    if ref_id < 1 or (kind == OPTION) != (index is not None):
+        raise ValueError("an option button has an index, a confirm button none")
+    if kind not in (OPTION, CONFIRM) or (index is not None and not 0 <= index <= 3):
+        raise ValueError("an answer button is an option (0-3) or a confirm")
+    head = f"{OPTION}{index}" if kind == OPTION else CONFIRM
+    return f"{head}.{ref_id:x}.{_answer_mac(key, chat_id, kind, index, ref_id)}"
+
+
+def parse_answer(data: object, key: bytes, chat_id: str) -> tuple[str, int | None, int] | None:
+    """The kind, the option index (None for a confirm) and the record id of an answer
+    button's ``callback_data``, or None when it is not one Kelpie signed for this chat."""
+    if not isinstance(data, str):
+        return None
+    m = _ANSWER_DATA.fullmatch(data)
+    if m is None:
+        return None
+    kind = CONFIRM if data.startswith(CONFIRM) else OPTION
+    index = None if m[1] is None else int(m[1])
+    ref_id = int(m[2], 16)
+    good = _answer_mac(key, chat_id, kind, index, ref_id).encode()
+    if not hmac.compare_digest(m[3].encode("ascii"), good):
+        return None
+    return kind, index, ref_id
+
+
+def offer_record(item: ItemOffer) -> dict[str, Any]:
+    """What an answer reference keeps of an item's offer: the options as shown, the
+    question's re-check and the person it is for (``offer_from_params`` reads it back)."""
+    offer = item.offer
+    return {
+        "options": [{"label": o.label, "text": o.text} for o in offer.options],
+        "style": offer.style,
+        "recommended": offer.recommended,
+        "digest": offer.digest,
+        "question": item.question,
+        "approver": item.approver,
+        **item.expect.params(),
+    }
+
+
+def looks_like_answer(data: object) -> bool:
+    """Whether ``data`` has the shape of an answer button's (signature not checked)."""
+    return isinstance(data, str) and _ANSWER_DATA.fullmatch(data) is not None
+
+
+def _answer_ref_id(data: object) -> int | None:
+    """The record id of what looks like an option button (signature not checked)."""
+    m = _ANSWER_DATA.fullmatch(data) if isinstance(data, str) else None
+    return int(m[2], 16) if m and m[1] is not None else None
 
 
 def alert_key(event: AlertEvent) -> str:
@@ -250,6 +338,33 @@ CREATE TABLE IF NOT EXISTS latest (
     sent_at    TEXT NOT NULL,
     PRIMARY KEY (channel, chat_id, alert)
 );
+CREATE TABLE IF NOT EXISTS answer_refs (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind       TEXT NOT NULL,
+    channel    TEXT NOT NULL,
+    chat_id    TEXT NOT NULL,
+    alert      TEXT NOT NULL,
+    task_id    TEXT NOT NULL,
+    board      TEXT,
+    item       INTEGER NOT NULL,
+    question   TEXT NOT NULL,
+    offer      TEXT NOT NULL,
+    choice     INTEGER,
+    user_id    INTEGER,
+    parent     INTEGER,
+    issued_at  TEXT NOT NULL,
+    message_id INTEGER,
+    used_at    TEXT
+);
+CREATE INDEX IF NOT EXISTS answer_refs_issued ON answer_refs (issued_at);
+CREATE TABLE IF NOT EXISTS questions (
+    question   TEXT PRIMARY KEY,
+    label      TEXT NOT NULL,
+    who        TEXT NOT NULL,
+    user_id    INTEGER NOT NULL,
+    ref_id     INTEGER NOT NULL,
+    claimed_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS messages (
     channel    TEXT NOT NULL,
     chat_id    TEXT NOT NULL,
@@ -274,6 +389,43 @@ class Shown:
 
 
 _KEY = "hmac_key"
+
+
+@dataclass(frozen=True, slots=True)
+class AnswerRef:
+    """A stored answer reference (#300): an option button (``kind`` ``a``) on a digest
+    message, or the confirm button (``c``) of the confirmation that restates the chosen
+    option. ``offer`` is the item's offer as the digest showed it (the options, the
+    question's re-check: owner, block_since, digest; the approver); a confirm adds the
+    chosen ``choice``, the pressing ``user_id`` and its option reference (``parent``)."""
+
+    kind: str
+    channel: str
+    chat_id: str
+    alert: str
+    task_id: str
+    board: str | None
+    item: int
+    question: str
+    offer: dict[str, Any]
+    issued_at: datetime
+    choice: int | None = None
+    user_id: int | None = None
+    parent: int | None = None
+    message_id: int | None = None
+    used_at: datetime | None = None
+    id: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class Claim:
+    """Who answered a question from the chat, with which option, and when."""
+
+    label: str
+    who: str
+    user_id: int
+    ref_id: int
+    at: datetime
 
 
 def _ts(at: datetime) -> str:
@@ -409,14 +561,18 @@ class ButtonStore:
 
     def _prune(self, at: datetime) -> int:
         cutoff = _ts(at - PRUNE_AFTER)
-        return sum(
+        gone = sum(
             self._db.execute(sql, (cutoff,)).rowcount
             for sql in (
                 "DELETE FROM refs WHERE issued_at < ?",
                 "DELETE FROM latest WHERE sent_at < ?",
                 "DELETE FROM messages WHERE updated_at < ?",
+                "DELETE FROM answer_refs WHERE issued_at < ?",
             )
         )
+        # A question stays answered as long as the ledger shows it (QUESTION_KEPT).
+        claims = "DELETE FROM questions WHERE claimed_at < ?"
+        return gone + self._db.execute(claims, (_ts(at - QUESTION_KEPT),)).rowcount
 
     def issue(
         self,
@@ -449,16 +605,20 @@ class ButtonStore:
         message_id: int | None,
         at: datetime,
         shown: Shown | None = None,
+        answer_ids: Sequence[int] = (),
     ) -> int | None:
-        """A message of ``alert`` went out (``at``), with the references ``ids`` (or none):
+        """A message of ``alert`` went out (``at``), with the references ``ids`` (or none)
+        and the answer references ``answer_ids`` (#300):
         bind them to it and record it as the alert's latest message in that chat, which
         expires the buttons of every older one, and keep Kelpie's copy of it (``shown``),
         which the acknowledgements edit. ``message_id`` None (Telegram did not say, or
         nothing was sent: the alert resolved unseen) expires them too. Returns the previous
         latest message when it carried buttons, so the caller may remove them."""
         key = (channel, chat_id, alert)
-        if message_id is not None and ids and shown is not None:
+        if message_id is not None and (ids or answer_ids) and shown is not None:
             self.set_shown(channel, chat_id, message_id, shown, at)
+        if message_id is not None and answer_ids:
+            self.bind_answers(answer_ids, message_id)
         with self._lock, self._db:
             self._prune(at)
             row = self._db.execute(
@@ -480,10 +640,24 @@ class ButtonStore:
                 return None
             had = self._db.execute(
                 "SELECT 1 FROM refs WHERE channel = ? AND chat_id = ? AND alert = ?"
-                " AND message_id = ? LIMIT 1",
-                (*key, previous),
+                " AND message_id = ? UNION ALL SELECT 1 FROM answer_refs WHERE channel = ?"
+                " AND chat_id = ? AND alert = ? AND message_id = ? LIMIT 1",
+                (*key, previous, *key, previous),
             ).fetchone()
         return int(previous) if had is not None else None
+
+    def is_latest_message(
+        self, channel: str, chat_id: str, alert: str, message_id: int | None
+    ) -> bool:
+        """Whether ``message_id`` is still the latest message of ``alert`` in its chat."""
+        if message_id is None:
+            return False
+        with self._lock:
+            row = self._db.execute(
+                "SELECT message_id FROM latest WHERE channel = ? AND chat_id = ? AND alert = ?",
+                (channel, chat_id, alert),
+            ).fetchone()
+        return row is not None and row["message_id"] == message_id
 
     def is_latest(self, ref: Ref) -> bool:
         """Whether the message ``ref`` went out in is still the latest of its alert in its
@@ -571,6 +745,133 @@ class ButtonStore:
             )
         return cur.rowcount > 0
 
+    # --- answers to agents' questions (#300) ----------------------------------------------
+
+    def issue_answer(self, ref: AnswerRef) -> int:
+        """Store an answer reference (an option's, or a confirm's) and return its id."""
+        with self._lock, self._db:
+            self._prune(ref.issued_at)
+            cur = self._db.execute(
+                "INSERT INTO answer_refs (kind, channel, chat_id, alert, task_id, board, item,"
+                " question, offer, choice, user_id, parent, issued_at, message_id)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    ref.kind,
+                    ref.channel,
+                    ref.chat_id,
+                    ref.alert,
+                    ref.task_id,
+                    ref.board,
+                    ref.item,
+                    ref.question,
+                    json.dumps(ref.offer),
+                    ref.choice,
+                    ref.user_id,
+                    ref.parent,
+                    _ts(ref.issued_at),
+                    ref.message_id,
+                ),
+            )
+        return int(cur.lastrowid or 0)
+
+    def bind_answers(self, ids: Sequence[int], message_id: int) -> None:
+        """The answer references ``ids`` went out in ``message_id``."""
+        with self._lock, self._db:
+            self._db.executemany(
+                "UPDATE answer_refs SET message_id = ? WHERE id = ? AND message_id IS NULL",
+                [(message_id, i) for i in ids],
+            )
+
+    def answer_ref(self, ref_id: int) -> AnswerRef | None:
+        with self._lock:
+            row = self._db.execute("SELECT * FROM answer_refs WHERE id = ?", (ref_id,)).fetchone()
+        if row is None:
+            return None
+        try:
+            offer = json.loads(row["offer"])
+        except ValueError:
+            return None
+        if not isinstance(offer, dict):
+            return None
+        return AnswerRef(
+            kind=row["kind"],
+            channel=row["channel"],
+            chat_id=row["chat_id"],
+            alert=row["alert"],
+            task_id=row["task_id"],
+            board=row["board"],
+            item=row["item"],
+            question=row["question"],
+            offer=offer,
+            issued_at=datetime.fromisoformat(row["issued_at"]),
+            choice=row["choice"],
+            user_id=row["user_id"],
+            parent=row["parent"],
+            message_id=row["message_id"],
+            used_at=None if row["used_at"] is None else datetime.fromisoformat(row["used_at"]),
+            id=row["id"],
+        )
+
+    def use_answer_ref(self, ref_id: int, at: datetime) -> bool:
+        """Claim an answer reference (a confirm is single-use); False when it already was."""
+        with self._lock, self._db:
+            cur = self._db.execute(
+                "UPDATE answer_refs SET used_at = ? WHERE id = ? AND used_at IS NULL",
+                (_ts(at), ref_id),
+            )
+        return cur.rowcount > 0
+
+    def claim_question(
+        self, question: str, label: str, who: str, user_id: int, ref_id: int, at: datetime
+    ) -> Claim | None:
+        """Claim ``question`` for this answer, atomically (the key is unique): None when it
+        was free and is now this answer's, else the claim that holds it."""
+        with self._lock, self._db:
+            cur = self._db.execute(
+                "INSERT OR IGNORE INTO questions (question, label, who, user_id, ref_id,"
+                " claimed_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (question, label, who, user_id, ref_id, _ts(at)),
+            )
+            if cur.rowcount > 0:
+                return None
+        return self.claim(question)
+
+    def claim(self, question: str) -> Claim | None:
+        """Who answered ``question``, if anyone has."""
+        with self._lock:
+            row = self._db.execute(
+                "SELECT label, who, user_id, ref_id, claimed_at FROM questions WHERE question = ?",
+                (question,),
+            ).fetchone()
+        if row is None:
+            return None
+        return Claim(
+            row["label"],
+            row["who"],
+            row["user_id"],
+            row["ref_id"],
+            datetime.fromisoformat(row["claimed_at"]),
+        )
+
+    def release_question(self, question: str, ref_id: int) -> bool:
+        """Give a claimed question back (its comment was refused before it reached the
+        board); False when this answer does not hold it."""
+        with self._lock, self._db:
+            cur = self._db.execute(
+                "DELETE FROM questions WHERE question = ? AND ref_id = ?", (question, ref_id)
+            )
+        return cur.rowcount > 0
+
+    def answered_on(self, channel: str, chat_id: str, message_id: int) -> set[int]:
+        """The option references on a message whose question is answered (or claimed)."""
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT a.id FROM answer_refs a JOIN questions q ON q.question = a.question"
+                " WHERE a.channel = ? AND a.chat_id = ? AND a.message_id = ? AND a.kind = 'a'",
+                (channel, chat_id, message_id),
+            ).fetchall()
+        return {int(r["id"]) for r in rows}
+
     def release(self, ref_id: int, at: datetime) -> bool:
         """Undo the claim :meth:`use` made ``at`` (the snooze was not written); False when
         the reference is not claimed so."""
@@ -623,11 +924,13 @@ class Buttons:
         message_id: int | None,
         sent: Mapping[str, Any] | None = None,
         markup: Mapping[str, Any] | None = None,
+        answer_ids: Sequence[int] = (),
     ) -> int | None:
         """Record a delivered message of ``event`` (every one, with buttons or without) as
         its alert's latest, with Kelpie's copy of it (``sent``: the message Telegram
-        answered with; ``markup``: the keyboard sent); returns the previous one when its
-        buttons should be removed."""
+        answered with; ``markup``: the keyboard sent) and its answer references
+        (``answer_ids``, #300); returns the previous one when its buttons should be
+        removed."""
         shown = None
         if sent is not None and markup is not None:
             text = sent.get("text")
@@ -637,8 +940,47 @@ class Buttons:
                 dict(markup),
             )
         return self.store.delivered(
-            self.channel, self.chat_id, alert_key(event), ids, message_id, self.clock(), shown
+            self.channel,
+            self.chat_id,
+            alert_key(event),
+            ids,
+            message_id,
+            self.clock(),
+            shown,
+            answer_ids,
         )
+
+    def attach_answers(
+        self, event: AlertEvent, targets: Sequence[AnswerTarget]
+    ) -> tuple[list[list[dict[str, str]]], list[int]]:
+        """Keyboard rows of answer buttons for ``targets`` (#300), one stored, signed
+        reference per item (its option buttons share it, each with its own index), and the
+        reference ids to bind once sent."""
+        if not targets:
+            return [], []
+        key, now, alert = self.store.key(), self.clock(), alert_key(event)
+        rows, ids = [], []
+        for t in targets:
+            ref = AnswerRef(
+                kind=OPTION,
+                channel=self.channel,
+                chat_id=self.chat_id,
+                alert=alert,
+                task_id=t.task_id,
+                board=t.board,
+                item=t.number,
+                question=t.offer.question,
+                offer=offer_record(t.offer),
+                issued_at=now,
+            )
+            ref_id = self.store.issue_answer(ref)
+            data = [
+                answer_data(key, self.chat_id, OPTION, i, ref_id)
+                for i in range(len(t.offer.offer.options))
+            ]
+            rows.append((t, data))
+            ids.append(ref_id)
+        return render.answer_rows(rows, self.language), ids
 
 
 # --- the poller ----------------------------------------------------------------------------
@@ -712,6 +1054,23 @@ class ChatControl:
     poll_timeout: int = POLL_TIMEOUT
     backoff: float = 1.0
     min_interval: float = MIN_POLL_INTERVAL
+    # Answers to agents' questions (#300): None when no board opted in (answer buttons off).
+    answers: AnswerControl | None = None
+
+
+class AnswerDeskLike(Protocol):
+    """What the poller hands answer presses to (:class:`kelpie.alerts.answers.AnswerDesk`)."""
+
+    def owns(self, data: object) -> bool: ...
+
+    def take(
+        self,
+        query_id: object,
+        data: object,
+        user_id: int,
+        sender: Mapping[str, Any],
+        message: Mapping[str, Any],
+    ) -> None: ...
 
 
 class _RateLimit:
@@ -786,6 +1145,9 @@ class ButtonPoller:
         self._thread: threading.Thread | None = None
         self.abandoned = False
         self._next_prune: float | None = None  # monotonic; None: at the first loop
+        # Takes the presses of answer buttons (#300): set by the channel when it has
+        # answer_buttons; None: such a press is a forged one (bad_ref).
+        self.desk: AnswerDeskLike | None = None
 
     def __repr__(self) -> str:
         return f"ButtonPoller(channel={self.channel!r}, chat_id={self.chat_id!r})"
@@ -910,6 +1272,14 @@ class ButtonPoller:
             self._reject("not_callback")
             return
         query_id = query.get("id")
+        if self.desk is not None and self.desk.owns(query.get("data")):
+            try:
+                user_id, sender, message = self._sender(query)
+            except _Rejected as exc:
+                self._reject(exc.reason, query_id if exc.answer else None)
+                return
+            self.desk.take(query_id, query.get("data"), user_id, sender, message)
+            return
         try:
             press, ref = self._check(query)
         except _Rejected as exc:
@@ -941,16 +1311,18 @@ class ButtonPoller:
         self._call("editMessageReplyMarkup", body)
         self._reject("expired_ref", query_id, text)  # answered, then counted once handled
 
-    def _call(self, method: str, body: Mapping[str, Any]) -> Any:
+    def _call(self, method: str, body: Mapping[str, Any], timeout: float | None = None) -> Any:
         """A Bot API call whose failure is only counted and logged (None then)."""
         try:
-            return self.api.call(method, body)
+            return self.api.call(method, body, timeout)
         except ApiError as exc:
             self._api_error(method, exc)
             return None
 
-    def _check(self, query: Mapping[str, Any]) -> tuple[Press, Ref]:
-        """The press and its reference, or :class:`_Rejected` with why."""
+    def _sender(self, query: Mapping[str, Any]) -> tuple[int, Mapping[str, Any], Mapping[str, Any]]:
+        """The press's sender id, the sender and the message it came from, once it passed
+        the checks every press passes (well-formed, not rate limited, an allowed person, in
+        the configured chat), else :class:`_Rejected`."""
         sender = query.get("from")
         user_id = _int(sender.get("id")) if isinstance(sender, Mapping) else None
         if user_id is None or not isinstance(query.get("id"), str):
@@ -966,6 +1338,12 @@ class ButtonPoller:
             raise _Rejected("wrong_chat", answer=False)
         if not self._our_chat(chat):
             raise _Rejected("wrong_chat", answer=False)
+        assert isinstance(sender, Mapping)  # its id was read above
+        return user_id, sender, message
+
+    def _check(self, query: Mapping[str, Any]) -> tuple[Press, Ref]:
+        """The press and its reference, or :class:`_Rejected` with why."""
+        user_id, sender, message = self._sender(query)
         parsed = parse_callback(query.get("data"), self.store.key(), self.chat_id)
         if parsed is None:
             raise _Rejected("bad_ref")
@@ -983,7 +1361,6 @@ class ButtonPoller:
             raise _Rejected("expired_ref", ref=ref)  # its alert moved on, or resolved
         if ref.used_at is not None:
             raise _Rejected("used_ref")
-        assert isinstance(sender, Mapping)  # its id was read above
         name = _name(sender) or f"user {user_id}"
         return Press(self.channel, ref.task_id, days, user_id, name), ref
 
@@ -1087,7 +1464,8 @@ class ButtonPoller:
         target = {"chat_id": self.chat_id, "message_id": message_id}
         shown = self.store.shown(self.channel, self.chat_id, message_id)
         used = self.store.used_on(self.channel, self.chat_id, message_id)
-        markup = _remaining(None if shown is None else shown.markup, used)
+        answered = self.store.answered_on(self.channel, self.chat_id, message_id)
+        markup = _remaining(None if shown is None else shown.markup, used, answered)
         if not self.store.is_latest(ref):  # a newer message went out meanwhile: none left
             markup = {"inline_keyboard": []}
         if shown is not None and shown.text:
@@ -1156,9 +1534,10 @@ def _name(sender: Mapping[str, Any]) -> str:
     return one_line(name, MAX_NAME) if name else ""
 
 
-def _remaining(markup: object, used: set[int]) -> dict[str, Any]:
-    """The keyboard Kelpie sent without the buttons of the references in ``used``; only
-    buttons that look like Kelpie's are kept."""
+def _remaining(markup: object, used: set[int], answered: set[int] | None = None) -> dict[str, Any]:
+    """The keyboard Kelpie sent without the buttons of the references in ``used`` (snooze)
+    and ``answered`` (option buttons of an answered question, #300); only buttons that look
+    like Kelpie's are kept."""
     rows = markup.get("inline_keyboard") if isinstance(markup, Mapping) else None
     out: list[list[dict[str, str]]] = []
     for row in rows if isinstance(rows, list) else ():
@@ -1167,8 +1546,13 @@ def _remaining(markup: object, used: set[int]) -> dict[str, Any]:
             if not isinstance(button, Mapping):
                 continue
             data, label = button.get("callback_data"), button.get("text")
-            found = _ref_id(data)
-            if found is None or found in used or not isinstance(label, str):
+            if not isinstance(label, str):
+                continue
+            option = _answer_ref_id(data)
+            if option is not None:
+                if option in (answered or set()):
+                    continue
+            elif (found := _ref_id(data)) is None or found in used:
                 continue
             kept.append({"text": label[:MAX_BUTTON], "callback_data": str(data)})
         if kept:

@@ -563,6 +563,38 @@ class SqliteLedgerStore:
             _insert_entry(self._db, entry)
         return None
 
+    def answer_outcome(
+        self, fingerprint: str, outcome: Outcome, detail: str | None, params: dict[str, Any]
+    ) -> bool:
+        """Set the outcome (and detail and params) of the chat answer entry ``fingerprint``
+        (#300), recorded ``pending`` when the question was claimed; False when there is no
+        such entry."""
+        if outcome is Outcome.PENDING:
+            raise ValueError("an answer's outcome is what became of it, not pending")
+
+        def write(db: sqlite3.Connection) -> sqlite3.Cursor:
+            return db.execute(
+                "UPDATE actions SET outcome = ?, detail = ?, params = ? WHERE fingerprint = ?"
+                " AND kind = ? AND outcome = ?",
+                (
+                    outcome,
+                    None if detail is None else capped(detail, MAX_STORED_TEXT),
+                    _stored_params(params),
+                    fingerprint,
+                    ActionKind.ANSWER,
+                    Outcome.PENDING,
+                ),
+            )
+
+        return self._write(write).rowcount > 0
+
+    def answers(self, after: datetime) -> list[LedgerEntry]:
+        """The chat answer entries (#300) newer than ``after``, oldest first."""
+        return self._query(
+            f"SELECT {_COLUMNS} FROM actions WHERE kind = ? AND at > ? ORDER BY at, id",
+            (ActionKind.ANSWER.value, _ts(after)),
+        )
+
     def set_snooze_baseline(self, snooze: Snooze, behind: int) -> bool:
         """Record how much work was behind a stored snooze's task when ``kelpie serve`` first
         saw it (``behind_at_snooze``), once: only on that same snooze (task and creation

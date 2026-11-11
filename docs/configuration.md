@@ -1053,6 +1053,7 @@ The Hermes platform adapter. Absent: no platform, and snapshots hold no tasks. D
 | `state_sources` | `["kanban", "subagent", "cron"]` | list of Hermes session sources | Whose sessions are read for waits: Kanban workers, their subagents and cron jobs by default, not a person's own chats (`cli`, `telegram`, ...). |
 | `prework_statuses` | `["triage", "scheduled"]` | list of `triage`, `scheduled` | Hermes statuses before any work starts: rule 3 alerts when a card sits there past `prework_after` with tasks depending on it. Kelpie's own parks in `scheduled` are `waiting`, not pre-work. |
 | `human_owners` | `[]` | list of names | Assignees that are people, not agents; case-insensitive. Their tasks get a human owner, which `[connectors.human_tasks]` needs. Also changes `ping_pong`'s default escalation target and who `bottlenecks` and `orphan_status` count as agents. A person stays a person when another adapter lists the same name, in any case (e.g. a Claude Code task-list owner), and never counts as an idle agent. Comment and description authors with these names are people too (rule 1's acceptance criteria). |
+| `chat_answers` | `false` | bool | Answers to agents' questions from Telegram may be written to this board (comment, then unblock): see [Answering an agent's question](#answering-an-agents-question). With `boards`, the default of every board. Not with `[hub]`. |
 | `boards` | none | array of tables | Several boards of this Hermes home: see [[[adapters.hermes.boards]]](#adaptershermesboards). Then `db_path` and `wait_key` are set per board; setting them here stops Kelpie at startup. |
 | `human_decisions` | `[]` | array of tables: `marker`, `relays`, optional `person` | A person's decisions an agent records (`[[adapters.hermes.human_decisions]]`, e.g. `marker = "решение CEO"`, `relays = ["partner"]`, `person = "ceo"`): a comment, or a task description, by one of `relays` (profiles, case-insensitive) that opens with `marker` and a separator on its line (`:`, `-` before no word, an en or em dash; case-insensitive, past invisible characters and markdown emphasis: "Решение CEO: ...") is a person's, all of it, written by `person` (one of `human_owners`; else the relay). "Жду решение CEO", a quote or the marker further on are the agent's own words. Rule 1 then reads its acceptance criteria and verdicts as that person's; relayed comments are kept apart from people's own, so they never push those out. Relays are required, and may not be human owners, `kelpie` or `user` (Hermes' default CLI author), nor appear in two entries; `kelpie status` lists them: any agent can write the words. On a multi-host farm set it where the Hermes adapter runs (the `kelpie agent` host). |
 
@@ -1069,6 +1070,7 @@ and their `roles`, `human_owners`, `human_decisions`, `author`, `lookback`, `git
 | `name` | required | 1-32 of `a-z 0-9 - _`, starting with a letter or digit | Prefixes the board's ids: task `t_1a` of board `qr` is `qr:t_1a` in rules, alerts, the report and `kelpie why`, its run 42 is session `qr:hermes-run-42` (run ids restart on every board). Distinct per board. |
 | `db_path` | required | path | The board's `kanban.db`. Opened read-only. Distinct per board. |
 | `wait_key` | `hermes-wait-<name>.key` next to the ledger | path | Signs Kelpie's parks and stops on this board; a marker of one board never verifies on another. Distinct per board. |
+| `chat_answers` | `[adapters.hermes] chat_answers` | bool | Answers from Telegram on this board ([Answering an agent's question](#answering-an-agents-question)). |
 
 ```toml
 [adapters.hermes]
@@ -2078,7 +2080,9 @@ Telegram channel (`type = "telegram"`):
 | `api_url` | `"https://api.telegram.org"` | Another Bot API server; plain http only on loopback. |
 | `format` | `"html"` | `html` (bold headline and titles, links) or `plain`. An HTML message Telegram cannot parse is sent once more as plain text. |
 | `buttons` | `false` | Snooze buttons on the alerts a snooze would quiet, and a poller that takes the presses ([Snoozing from the alert](#snoozing-from-the-alert)). On at most one Telegram channel; needs `[storage] path`. |
-| `allowed_user_ids` | `[]` | Telegram user ids (numbers, at most 100) that may press the buttons. With `buttons = true` an empty list stops startup and fails `kelpie doctor`. |
+| `allowed_user_ids` | `[]` | Telegram user ids (numbers, at most 100) that may press the buttons. With `buttons = true` (or `answer_buttons = true`) an empty list stops startup and fails `kelpie doctor`. |
+| `answer_buttons` | `false` | The agents' own options on rule 13's digest items, a button per option, and the confirm step that writes an answer ([Answering an agent's question](#answering-an-agents-question)). Separate from `buttons`, which stays snooze-only; at most one Telegram channel takes presses. |
+| `answer_users` | `{}` | Telegram user id (a quoted number) -> the owner id rule 13 names (`{"123456789" = "alice"}`): only the person an item is for may answer it. Every id must be in `allowed_user_ids`. Empty: any allowed user may answer any question (an accepted risk; `kelpie doctor` warns). |
 
 Slack channel (`type = "slack"`):
 
@@ -2155,8 +2159,10 @@ with an empty `allowed_user_ids`, without a database, or when the bot has a webh
 thing and refuse everything else.
 
 - *What a press can do*: snooze one task for 1, 3 or 7 days (at most `[snooze] max_days`).
-  Nothing else: no button can unblock, close, stop, requeue or reassign a task, or change a
-  rule's mode. A snooze only holds repeat human-wait reminders (see [[snooze]](#snooze)),
+  Nothing else: no snooze button can unblock, close, stop, requeue or reassign a task, or
+  change a rule's mode. The one control that writes to the farm is a separate opt-in,
+  [answer buttons](#answering-an-agents-question): only the agent's own offered option, as
+  a comment (then the unblock), after a confirm. A snooze only holds repeat human-wait reminders (see [[snooze]](#snooze)),
   and it ends early when more work is blocked behind the task, as any snooze does.
 - *Who*: a press counts only when its sender's Telegram user id is in `allowed_user_ids`
   **and** the message is in the configured `chat_id`. A user id is a number Telegram
@@ -2215,7 +2221,91 @@ thing and refuse everything else.
   between two polls, backs off exponentially on errors (up to 5 minutes, longer when
   Telegram says so; `kelpie_chat_api_errors_total{call,cause}`), and stops with Kelpie
   under the alert delivery's shutdown deadline. Presses are counted in
-  `kelpie_chat_actions_total{outcome}` (`snoozed`, `rejected`, `failed`).
+  `kelpie_chat_actions_total{outcome}` (`snoozed`, `confirming`, `answered`, `rejected`,
+  `failed`).
+
+### Answering an agent's question
+
+An agent that needs a person's decision often lists the choices itself. With answer buttons
+on, a person picks one of them from the digest that reminds them, and Kelpie writes that
+choice to the task ([#300](https://github.com/ch8er/kelpie/issues/300); design and threat
+model: [security.md](security.md#answering-an-agents-question-from-the-chat-design-300)).
+Hermes boards only for now.
+
+**What counts as an offer.** In its latest comment on the blocked task, the agent that
+holds it writes one line `Options:` and then 2 to 4 options, one per line, labelled `A)` …
+`D)`, `A.` … `D.`, `1)` … `4)` or `1.` … `4.`, optionally followed by `Recommend: B`:
+
+```text
+Which schema should the migration target?
+Options:
+A) target schema v3
+B) keep v2 and add a shim
+Recommend: B
+```
+
+Each option is at most 200 characters, without links, `@` mentions, backticks or a leading
+`/`. A comment that breaks the grammar gets no buttons and the item says why ("Options not
+offered as buttons: mixed label styles"); a question without an `Options:` line is a plain
+item. The comment must be the task owner's own, from at most 15 minutes before the block
+began, with no person's comment after it.
+
+**In the chat.** Rule 13's digest item lists every option in full (the recommended one
+marked) and a button per option under it ("1. A", "1. B"); at most 3 items of one message
+get buttons, the others say to answer in the next digest. A press writes nothing: Kelpie
+answers with a confirmation that restates the chosen option from its own record, with one
+"Send B" button, good for 2 minutes and only for the person who chose. The confirm writes
+one comment on the task, through the board's adapter:
+
+```text
+Answer from a person (via Kelpie, Telegram user 123456789): option B, of the options you
+offered. Your option, quoted:
+    B) keep v2 and add a shim
+```
+
+then unblocks the task, so the agent reads it. Both are re-checked against the board right
+before they are written: the task must still be blocked with the same block, held by the
+same agent, and its latest comment must still offer the same options, or nothing is
+written ("This question changed; nothing was sent."). The board gets the person's numeric
+user id (with `answer_users`, the owner id it maps to, then the user id), never their chat
+name. One answer per
+question, across digest messages; the item then shows "Answered B by … at …".
+
+**Off by default, opted in three times.** `answer_buttons = true` on the Telegram channel,
+`chat_answers = true` on the board (`[adapters.hermes]` or one `[[adapters.hermes.boards]]`),
+and the global dry-run off. With all three Kelpie acts (it takes the act lock of its boards
+even when every rule observes) and `kelpie status` says "chat answers: on for …". Under the
+dry-run an option press still gets its confirmation; the confirm is recorded, nothing is
+sent, and the question stays open.
+Not with `[hub]` yet: there `chat_answers` stops startup.
+
+```toml
+[[alerts.channels]]
+type = "telegram"
+token_env = "KELPIE_TELEGRAM_TOKEN"
+chat_id = "-1001234567890"
+buttons = true                                   # snooze buttons (separate)
+answer_buttons = true
+allowed_user_ids = [123456789, 987654321]
+answer_users = { "123456789" = "alice", "987654321" = "bob" }
+
+[adapters.hermes]
+chat_answers = true
+```
+
+**What is refused**, beyond the snooze buttons' reasons (`kelpie_chat_rejected_total`):
+`stale_offer` (the question changed), `not_enabled` (the board did not opt in),
+`dry_run`, `not_approver` (with `answer_users`, not the item's person: "This question is
+for …"), `used_question` (answered already: "Already answered: B by … at …"). A forged,
+edited or copied reference, an option the record does not have, or a confirm by someone
+else is `bad_ref`; typed text, replies and stickers are never read.
+
+**The audit line.** Every confirm is a ledger entry (kind `answer`, rule `chat`, executor
+the channel): who (user id, cleaned name, what the board got), the task, the question, the
+option and the offer's digest, `pending` from the claim until the write, then `executed`
+(with `comment` and `unblock` outcomes), `not_executed` (nothing reached the board; the
+question is open again) or `failed`. An answer left `pending` (a crash between the claim
+and the write) is listed by `kelpie doctor` and `kelpie why <task>`; nothing retries it.
 
 ## [report]
 

@@ -71,7 +71,7 @@ class AlertSettings:
     @property
     def button_channels(self) -> tuple[TelegramSettings, ...]:
         """The Telegram channels with snooze buttons on (at most one)."""
-        return tuple(c for c in self.channels if isinstance(c, TelegramSettings) and c.buttons)
+        return tuple(c for c in self.channels if isinstance(c, TelegramSettings) and c.has_buttons)
 
     def build(
         self,
@@ -88,7 +88,7 @@ class AlertSettings:
         built: list[Channel] = []
         pollers: list[ButtonPoller] = []
         for c in self.channels:
-            if control is not None and isinstance(c, TelegramSettings) and c.buttons:
+            if control is not None and isinstance(c, TelegramSettings) and c.has_buttons:
                 channel, poller = c.build_with_buttons(control, environ, self.rendering)
                 built.append(channel)
                 pollers.append(poller)
@@ -170,9 +170,10 @@ def _channels(entries: Any) -> tuple[ChannelSettings, ...]:
     names = [c.name for c in channels]
     if len(set(names)) != len(names):
         raise ValueError(f"{SECTION} channel names must be unique (set name = ...)")
-    buttons = [c.name for c in channels if isinstance(c, TelegramSettings) and c.buttons]
+    buttons = [c.name for c in channels if isinstance(c, TelegramSettings) and c.has_buttons]
     if len(buttons) > 1:  # one poller per bot: two would take each other's updates
         raise ValueError(
-            f"{SECTION} buttons = true on more than one Telegram channel ({', '.join(buttons)})"
+            f"{SECTION} buttons = true (or answer_buttons = true) on more than one Telegram "
+            f"channel ({', '.join(buttons)})"
         )
     return tuple(channels)

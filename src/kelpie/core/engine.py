@@ -42,7 +42,8 @@ from kelpie.core.ledger import (
     Suppression,
     subject,
 )
-from kelpie.core.model import HostSleep, Snapshot
+from kelpie.core.model import HostSleep, Snapshot, Task
+from kelpie.core.offers import item_offer
 from kelpie.core.ports import ActionConnector, Alerter, Deferred, NothingToDo, PlatformAdapter
 from kelpie.core.rule import Rule
 from kelpie.core.states import MemoryStateStore, OpenState, StateStore, StateTracker, Transition
@@ -111,6 +112,10 @@ class Engine:
     # Records the task status transitions each snapshot shows (#157), before rules run; a
     # failing store is logged and never stops the tick. None: nothing recorded.
     transitions: TransitionRecorder | None = None
+    # Whether a task's board takes answers from the chat (#300): an item keeps the agent's
+    # options only then, so no button is offered where a press could only be refused.
+    # None: no item keeps them.
+    answer_boards: Callable[[Task | None], bool] | None = None
     _by_name: dict[str, Rule] = field(init=False, default_factory=dict)
     _detail: str | None = field(init=False, default=None)  # of the action being handled
     ledger: ActionLedger = field(init=False)
@@ -276,6 +281,16 @@ class Engine:
             )
         else:  # never got to people: they have nothing in place of what it would fold
             self._incidents.pop(outage.state, None)
+
+    def _offers_on(self, items: tuple[AlertItem, ...], snapshot: Snapshot) -> tuple[AlertItem, ...]:
+        """``items`` without the offers of tasks whose board did not opt in to answers."""
+        on = self.answer_boards
+        return tuple(
+            i
+            if i.offer is None or (on is not None and on(snapshot.task(i.task_id)))
+            else replace(i, offer=None)
+            for i in items
+        )
 
     def _safe_get_state(self, state_id: str) -> OpenState | None:
         try:
@@ -772,7 +787,9 @@ class Engine:
                 did_text=did,
                 age=None if note is None else note.age,
                 headline=_headline(action),
-                items=alert_items(action, snapshot, effects_done=effects_done),
+                items=self._offers_on(
+                    alert_items(action, snapshot, effects_done=effects_done), snapshot
+                ),
                 snoozed=snoozed_items(action, snapshot),
                 snoozed_total=_count(action.params.get("snoozed_total")),
                 repeats=merged[0] if merged else None,
@@ -969,7 +986,14 @@ def _item(entry: object, snapshot: Snapshot) -> AlertItem | None:
         _snooze_note(entry.get("snooze")),
         _task_ref(entry.get("snooze_task")),
         _board(task_id, snapshot),
+        item_offer(entry.get("offer")),
+        _refused(entry.get("offer_refused")),
     )
+
+
+def _refused(value: object) -> str | None:
+    """Why an agent's ``Options:`` line was not offered as buttons (#300), if said."""
+    return value.strip()[:200] if isinstance(value, str) and value.strip() else None
 
 
 MAX_TASK_REF = 200  # characters of a ``snooze_task``; a longer one is dropped

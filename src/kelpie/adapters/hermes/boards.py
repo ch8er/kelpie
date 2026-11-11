@@ -45,6 +45,7 @@ from kelpie.core.model import (
     Span,
     Task,
 )
+from kelpie.core.offers import Expect
 from kelpie.core.ports import PlatformEvent, UnsupportedAction
 
 log = logging.getLogger(__name__)
@@ -216,6 +217,10 @@ class HermesBoards:
     def comment(self, task_id: str, body: str) -> None:
         board, local = self._route(task_id)
         board.comment(local, body)
+
+    def check_answer(self, task_id: str, expect: Expect) -> None:
+        board, local = self._route(task_id)
+        board.check_answer(local, expect)
 
     def wip_commit(
         self, task_id: str, message: str, *, branch: str | None = None, draft_pr: bool = False

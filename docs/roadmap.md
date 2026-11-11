@@ -1081,6 +1081,7 @@ human tasks that block agent work and agents waiting for approval. Replaces the 
 - [x] The inbox is sorted by cost of delay and shown in the daily report's "needs a human" section
 - [x] Human tasks with nothing blocked behind them are not escalated
 - [x] Fixtures: existing `13-human-tasks-block-agents.yaml`; new `13-approval-wait.yaml`
+- [x] An agent's own options on its digest item, answered from Telegram with a confirm step, Hermes first (#300, design in docs/security.md; #419)
 
 ### adapters: Claude Code adapter
 labels: P1, adapter, area:adapters

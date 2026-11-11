@@ -449,13 +449,14 @@ holding it):
 
 ## Answering an agent's question from the chat (design, #300)
 
-**Status: proposed, not implemented.** This note is the design that
-[#300](https://github.com/ch8er/kelpie/issues/300) asks to have reviewed before any code.
-Nothing below exists yet; Telegram buttons still only snooze
-([Snoozing from the alert](configuration.md#snoozing-from-the-alert)). Once accepted, the
-item goes into [plan.md](plan.md) with its priority, and the snooze security model in
-configuration.md ("no button can unblock, close, …") is rewritten in the same PR as the
-code, since it would no longer hold.
+**Status: approved (2026-11-08, on [#300](https://github.com/ch8er/kelpie/issues/300)) and
+implemented for Hermes in [#419](https://github.com/ch8er/kelpie/pull/419).** The code is
+`kelpie.core.offers` (the grammar, the question's key, the re-check, the comment),
+`kelpie.alerts.answers` (the presses), `kelpie.answering` (the write on the control loop)
+and `HermesAdapter.check_answer`; configuration in
+[Answering an agent's question](configuration.md#answering-an-agents-question). The item is
+in [plan.md](plan.md) (P2). Where the implementation settles what the design left open, it
+says so under [Decisions](#decisions-taken-in-the-implementation) below.
 
 ### What it would do
 
@@ -661,16 +662,86 @@ against its latest snapshot today; the answer path needs it against the press's 
 Each gets a test with a fake Bot API before the feature is turned on anywhere, as the snooze
 buttons have.
 
-### Open questions for review
+### Decisions taken in the implementation
 
-- Unblock by default once a board opts in to answers, or only with a second opt-in?
-- Make `answer_users` (answers only from the item's own person) required rather than
-  optional?
-- Slack has no inbound channel in Kelpie. Should it get a `kelpie answer <task> <label>`
-  command line under the item, like the snooze command, or nothing?
-- Is 24 hours the right expiry for a decision, or should it follow the digest's escalation?
-- Should a recommendation be shown at all? It nudges the person; leaving it out makes them
-  read every option.
+The design was approved as written, so its open questions took their conservative
+reading:
+
+- **Unblock**: the board's opt-in (`chat_answers`) covers it; the comment is always the
+  answer and the unblock runs only after it, re-checked against the press's block.
+- **`answer_users`** stays optional; without it `kelpie doctor` warns that any allowed user
+  may answer any question.
+- **Slack**: nothing. Slack has no inbound channel, and options are shown only on a
+  Telegram channel with `answer_buttons`.
+- **Expiry**: 24 hours for an option button (and only on the latest message of its alert),
+  2 minutes for a confirm.
+- **The recommendation** is shown, marked "(recommended)"; nothing ever presses it.
+
+Settled while building it:
+
+- **Which comment offers**: the latest comment by the task's owner (the agent holding it,
+  else its assignee; host prefixes ignored), posted no earlier than 15 minutes before the
+  block began, with no comment by a person after it. A later owner comment without options
+  withdraws the offer; a task Kelpie stopped offers nothing.
+- **A cut comment**: a comment over 1900 characters is refused as possibly cut (Hermes
+  keeps 2000 characters of one), as is one ending in Kelpie's cut mark.
+- **The confirm** counts only from the person who pressed the option (`bad_ref` from anyone
+  else).
+- **Where the write runs**: on the control loop's thread, never the poller's: a confirmed
+  answer is queued and the loop is woken; it re-checks against its snapshot, routes the
+  `comment` action (rule `chat`, `params.expect`) to the task's own adapter, which re-reads
+  the task right before writing (`SupportsAnswerCheck`; an adapter without it never gets
+  an answer), then the `unblock` the same way.
+- **Not with `[hub]`**: the agent's adapter would need the re-check carried over the wire
+  protocol, which drops unknown params today; with `[hub]` a board's `chat_answers` stops
+  startup and fails `kelpie doctor`.
+- **How long a question stays answered**: its claim and the ledger's answers are kept 30
+  days; rule 13 shows the item as answered while the block lasts. A write that failed
+  (it may have reached the board) keeps the claim, and the item says so ("failed to send;
+  look at the task") instead of offering buttons that would only be refused.
+- **Who the board names**: the numeric user id ("Telegram user 123456789"), or with
+  `answer_users` the owner id followed by it ("alice (Telegram user 123456789)"); never the
+  chat name.
+- **Dry-run**: the option press still gets its confirmation (it writes nothing); the
+  confirm is recorded with `dry_run: true` and refused, and the question stays open. The
+  item's person and a changed question are checked before that, so neither is recorded as
+  a dry-run answer.
+- **A board that cannot be read** at the re-check is a refusal (nothing written, the
+  question given back); a failed write keeps the claim. The chat is told only Kelpie's own
+  words: an adapter's error (paths, CLI output) stays in the ledger and the log.
+- **Act locks**: with answers on, `kelpie serve` takes the act lock of every board of its
+  adapters, as it does when any rule acts, not only of the boards that opted in.
+- **Options only where a press can work**: an item keeps the agent's options (and gets
+  buttons) only when its task's board opted in; other boards' items, and other adapters'
+  (Linear reads comments too, but its adapter has no re-check), stay plain items.
+- **Not on a multi-host farm**: `chat_answers` on a `kelpie agent` stops it at startup.
+- **`answer_users` and an unassigned item**: with `answer_users` set, an item rule 13
+  lists under nobody can be answered by nobody ("This question is for -").
+- **What is in the ledger**: every confirm that passes the checks (and every dry-run
+  confirm, once per confirm button); option presses and refused presses are counted in
+  `kelpie_chat_rejected_total` and logged, not written to the ledger.
+- **`answer_buttons` turned off since**: no desk takes answer presses any more, so an old
+  button is `bad_ref`, not `not_enabled`.
+- **`unanswered_asks`** does not read answers: it never reminds about a blocked task (rule
+  13's), which is where answers apply.
+- **Shutdown**: answers queued but not carried out when Kelpie stops are recorded
+  `not_executed` and their questions given back; a confirm after that is refused. A crash
+  between the claim and the ledger entry leaves a claim without an entry (milliseconds):
+  that question answers "Already answered" until its claim ages out (30 days); delete
+  `kelpie.buttons.db` to clear it.
+- **Mentions in the comment**: Kelpie puts a word joiner after every `@`; Hermes' CLI turns
+  invisible characters into spaces, so on the board it reads "@ name": inert either way.
+- **Residual: who wrote a comment.** Hermes takes a comment's author from the caller
+  (`--author`), so an agent able to run `hermes kanban comment` can sign as another agent
+  and plant options on that agent's blocked task, or sign as a person to withdraw an offer.
+  The owner check holds only as far as the board's attribution does. What limits it: the
+  person sees every option's full text twice (digest and confirmation), options with links,
+  mentions, code or a leading `/` are refused, and the comment quotes the option as the
+  agent's own words, back to the task it was offered on.
+- **Residual window**: the adapter's re-read and Hermes' own `kanban comment` are two steps
+  (milliseconds plus the CLI's start). A comment or a new block that lands between them is
+  not caught; the unblock after it re-checks the block again, so at worst the comment
+  reaches a task whose question just changed, quoting an option the agent did offer.
 
 ## Known residual risks
 

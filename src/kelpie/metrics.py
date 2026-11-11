@@ -1009,12 +1009,13 @@ class Metrics:
         metric(
             "kelpie_chat_actions_total",
             "counter",
-            "Snooze button presses, by channel and outcome (snoozed, rejected, failed).",
+            "Snooze and answer button presses, by channel and outcome (snoozed, confirming, "
+            "answered, rejected, failed).",
             [
                 f"kelpie_chat_actions_total{_labels(channel=n, outcome=o)} "
                 f"{self.chat_actions.get((n, o), 0)}"
                 for n in self.chat_channels
-                for o in ("snoozed", "rejected", "failed")
+                for o in ("snoozed", "confirming", "answered", "rejected", "failed")
             ],
         )
         metric(
@@ -1022,7 +1023,7 @@ class Metrics:
             "counter",
             "Button presses and updates ignored, by channel and reason (unknown_user, "
             "wrong_chat, bad_ref, expired_ref, used_ref, already_snoozed, rate_limited, malformed,"
-            " not_callback).",
+            " not_callback, stale_offer, not_enabled, dry_run, not_approver, used_question).",
             [
                 f"kelpie_chat_rejected_total{_labels(channel=n, reason=r)} {v}"
                 for (n, r), v in sorted(self.chat_rejections.items())

@@ -38,9 +38,13 @@ from kelpie.app import (
     ConfigError,
     LoadedRules,
     Settings,
+    _chat_answers_status,
     act_blockers,
     act_gaps,
+    answer_boards,
+    answer_channels,
     build_adapters,
+    chat_answers_on,
     dispatch_gate_warnings,
     load_rules,
     load_settings,
@@ -1288,6 +1292,79 @@ def check_chat_buttons(
     return checks
 
 
+ANSWERS_CHECK = "chat answers"
+
+
+def check_chat_answers(settings: Settings) -> list[Check]:
+    """Answers to agents' questions from the chat (#300), when a channel or a board asks for
+    them: on or off and why, who may answer, and any answer left ``pending`` in the ledger (a
+    crash between the claim and the write: nothing retries it, a person looks). Empty when
+    neither a channel nor a board mentions answers."""
+    channels, boards = answer_channels(settings), answer_boards(settings)
+    if not channels and not boards:
+        return []
+    if settings.hub is not None and boards:
+        return [
+            _fail(
+                ANSWERS_CHECK,
+                "chat_answers is set with [hub]: kelpie serve will not start",
+                "answers from the chat need the board's adapter inside kelpie serve; remove "
+                "chat_answers on this farm",
+            )
+        ]
+    if not chat_answers_on(settings):
+        reason = (
+            "no Telegram channel has answer_buttons"
+            if not channels
+            else "no board has chat_answers"
+            if not boards
+            else "the global dry-run is on: confirms are recorded, nothing is sent"
+        )
+        return [_skip(ANSWERS_CHECK, f"off: {reason}")]
+    checks = [_pass(ANSWERS_CHECK, "on: " + "; ".join(_chat_answers_status(settings)))]
+    for channel in channels:
+        if not channel.answer_users:
+            checks.append(
+                _warn(
+                    f"{ANSWERS_CHECK} {channel.name}",
+                    "without answer_users any allowed user may answer any question",
+                    "map each Telegram user id to the owner id rule 13 names in answer_users, "
+                    "so only the person a question is for can answer it",
+                )
+            )
+    pending = _pending_answers(settings)
+    if pending:
+        checks.append(
+            _warn(
+                f"{ANSWERS_CHECK} pending",
+                f"{len(pending)} answer(s) left pending (claimed, write not finished): "
+                + ", ".join(pending[:5]),
+                "look at each task (kelpie why <task>): the comment may or may not be on the "
+                "board; nothing retries it",
+            )
+        )
+    return checks
+
+
+def _pending_answers(settings: Settings) -> list[str]:
+    """The tasks of answers still ``pending`` in the ledger, read only; none when unreadable."""
+    path = settings.db_path
+    if path is None or not path.is_file():
+        return []
+    try:
+        conn = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True, timeout=2)
+        try:
+            rows = conn.execute(
+                "SELECT task_id FROM actions WHERE kind = 'answer' AND outcome = 'pending'"
+                " ORDER BY at"
+            ).fetchall()
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return []
+    return [str(r[0]) for r in rows]
+
+
 def check_github(settings: Settings, environ: Mapping[str, str]) -> list[Check]:
     """Per repository: which source CI is read from (check-runs and statuses, or the
     commit's Actions runs where those are refused) and the permission a 403 names. Probes
@@ -1605,6 +1682,7 @@ def run_checks(
     checks += gi_checks
     checks += check_github(settings, environ)
     checks += check_chat_buttons(settings, environ)
+    checks += check_chat_answers(settings)
     checks.append(check_resources_watched(settings, loaded, environ))
     checks.append(check_path_scans(settings, loaded, environ))
     checks.append(check_process_counts(settings, loaded, environ))

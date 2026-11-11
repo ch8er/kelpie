@@ -18,7 +18,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
   provider's quota is woken once that provider's latest probe reads quota left and the
   condition's own reset time (if any) has passed; a provider not probed here goes by that
   reset time; a failed, empty or missing probe is unknown.
-
+- Answering an agent's question from Telegram (#300), Hermes first, as designed in
+  docs/security.md. When an agent lists its own options in a comment (`Options:` then
+  `A)` … `D)`, optionally `Recommend: B`), rule 13's digest item shows them and, on a
+  Telegram channel with `answer_buttons = true`, a button per option. A press answers with a
+  confirmation that restates the option from Kelpie's record; only the confirm of the same
+  person writes one comment on the task quoting the agent's option (inert), then unblocks
+  it, both re-checked against the board right before the write. Off by default: the
+  channel (`answer_buttons`), the board (`chat_answers` in `[adapters.hermes]` or per
+  `[[adapters.hermes.boards]]`) and the global dry-run off; optional `answer_users` limits an
+  answer to the person the item is for. Single-use signed references, one answer per
+  question, a ledger entry (kind `answer`) around every write; `kelpie status` and `kelpie
+  doctor` say whether answers are on, and doctor lists answers left pending. Not with
+  `[hub]` yet.
 - `kelpie run-once --dry-run` prints the actions every loaded rule asks for on one snapshot
   (built as `kelpie why` builds it: offline, `--refresh` adds GitHub; the open alert states
   read from the database without writing), with each rule's mode, and exits. Nothing is

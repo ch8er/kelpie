@@ -111,6 +111,7 @@ Spend becomes a metric Kelpie watches, not a number someone checks in a billing 
 
 ### P2. Rules backlog — on signal
 
+- Answering an agent's question from the chat (#300, approved 2026-11-08, implemented for Hermes in #419): the agent's own options on rule 13's digest item, one Telegram button each, a confirm step that restates the option, a comment quoting it (then the unblock) through the board's adapter; off by default, opted in on the channel and the board. Design and threat model: [security.md](security.md#answering-an-agents-question-from-the-chat-design-300)
 - Rule 14. Gate violation after context compaction: the agent acts against the task's gate right after a compaction event (e.g. edits code while the task is in plan review)
 
 ### P0. Traces and checkpoints — the foundation, production-style, no LLM calls

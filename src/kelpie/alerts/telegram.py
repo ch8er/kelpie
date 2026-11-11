@@ -33,19 +33,21 @@ import logging
 import os
 import re
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import timedelta
 from typing import Any
 from urllib.parse import urlsplit
 
 from kelpie import net
 from kelpie.alerts import render, summary
+from kelpie.alerts.answers import AnswerDesk
 from kelpie.alerts.buttons import ApiError, ButtonPoller, Buttons, ChatControl
 from kelpie.alerts.delivery import PermanentError, TransientError
 from kelpie.alerts.render import (
     AT_SIGN,
     DEFAULT_RENDERING,
     MAX_TEXT,
+    AnswerTarget,
     RenderSettings,
     SnoozeTarget,
     clean,
@@ -81,6 +83,8 @@ _KEYS = {
     "format",
     "buttons",
     "allowed_user_ids",
+    "answer_buttons",
+    "answer_users",
 }
 _BAD_ENTITIES = "can't parse entities"
 MAX_ALLOWED_USERS = 100
@@ -146,6 +150,16 @@ def message_fields(
     return render.telegram_message(message, settings, html_format=fmt == "html")
 
 
+def _fields(
+    message: AlertEvent, settings: RenderSettings, fmt: str
+) -> tuple[dict[str, Any], tuple[SnoozeTarget, ...], tuple[AnswerTarget, ...]]:
+    """:func:`message_fields`, and the shown items that get answer buttons (#300)."""
+    if message.text is not None or message.summary is not None:
+        fields, targets = message_fields(message, settings, fmt)
+        return fields, targets, ()
+    return render.telegram_message_full(message, settings, html_format=fmt == "html")
+
+
 @dataclass(frozen=True, slots=True)
 class TelegramSettings:
     token_env: str
@@ -157,19 +171,31 @@ class TelegramSettings:
     format: str = "html"  # html | plain
     buttons: bool = False  # snooze buttons on the alerts a snooze would quiet (#176)
     allowed_user_ids: tuple[int, ...] = ()  # who may press them
+    # Answer buttons under an agent's own options on rule 13's digest (#300): off by
+    # default, apart from ``buttons``; a board must opt in too (chat_answers).
+    answer_buttons: bool = False
+    # Telegram user id -> the owner id rule 13 names: only the item's own person may answer
+    # (empty: any allowed user may, an accepted risk the configuration reference states).
+    answer_users: tuple[tuple[int, str], ...] = ()
 
     @property
     def type(self) -> str:
         return TYPE
 
     def describe(self) -> str:
-        buttons = (
-            f", snooze buttons for {len(self.allowed_user_ids)} user(s)" if self.buttons else ""
-        )
+        users = len(self.allowed_user_ids)
+        buttons = f", snooze buttons for {users} user(s)" if self.buttons else ""
+        if self.answer_buttons:
+            buttons += f", answer buttons for {users} user(s)"
         return (
             f"telegram (chat {self.chat_id}, from {self.min_severity.value}, "
             f"token from ${self.token_env}{buttons})"
         )
+
+    @property
+    def has_buttons(self) -> bool:
+        """Whether it takes presses at all (snooze or answer buttons)."""
+        return self.buttons or self.answer_buttons
 
     def buttons_problem(self) -> str | None:
         """Why the buttons cannot work as configured, or None (also None when off)."""
@@ -177,6 +203,17 @@ class TelegramSettings:
             return (
                 f"[alerts] channel {self.name}: buttons = true needs allowed_user_ids "
                 "(the Telegram user ids that may snooze)"
+            )
+        if self.answer_buttons and not self.allowed_user_ids:
+            return (
+                f"[alerts] channel {self.name}: answer_buttons = true needs allowed_user_ids "
+                "(the Telegram user ids that may answer)"
+            )
+        allowed = set(self.allowed_user_ids)
+        if stray := sorted(u for u, _ in self.answer_users if u not in allowed):
+            return (
+                f"[alerts] channel {self.name}: answer_users names user ids not in "
+                f"allowed_user_ids: {stray}"
             )
         return None
 
@@ -214,6 +251,9 @@ class TelegramSettings:
             raise ValueError(problem)
         token = self.token(environ)
         buttons = Buttons(control.store, self.name, self.chat_id, control.clock, rendering.language)
+        answers = self.answer_buttons and control.answers is not None
+        if answers:
+            rendering = replace(rendering, answers=True)
         poller = ButtonPoller(
             TelegramApi(self, token),
             control,
@@ -223,7 +263,10 @@ class TelegramSettings:
             rendering=rendering,
             request_timeout=self.timeout.total_seconds(),
         )
-        return TelegramChannel(self, token, rendering, buttons), poller
+        if answers:
+            assert control.answers is not None
+            poller.desk = AnswerDesk(poller, control.answers, dict(self.answer_users), rendering)
+        return TelegramChannel(self, token, rendering, buttons, snooze=self.buttons), poller
 
 
 def load_telegram(entry: Mapping[str, Any], where: str) -> TelegramSettings:
@@ -256,6 +299,9 @@ def load_telegram(entry: Mapping[str, Any], where: str) -> TelegramSettings:
     buttons = entry.get("buttons", False)
     if not isinstance(buttons, bool):
         raise ValueError(f"{where}: buttons must be true or false")
+    answer_buttons = entry.get("answer_buttons", False)
+    if not isinstance(answer_buttons, bool):
+        raise ValueError(f"{where}: answer_buttons must be true or false")
     return TelegramSettings(
         token_env,
         chat,
@@ -266,7 +312,31 @@ def load_telegram(entry: Mapping[str, Any], where: str) -> TelegramSettings:
         fmt,
         buttons,
         _user_ids(entry.get("allowed_user_ids", []), where),
+        answer_buttons,
+        _answer_users(entry.get("answer_users", {}), where),
     )
+
+
+_OWNER = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}")
+
+
+def _answer_users(value: Any, where: str) -> tuple[tuple[int, str], ...]:
+    """``answer_users``: a table of Telegram user id (a key, as a string of digits) -> the
+    owner id rule 13 names for that person."""
+    problem = (
+        f"{where}: answer_users must be a table of Telegram user id -> owner id "
+        '(e.g. {"123456789" = "alice"})'
+    )
+    if not isinstance(value, Mapping) or len(value) > MAX_ALLOWED_USERS:
+        raise ValueError(problem)
+    out: list[tuple[int, str]] = []
+    for key, owner in value.items():
+        if not isinstance(key, str) or not key.isdigit() or not 0 < int(key) <= MAX_USER_ID:
+            raise ValueError(problem)
+        if not isinstance(owner, str) or not _OWNER.fullmatch(owner.strip()):
+            raise ValueError(problem)
+        out.append((int(key), owner.strip()))
+    return tuple(sorted(out))
 
 
 def _user_ids(value: Any, where: str) -> tuple[int, ...]:
@@ -397,6 +467,7 @@ class TelegramChannel:
         token: str,
         rendering: RenderSettings = DEFAULT_RENDERING,
         buttons: Buttons | None = None,
+        snooze: bool = True,
     ) -> None:
         self.name = settings.name
         self.min_severity = settings.min_severity
@@ -404,6 +475,7 @@ class TelegramChannel:
         self._token = token
         self._rendering = rendering
         self._buttons = buttons
+        self._snooze = snooze  # snooze buttons; answer buttons follow rendering.answers
 
     def __repr__(self) -> str:
         return f"TelegramChannel(name={self.name!r}, chat_id={self._settings.chat_id!r})"
@@ -417,8 +489,8 @@ class TelegramChannel:
         if self._buttons is not None and message.transition is Transition.RESOLVED:
             # Before posting: the alert's buttons end even when the notice cannot be sent.
             self._delivered(message, [], None, None)
-        fields, targets = message_fields(message, self._rendering, self._settings.format)
-        markup, ids = self._keyboard(message, targets)
+        fields, targets, answers = _fields(message, self._rendering, self._settings.format)
+        markup, ids, answer_ids = self._keyboard(message, targets, answers)
         response = self._post(fields, message, markup)
         if "parse_mode" in fields and self._bad_entities(response):
             # Telegram refused the markup: the same alert once more, as plain text. Should
@@ -429,27 +501,48 @@ class TelegramChannel:
                 "alert channel %s: Telegram could not parse the HTML; sent as plain text",
                 self.name,
             )
-            plain, again = message_fields(message, self._rendering, "plain")
-            if [t.task_id for t in again] != [t.task_id for t in targets]:
-                markup, ids = self._keyboard(message, again)  # the plain text shows others
+            plain, again, again_answers = _fields(message, self._rendering, "plain")
+            if [t.task_id for t in again] != [t.task_id for t in targets] or [
+                t.task_id for t in again_answers
+            ] != [t.task_id for t in answers]:
+                markup, ids, answer_ids = self._keyboard(message, again, again_answers)
             response = self._post(plain, message, markup)
         self._check(response)
         if self._buttons is not None:
-            self._delivered(message, ids, response, markup)
+            self._delivered(message, ids, response, markup, answer_ids=answer_ids)
 
     def _keyboard(
-        self, message: AlertEvent, targets: tuple[SnoozeTarget, ...]
-    ) -> tuple[dict[str, Any] | None, list[int]]:
-        """Snooze buttons for ``targets``; none when the store fails (the alert still goes)."""
-        if self._buttons is None or not targets:
-            return None, []
-        try:
-            return self._buttons.attach(message, targets)
-        except Exception as exc:
-            log.error(
-                "alert channel %s: snooze buttons left out: %s", self.name, type(exc).__name__
-            )
-            return None, []
+        self,
+        message: AlertEvent,
+        targets: tuple[SnoozeTarget, ...],
+        answers: tuple[AnswerTarget, ...] = (),
+    ) -> tuple[dict[str, Any] | None, list[int], list[int]]:
+        """Snooze buttons for ``targets`` (with ``buttons``) and answer buttons for
+        ``answers`` (#300); none when the store fails (the alert still goes)."""
+        if self._buttons is None or not (targets or answers):
+            return None, [], []
+        markup: dict[str, Any] | None = None
+        ids: list[int] = []
+        if self._snooze and targets:
+            try:
+                markup, ids = self._buttons.attach(message, targets)
+            except Exception as exc:
+                log.error(
+                    "alert channel %s: snooze buttons left out: %s", self.name, type(exc).__name__
+                )
+                markup, ids = None, []
+        answer_ids: list[int] = []
+        if answers:
+            try:
+                rows, answer_ids = self._buttons.attach_answers(message, answers)
+            except Exception as exc:
+                log.error(
+                    "alert channel %s: answer buttons left out: %s", self.name, type(exc).__name__
+                )
+                rows, answer_ids = [], []
+            if rows:
+                markup = {"inline_keyboard": [*(markup or {}).get("inline_keyboard", []), *rows]}
+        return markup, ids, answer_ids
 
     def expire(self, message: AlertEvent, remote: bool = True) -> None:
         """An alert resolved that this channel does not show (below ``min_severity``, or
@@ -466,6 +559,7 @@ class TelegramChannel:
         response: net.Response | None,
         markup: Mapping[str, Any] | None,
         strip: bool = True,
+        answer_ids: list[int] | None = None,
     ) -> None:
         """Record the message as its alert's latest, with its buttons or without (a press
         on an older message, or on another message, is refused), and Kelpie's copy of it
@@ -475,7 +569,9 @@ class TelegramChannel:
         try:
             sent = None if response is None else _sent(response)
             message_id = None if sent is None else _int_id(sent.get("message_id"))
-            previous = self._buttons.delivered(message, ids, message_id, sent, markup)
+            previous = self._buttons.delivered(
+                message, ids, message_id, sent, markup, answer_ids or ()
+            )
         except Exception as exc:
             log.error(
                 "alert channel %s: delivered message not recorded for its snooze buttons: %s",

@@ -27,6 +27,7 @@ from datetime import datetime, timedelta
 from enum import StrEnum
 
 from kelpie.core.actions import Action, ActionKind, Severity
+from kelpie.core.offers import ItemOffer
 
 
 class Transition(StrEnum):
@@ -119,6 +120,10 @@ class AlertItem:
     snooze: SnoozeNote | None = None
     snooze_task: str | None = field(default=None, compare=False)
     board: str | None = field(default=None, compare=False)
+    # The agent's own options for the person's decision (#300), and why an Options: line
+    # was not offered as buttons; chat channels with answer buttons show them.
+    offer: ItemOffer | None = field(default=None, compare=False)
+    offer_refused: str | None = field(default=None, compare=False)
 
     @property
     def fingerprint(self) -> tuple[object, ...]:

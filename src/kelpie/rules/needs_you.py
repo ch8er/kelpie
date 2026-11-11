@@ -145,7 +145,8 @@ from typing import Any
 from kelpie.core.actions import Action, ActionKind, Severity
 from kelpie.core.conditions import linked_conditions
 from kelpie.core.incidents import Outage
-from kelpie.core.model import Condition, KelpieMark, Snapshot, Status, Task
+from kelpie.core.model import Answer, Condition, KelpieMark, Snapshot, Status, Task
+from kelpie.core.offers import find_offer, offer_params
 from kelpie.core.serde import parse_duration
 from kelpie.rules import register
 from kelpie.rules._alerts import alert_params
@@ -264,8 +265,10 @@ class NeedsYou:
             key=lambda x: (-_total(x[1]), x[0]),
         )
         found = self._storms(snapshot) if ranked else []
+        answers = {a.question: a for a in snapshot.answers}
         return [
-            self._escalate(person, live, snapshot.now, held, found) for person, live, held in ranked
+            self._escalate(person, live, snapshot.now, held, found, answers)
+            for person, live, held in ranked
         ]
 
     def _storms(self, snapshot: Snapshot) -> list[Outage]:
@@ -462,6 +465,7 @@ class NeedsYou:
         now: datetime,
         snoozed: Sequence[Item] = (),
         outages: Sequence[Outage] = (),
+        answers: Mapping[str, Answer] | None = None,
     ) -> Action:
         items = sorted(items, key=lambda i: (-i.cost_hours, i.task.id))
         entries = _entries(items, outages)
@@ -514,7 +518,7 @@ class NeedsYou:
                     else {}
                 ),
                 "items_total": len(entries),
-                "items": [e.params(now) for e in entries[:MAX_ITEMS]],
+                "items": [e.params(now) | _offer(e, person, answers) for e in entries[:MAX_ITEMS]],
                 # Items folded under rule 4's block storms: one entry each in ``items``.
                 "storms": [
                     {"state": e.storm.state, "tasks": [i.task.id for i in e.items]}
@@ -621,6 +625,21 @@ def _item_params(i: Item, now: datetime) -> dict[str, Any]:
         # what a chat snooze button would hold (#176): not a broken block
         **({} if i.broken else {"snooze_task": i.task.id}),
     }
+
+
+def _offer(entry: _Entry, person: str, answers: Mapping[str, Answer] | None) -> dict[str, Any]:
+    """The agent's own options on an approval item (#300): ``offer`` (the options, the
+    question's key, what an answer must re-check, and ``answered`` once a person answered
+    from the chat), or ``offer_refused`` with why; nothing for a question without an
+    ``Options:`` line, a human task or a storm."""
+    if entry.storm is not None or entry.items[0].kind != "approval":
+        return {}
+    task = entry.items[0].task
+    found = find_offer(task)
+    if found is None:
+        return {}
+    approver = None if person == UNASSIGNED else person
+    return offer_params(task, found, approver, answers or {})
 
 
 def _described(item: Item) -> str:
