@@ -6,14 +6,20 @@ from __future__ import annotations
 from collections import defaultdict
 
 from kelpie.core.spans import TokenUsage, usage
-from kelpie.core.stages import STAGES
+from kelpie.core.stages import STAGES, UNKNOWN_ROLE
 from kelpie.core.transitions import history
 from kelpie.report import md
 from kelpie.report.attribution import CallOwners, call_owners
 from kelpie.report.daily import wait_causes
 from kelpie.report.rework import rework_tokens
 from kelpie.report.sections import Section, SectionContext, Spend, register_section
-from kelpie.report.throughput import RoleThroughput, throughput, union_hours
+from kelpie.report.throughput import (
+    Bottleneck,
+    RoleThroughput,
+    bottleneck,
+    throughput,
+    union_hours,
+)
 from kelpie.report.waits import WAIT_CAUSES
 
 TITLE = "Farm throughput"
@@ -101,6 +107,28 @@ def _rework_lines(ctx: SectionContext, owners: CallOwners, est: str) -> list[str
     return lines
 
 
+def _role(role: str) -> str:
+    return "tasks of no known role" if role == UNKNOWN_ROLE else md.text(role)
+
+
+def _bottleneck_lines(found: Bottleneck | None) -> list[str]:
+    """The day's bottleneck, first in the section: where tasks waited longest."""
+    if found is None:
+        return []
+    util = "" if found.utilization is None else f", its agents busy {found.utilization:.0%}"
+    nxt = ""
+    if found.runner_up is not None:
+        role, stage, hours = found.runner_up
+        nxt = f" Next: {_role(role)} in {STAGE_NAMES[stage].lower()}, {hours:.1f} task-hours."
+    return [
+        f"**Bottleneck of the day**: {_role(found.role)} in "
+        f"{STAGE_NAMES[found.stage].lower()}, "
+        f"{found.hours:.1f} task-hours waited ({found.share:.0%} of all task-hours waited "
+        f"in any role and stage){util}.{nxt}",
+        "",
+    ]
+
+
 @register_section("throughput")
 def throughput_section(ctx: SectionContext) -> Section | None:
     inputs = ctx.inputs
@@ -132,7 +160,8 @@ def throughput_section(ctx: SectionContext) -> Section | None:
     est = " (estimate)" if inputs.estimated and inputs.spend is None else ""
     if ctx.spend.unknown_usd > 0:
         est += " (estimate, mode not set)"
-    lines = [
+    lines = _bottleneck_lines(bottleneck(roles))
+    lines += [
         "Per role, for the day. Utilization: agent-hours with a session running over agents "
         "x hours (the live `kelpie_role_agents_with_work` counts agents with any open task "
         "instead). Hand-offs: sessions that ended with a declared status, and every review "

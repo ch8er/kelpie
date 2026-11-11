@@ -214,7 +214,10 @@ farm throughput metrics from traces.
 - **Farm throughput** (`kelpie.report.throughput`): per role, tasks completed per hour,
   hand-offs per hour, utilization, mean and current queue length, rework rate and cost per
   completed task, plus task-hours by stage (working, queue, review, waiting for conditions,
-  ownerless), in the daily report's "Farm throughput" section. Live on `/metrics`:
+  ownerless), in the daily report's "Farm throughput" section. It opens with the day's
+  **bottleneck**: the role and waiting stage (queue, review, waiting for conditions,
+  ownerless) where tasks waited the most task-hours (at least one), its share of all
+  task-hours waited, that role's utilization and the runner-up. Live on `/metrics`:
   `kelpie_role_agents`, `kelpie_role_agents_with_work`, `kelpie_role_ownerless_queue_tasks`,
   `kelpie_role_tasks_done_24h`, `kelpie_role_returns_24h`, `kelpie_role_reopened_after_done_24h`
   and `_ratio`, `kelpie_idle_agents` and `kelpie_role_idle_seconds_total` (idle time per
@@ -388,6 +391,12 @@ board the report is unchanged.
   them gets a recommendation for a lighter path, with the evidence (n reviews, k with
   findings) and the tokens a day it would save; under 20 it is "direction only"; above
   the threshold, nothing. Kelpie only recommends: it never changes how tasks are reviewed.
+- **Unanswered asks** (#297): agent-hours that agents' questions to other agents (asks as
+  rule `unanswered_asks` reads them, also those on blocked or waiting tasks it leaves to
+  other rules) stayed unanswered within the day, by the agent asked, with the asking tasks.
+  Comments are read as of the day's end (an answer after the day leaves the ask open within
+  it); a task finished since counts as open until its finish. An ask answered within the day
+  is not counted, so it is a lower bound.
 - **Instruction files** (with `[instructions]`, incident 21): the files each role loads that
   cost the most tokens a day, as measured when the report runs (the 24 hours before), with
   where the figure comes from (counted skill loads, or size times sessions: an *estimate*,

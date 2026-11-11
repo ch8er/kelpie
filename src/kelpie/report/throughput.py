@@ -117,6 +117,43 @@ class RoleThroughput:
         return len(self.reworked) / len(self.worked) if self.worked else None
 
 
+# Stages where a task waits rather than being worked on: the day's bottleneck is one of
+# them. "working" is the work itself.
+WAIT_STAGES = ("queue", "review", "waiting", "ownerless")
+MIN_BOTTLENECK_HOURS = 1.0  # less than a task-hour waited in any stage: no bottleneck named
+
+
+@dataclass(frozen=True, slots=True)
+class Bottleneck:
+    """The day's bottleneck: the role and stage where tasks waited the most task-hours
+    (``share``: of all task-hours waited in any role and stage), with that role's
+    utilization (None: unknown) and the next one, for scale."""
+
+    role: str
+    stage: str
+    hours: float
+    share: float
+    utilization: float | None
+    runner_up: tuple[str, str, float] | None = None
+
+
+def bottleneck(roles: Sequence[RoleThroughput]) -> Bottleneck | None:
+    """The role and waiting stage (:data:`WAIT_STAGES`) with the most task-hours of the
+    day, at least :data:`MIN_BOTTLENECK_HOURS`; ties go to the role then stage name. None
+    when nothing waited that long. Pure: the same roles give the same answer."""
+    found = sorted(
+        ((-hours, r.role, stage, r) for r in roles for stage in WAIT_STAGES
+         if (hours := r.stages.get(stage, 0.0)) > 0),
+        key=lambda x: x[:3],
+    )  # fmt: skip
+    if not found or -found[0][0] < MIN_BOTTLENECK_HOURS:
+        return None
+    total = -sum(x[0] for x in found)
+    neg, role, stage, r = found[0]
+    nxt = (found[1][1], found[1][2], -found[1][0]) if len(found) > 1 else None
+    return Bottleneck(role, stage, -neg, -neg / total, r.utilization, nxt)
+
+
 def session_end(session: Session, end: datetime) -> datetime:
     """When a session stopped: its end, else its last heartbeat, else (still running or
     unknown) ``end``."""
