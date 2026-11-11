@@ -305,6 +305,35 @@ def test_a_hard_link_is_read_once_and_an_old_rotated_file_is_skipped(spool: Path
     assert numbers(c.items(spool, CUTOFF)) == [1] == fresh(spool)
 
 
+@pytest.mark.parametrize("failing", ["rotated", "live"])
+def test_a_read_error_midway_skips_that_file(
+    spool: Path, monkeypatch: pytest.MonkeyPatch, failing: str
+) -> None:
+    """A file that fails part-way (EIO on a network mount) is skipped this tick, as one that
+    cannot be opened is, and read again whole next time."""
+    rotated = spool.with_name(spool.name + ".1")
+    append(rotated, *(text(n) for n in range(0, 20)))
+    append(spool, *(text(n) for n in range(20, 40)))
+    bad = os.stat(rotated if failing == "rotated" else spool).st_ino
+    real = os.pread
+    reads = {"n": 0}
+
+    def flaky(fd: int, size: int, offset: int) -> bytes:
+        if os.fstat(fd).st_ino == bad and offset > 0:
+            reads["n"] += 1
+            raise OSError(5, "Input/output error")
+        return real(fd, size, offset)
+
+    monkeypatch.setattr(_spool, "READ_BLOCK", 64)
+    monkeypatch.setattr(_spool.os, "pread", flaky)
+    c = cache()
+    want = list(range(20, 40)) if failing == "rotated" else list(range(20))
+    assert numbers(c.items(spool, CUTOFF)) == want
+    assert reads["n"] == 1
+    monkeypatch.setattr(_spool.os, "pread", real)
+    assert numbers(c.items(spool, CUTOFF)) == list(range(40))
+
+
 def test_a_reader_without_a_spool_leaves_the_cache_alone(spool: Path) -> None:
     parse = Parser()
     c = cache(parse)
@@ -327,7 +356,8 @@ def test_a_normal_hermes_spool_keeps_every_span(spool: Path) -> None:
     a = hermes.HermesAdapter(db_path=spool.parent / "kanban.db", spool=spool)
     spans = a._spans(now - a.lookback, now + hermes.FUTURE_SKEW)
     assert sum(1 for s in spans if s.kind is SpanKind.TOOL) == 60_000
-    assert not a.spool_cache or not +a.spool_cache.dropped
+    assert a.spool_cache is not None
+    assert all(n == 0 for n in a.spool_cache.dropped.values())
 
 
 # --- the adapters -------------------------------------------------------------------------

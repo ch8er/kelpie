@@ -240,7 +240,9 @@ class SpoolCache[T: _Item]:
                     state = self._files[key] = _File()
                 read += self._read(fd, state, info.st_size, fresh, len(seen))
                 partial = self._partial
-            except OSError:
+            except OSError:  # unread, and forgotten (not in ``keys``): read again next time
+                while fresh and fresh[-1][0] == len(seen):  # what it read before failing
+                    fresh.pop()
                 continue
             finally:
                 os.close(fd)
