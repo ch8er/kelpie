@@ -112,6 +112,11 @@ class RelayHandler(BaseHTTPRequestHandler):
         if self.path.split("?")[0] != PATH:
             self._reply(404, b"not found\n", "text/plain")
             return
+        if self.headers.get("Origin") is not None:
+            # No exporter sends an Origin; a browser does on every cross-site POST, and the
+            # relay adds the agent's token to whatever it forwards (#406).
+            self._reply(403, b"requests from a web page are refused\n", "text/plain")
+            return
         raw = self.headers.get("Content-Length")
         try:
             length = int(raw) if raw is not None else -1

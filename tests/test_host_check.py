@@ -170,6 +170,8 @@ def test_the_agent_relay_checks_the_host() -> None:
     for _ in started(relay):
         assert request(relay, "POST", "/v1/traces", "attacker.example:4318", EXPORT)[0] == 421
         assert request(relay, "POST", "/v1/traces", "localhost:4318", EXPORT)[0] == 503
+        origin = {"Origin": "http://127.0.0.1:4318"}
+        assert request(relay, "POST", "/v1/traces", "localhost", EXPORT, origin)[0] == 403
     named = Relay(("127.0.0.1", 0), "http://127.0.0.1:9", AGENT_TOKEN, 1024, 1, hosts=("otel",))
     for _ in started(named):
         assert request(named, "POST", "/v1/traces", "otel:4318", EXPORT)[0] == 503
@@ -210,10 +212,11 @@ def test_is_loopback(host: str, loop: bool) -> None:
 
 
 def test_server_hosts_is_read_and_checked(tmp_path: Path) -> None:
-    assert load_server({"hosts": ["Box.", "kelpie.internal", "box", "::1"]}).hosts == (
+    assert load_server({"hosts": ["Box.", "kelpie.internal", "box", "::1", "my_box"]}).hosts == (
         "box",
         "kelpie.internal",
         "::1",
+        "my_box",
     )
     for bad in ("box", ["http://box"], ["box:9464"], [1], ["a b"], ["x"] * 33, [""]):
         with pytest.raises(ValueError, match=r"\[server\] hosts"):

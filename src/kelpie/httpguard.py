@@ -73,10 +73,9 @@ _LOG_EVERY = 60.0  # seconds between refusal warnings per peer
 MAX_HOSTS = 32  # [server] hosts
 # A Host header: a name or a bracketed IPv6 literal, then an optional numeric port.
 _HOST = re.compile(r"(?:\[(?P<v6>[0-9a-f:.]+)\]|(?P<name>[^:\[\]]+))(?::\d{1,5})?")
-# A configured name: a DNS name (no port, no scheme) or an IP literal.
-_NAME = re.compile(
-    r"[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?)*"
-)
+# A configured name: a host name (no port, no scheme; ``_`` allowed, as /etc/hosts allows
+# it) or an IP literal.
+_NAME = re.compile(r"[a-z0-9_][a-z0-9_-]{0,62}(?:\.[a-z0-9_][a-z0-9_-]{0,62})*")
 
 
 @dataclass(frozen=True, slots=True)
@@ -360,7 +359,9 @@ class GuardedHandler(BaseHTTPRequestHandler):
     def parse_request(self) -> bool:
         """Read the request line and headers; on a loopback listener, answer 421 to a
         request that names a host other than this one (DNS rebinding), whatever its method
-        and path, before the handler sees it."""
+        and path, before the handler sees it. (A request with ``Expect: 100-continue`` may
+        get its ``100 Continue`` first: the standard library answers it while parsing,
+        and the 421 still comes before any body is read.)"""
         if not super().parse_request():
             return False
         host = self.headers.get("Host")
@@ -369,7 +370,7 @@ class GuardedHandler(BaseHTTPRequestHandler):
         self.close_connection = True
         peer = self.peer()
         self.server.warn_once(
-            peer,
+            f"host:{peer}",  # its own slot: other refusals must not hide this one
             "%s: refused a request for host %r from %s (DNS rebinding?); a name that should "
             "reach this listener goes in [server] hosts",
             self.server.name,

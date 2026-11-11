@@ -51,11 +51,12 @@ a token to hold its threads:
   and the `kelpie agent` relay) answers 421 to a request addressed to anything but
   `localhost`, a loopback IP literal, its bind address or a name in
   [`[server] hosts`](configuration.md#server), before it looks at the path or the token.
-  An exporter or scraper that reaches Kelpie by an `/etc/hosts` alias needs that alias in
-  `[server] hosts`; the 421 is logged once a minute per address with the name it asked
+  An exporter or scraper that reaches Kelpie by an `/etc/hosts` alias, and a reverse proxy
+  or tunnel on the same machine that passes the client's `Host` on (Caddy's default, nginx
+  with `proxy_set_header Host $host`), needs that name in `[server] hosts`; the 421 is logged once a minute per address with the name it asked
   for. A listener off loopback checks no `Host`: its tokens guard it. A tokenless ingest
-  also refuses (403) an export that carries an `Origin` header: no exporter sends one, a
-  browser does on every cross-site `POST`.
+  also refuses (403) an export that carries an `Origin` header, and so does the agent
+  relay: no exporter sends one, a browser does on every cross-site `POST`.
 - **Bodies.** With a token configured, a body is read only after the token checks out.
   Every body is read within `read_timeout` (30s) per read and `body_timeout` (60s) in all,
   and only up to the endpoint's limit (`[traces] max_body_bytes`, `[hub] max_body_bytes`),
