@@ -366,7 +366,8 @@ def _block(
     latest: datetime | None = None
     for a in attempts:
         at = _ms(a["ended_at"]) or _ms(a["started_at"])
-        if a["status"] != "blocked" or at is None or at < since - BLOCK_SLACK:
+        # A difference: ``since - BLOCK_SLACK`` overflowed for a card moved in year 1 (#388).
+        if a["status"] != "blocked" or at is None or since - at > BLOCK_SLACK:
             continue  # an earlier block's attempt says nothing about this one
         if latest is None or at >= latest:
             latest, reason = at, _text(a["error"], MAX_REASON)

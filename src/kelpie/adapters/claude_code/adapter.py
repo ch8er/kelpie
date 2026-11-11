@@ -130,6 +130,7 @@ WATCH_ENDED = timedelta(hours=1)  # a watched session found gone is reported thi
 WATCH_UNKNOWN = 3  # snapshots in a row a watched session's process cannot be told, then dropped
 # A stop not enforced: the session still records tool calls this long after its marker.
 STOP_GRACE = timedelta(minutes=2)
+MARKER_TTL = timedelta(seconds=hook.DEFAULT_STOP_TTL)  # as the hook holds one
 MAX_MARKER = 4096
 SPOOL_TAIL = 65536  # bytes read from the end of the spool to find its newest line
 MAX_SPOOL_READ = 64 * 1024 * 1024  # bytes read per spool file and snapshot
@@ -417,7 +418,7 @@ class ClaudeCodeAdapter:
         updates = self._status_updates(events)
         tasks, dependencies = self._tasks(files, updates, cutoff)
         check = self._checker()
-        sessions = self._sessions(events, self._markers(events), now, check)
+        sessions = self._sessions(events, self._markers(events, now), now, check)
         sessions += self._still_watched(sessions, now, check)
         owners = {t.owner_id for t in tasks if t.owner_id} | {s.owner_id for s in sessions}
         return Snapshot(
@@ -602,17 +603,46 @@ class ClaudeCodeAdapter:
                 latest[ref] = e.at
         return latest
 
-    def _markers(self, events: Sequence[SpoolEvent]) -> dict[str, datetime]:
-        """Stop marker times of sessions in the spool (``{}`` without a stop directory)."""
+    def _markers(self, events: Sequence[SpoolEvent], now: datetime) -> dict[str, datetime]:
+        """Stop marker times of sessions in the spool (``{}`` without a stop directory).
+
+        Agents can write the stop directory, so a marker is used only inside the range in
+        which it can still flag a tool call of the spool, and exactly as before there
+        (#388). One dated more than ``FUTURE_SKEW`` ahead is ignored with one warning per
+        session (the hook ignores it too); one so old that the hook's TTL ran out before the
+        oldest call in the lookback began is ignored quietly (logged once at info: it may be
+        Kelpie's own, never cleared). Both are compared as differences from ``now``, which
+        cannot overflow whatever date a marker holds."""
         if self.stop_dir is None:
             return {}
         try:
             names = set(os.listdir(self.stop_dir))
         except OSError:
             return {}
+        back = self.lookback + timedelta(milliseconds=MAX_DURATION_MS) + MARKER_TTL
         found: dict[str, datetime] = {}
         for sid in {e.session_id for e in events}:
-            if f"{sid}.json" in names and (at := read_marker(self.stop_dir, sid)) is not None:
+            if f"{sid}.json" not in names or (at := read_marker(self.stop_dir, sid)) is None:
+                continue
+            if at - now > FUTURE_SKEW:
+                self._warn(
+                    f"marker-ahead:{sid}",
+                    "claude-code: the stop marker of session %s is dated %s, more than %s "
+                    "ahead; it is ignored, as the hook ignores it",
+                    sid,
+                    at.isoformat(),
+                    FUTURE_SKEW,
+                )
+            elif now - at > back:
+                if f"marker-old:{sid}" not in self._warned:
+                    self._warned.add(f"marker-old:{sid}")
+                    log.info(
+                        "claude-code: the stop marker of session %s (%s) expired long ago; "
+                        "it is ignored",
+                        sid,
+                        at.isoformat(),
+                    )
+            else:
                 found[sid] = at
         return found
 
@@ -900,11 +930,11 @@ def _ignored_stop(events: Sequence[SpoolEvent], marked: datetime) -> bool:
     if any(e.type == "stopped" for e in after):
         return False
     # A call counts by its start (a long call begun before the stop is not a miss), and only
-    # while the marker holds for the hook (it ignores markers older than its TTL).
-    expires = marked + timedelta(seconds=hook.DEFAULT_STOP_TTL)
+    # while the marker holds for the hook (it ignores markers older than its TTL). Compared
+    # as differences from the marker, which cannot overflow whatever date it holds (#388).
     return any(
         e.type == "tool"
-        and marked + STOP_GRACE < e.at - timedelta(milliseconds=e.duration_ms) < expires
+        and STOP_GRACE < e.at - timedelta(milliseconds=e.duration_ms) - marked < MARKER_TTL
         for e in after
     )
 

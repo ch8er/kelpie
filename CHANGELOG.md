@@ -163,6 +163,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
   or Claude Code tool call with a duration too large for the datetimes, no longer raise out
   of the adapter's snapshot: the first is skipped, a tool call's duration is cut to a week,
   as OpenClaw already did (#383).
+- A Claude Code or OpenClaw stop marker dated far ahead or far back (year 9999, year 1) no
+  longer raises `OverflowError` out of the adapter's snapshot, which blinded every rule on
+  that adapter while the marker stayed: a marker dated outside the range in which it can
+  still flag a tool call of the spool is ignored (one dated ahead with one warning per
+  session, as the hook and plugin ignore it; one long expired quietly), and the
+  unenforced-stop check compares differences instead of adding to the marker's date.
+  Markers inside that range work exactly as before. An OpenClaw Workboard card moved to
+  `blocked` at a time in year 1 no longer raises out of the board read either (#388).
 - Stop markers of the Claude Code and OpenClaw adapters are written relative to a handle
   on the stop folder, opened without following a symlink: an agent can no longer swap the
   folder for a symlink between Kelpie's check and its write (audit L4, #336).
