@@ -578,10 +578,18 @@ class Engine:
 
     def _notice(self, why: Suppression, action: Action, snapshot: Snapshot) -> None:
         if why is Suppression.RATE_LIMIT:
-            reason = (
-                f"Rate limit of {self.config.max_actions_per_task_per_hour} actions/hour "
-                f"reached for {subject(action)}; further actions are suppressed this hour."
-            )
+            limit = self.config.max_actions_per_task_per_hour
+            if action.own_budget:  # only this rule's alerts on the task are held back
+                reason = (
+                    f"Rate limit of {limit} actions/hour reached for {action.rule} alerts on "
+                    f"task {action.task_id}; further {action.rule} alerts on it are suppressed "
+                    "this hour (other actions on the task are not)."
+                )
+            else:
+                reason = (
+                    f"Rate limit of {limit} actions/hour reached for {subject(action)}; "
+                    "further actions are suppressed this hour."
+                )
             notice = Action(ActionKind.ALERT, "kelpie", reason, task_id=action.task_id)
         else:
             reason = "Action ledger unavailable; actions with effects are held back."

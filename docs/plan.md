@@ -68,7 +68,7 @@ Deployment: one `kelpie serve` process (or docker compose with Kelpie, Prometheu
 
 ### P0. Engine safety — first PRs of week 1, before any rule acts on a real farm
 
-- **A. Action ledger:** every action gets a fingerprint; the same action is not re-emitted within a cooldown; at most N actions per task per hour; the ledger is persisted in storage. It powers alert de-duplication and the before/after report, and keeps Kelpie itself from looping.
+- **A. Action ledger:** every action gets a fingerprint; the same action is not re-emitted within a cooldown; at most N actions per task per hour (alerts that agents' text can multiply, like `unanswered_asks` reminders, count on a budget of their own per rule and task, so they never hold back a task's other actions); the ledger is persisted in storage. It powers alert de-duplication and the before/after report, and keeps Kelpie itself from looping.
 - **B. Routing:** each task carries its `source` (the adapter it came from) and each action an executor target (a platform adapter or a connector). The engine holds a registry of executors instead of a single adapter, so connectors can expose actions too (e.g. `cancel_build` executed by the CI connector for rule 9).
 - **C. Stop capability:** `SupportsStop` (stop or pause a session) and the `stop` action, needed for rule 10.
 - **D. Per-rule mode** in config: `observe | suggest | act`, default `observe`. Global dry-run overrides every rule.

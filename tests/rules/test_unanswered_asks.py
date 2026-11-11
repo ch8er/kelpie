@@ -291,10 +291,11 @@ def test_a_broadcast_question_cannot_suppress_another_rules_action() -> None:
                 return []  # asks first, the requeue on the next tick
             return [Action(ActionKind.REQUEUE, self.name, "stuck", task_id="T-1")]
 
+    alerter = FakeAlerter()
     engine = Engine(
         [UnansweredAsks(), Requeue()],
         adapters=[FakeAdapter()],
-        alerter=FakeAlerter(),
+        alerter=alerter,
         config=EngineConfig(dry_run=False, default_mode=Mode.SUGGEST),
     )
     snap = Snapshot(now=NOW, tasks=(task(ask(BROADCAST)),), owners=BROADCAST_OWNERS)
@@ -302,6 +303,9 @@ def test_a_broadcast_question_cannot_suppress_another_rules_action() -> None:
     alerted = [d for d in first if d.outcome is Outcome.ALERTED]
     limited = [d for d in first if d.suppression is Suppression.RATE_LIMIT]
     assert len(alerted) == 6 and len(limited) == 1  # the reminders' own budget: 6/hour
+    (notice,) = [e.reason for e in alerter.events if "Rate limit" in e.reason]
+    assert "unanswered_asks alerts on task T-1" in notice
+    assert "other actions on the task are not" in notice
     later = replace(snap, now=NOW + 5 * M)
     (requeue,) = [d for d in engine.tick(lambda: later) if d.action.rule == "requeue_rule"]
     assert requeue.outcome is Outcome.SUGGESTED
