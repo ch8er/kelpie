@@ -889,3 +889,36 @@ def test_log_slots_past_their_minute_are_pruned() -> None:
         guard._due(f"name-{i}", NOW + timedelta(minutes=2 * i))
     assert len(guard._logged) <= len(SCOPES) + 1
     assert guard._due("name-999", NOW + timedelta(minutes=1998, seconds=30)) is False
+
+
+class _Marks(MemorySpanStore):
+    def __init__(self, rows: list[tuple[str | None, str | None, str]]) -> None:
+        super().__init__()
+        self.rows = rows
+
+    def marked_ids(
+        self, after: datetime, attribute: str
+    ) -> list[tuple[str | None, str | None, str]]:
+        return self.rows
+
+
+def test_restore_past_the_cap_evicts_removed_names_first_and_stays_fast(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A restore of many marks of names no longer configured holds them in one pool: never
+    more than the cap, evicted before configured tokens' bindings, in linear time (#374)."""
+    import time
+
+    import kelpie.traces.scope as scope
+
+    monkeypatch.setattr(scope, "MAX_BINDINGS", 10_000)
+    rows: list[tuple[str | None, str | None, str]] = [("new-2-keep", None, "dev-2")]
+    rows += [(f"gone-{i}", None, f"removed-{i}") for i in range(40_000)]
+    guard = ScopeGuard(SCOPES, store=_Marks(rows))
+    started = time.monotonic()
+    bound = guard.restore(NOW - timedelta(days=1), NOW)
+    assert time.monotonic() - started < 5
+    assert bound == len(guard._bound) == 10_000
+    assert set(guard._owned) == {"dev-2", scope.REMOVED_TOKEN}
+    assert guard.bound(SESSION, "new-2-keep") == "dev-2"
+    assert sum(len(o) for o in guard._owned.values()) == 10_000

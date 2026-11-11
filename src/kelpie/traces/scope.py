@@ -325,10 +325,15 @@ class ScopeGuard:
             self._logged[token] = now
             return True
 
+    def _pool(self, token: str) -> str:
+        """The eviction pool of a token's bindings: its own, or one shared by every name no
+        longer configured (stored marks could hold many)."""
+        return token if token in self.scopes else REMOVED_TOKEN
+
     def _own(self, key: tuple[str, str], binding: _Binding) -> None:
         """Bind ``key`` (or refresh its use); with the lock held."""
         self._bound[key] = binding
-        owned = self._owned.setdefault(binding.token, OrderedDict())
+        owned = self._owned.setdefault(self._pool(binding.token), OrderedDict())
         owned[key] = None
         owned.move_to_end(key)
 
@@ -336,20 +341,24 @@ class ScopeGuard:
         """Unbind ``key``; with the lock held."""
         binding = self._bound.pop(key, None)
         if binding is not None:
-            owned = self._owned.get(binding.token)
+            pool = self._pool(binding.token)
+            owned = self._owned.get(pool)
             if owned is not None:
                 owned.pop(key, None)
                 if not owned:
-                    del self._owned[binding.token]
+                    del self._owned[pool]
             self._active.get(binding.token, {}).pop(key, None)
         return binding
 
     def _evict(self) -> None:
-        """Past :data:`MAX_BINDINGS`: the token holding the most bindings loses its least
-        recently used ones, so a token that floods ids evicts its own; with the lock held."""
+        """Past :data:`MAX_BINDINGS`: bindings of names no longer configured go first, then
+        the token holding the most bindings loses its least recently used ones, so a token
+        that floods ids evicts its own before any token holding fewer; with the lock held.
+        One pass over the pools (configured tokens + 1) per eviction."""
         while len(self._bound) > MAX_BINDINGS:
-            largest = max(self._owned.values(), key=len)
-            self._drop(next(iter(largest)))
+            removed = self._owned.get(REMOVED_TOKEN)
+            pool = removed if removed else max(self._owned.values(), key=len)
+            self._drop(next(iter(pool)))
 
     def _holder(self, kind: str, value: str) -> _Binding | None:
         with self._lock:
@@ -472,7 +481,9 @@ class ScopeGuard:
                     if value is not None and (kind, value) not in self._bound:
                         self._own((kind, value), _Binding(token, now))
                         bound += 1
-            self._evict()
+                        if len(self._bound) > MAX_BINDINGS:  # never more than the cap held
+                            self._evict()
+                            bound -= 1
         return bound
 
     # --- every tick -----------------------------------------------------------------------

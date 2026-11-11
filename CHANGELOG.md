@@ -168,11 +168,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
   per tick and kept between ticks (at most 128 MiB of them), and 20,000 tool calls per
   named run or session in a snapshot (the newest, and the run's first line). A spool the
   hooks rotate at 20 MiB reaches none of them, so rule 10 sees the same evidence (#392).
-- Per-agent traces tokens: past the million bindings Kelpie holds, the token holding the
-  most loses its least recently used ones, so a token flooding unplaced ids over days evicts
-  its own bindings instead of another token's (whose ids it could then claim). A binding is
-  kept the hour a span may be dated ahead past retention, so a revocation always finds it.
-  Log slots past their minute are pruned (#374).
+- Per-agent traces tokens: past the million bindings Kelpie holds, bindings of names no
+  longer configured go first, then the token holding the most loses its least recently used
+  ones, so a token flooding unplaced ids over days evicts its own bindings before those of
+  any token holding fewer (whose ids it could otherwise claim). A binding is kept, past
+  retention, the hour a span may be dated ahead. Log slots past their minute are pruned
+  (#374).
 - A block storm's "Block storm over" notice counts the tasks Kelpie listed, not a list an
   agent wrote into its block reason (#404).
 - The `[view]` listener on loopback answers only requests addressed to a loopback name or
