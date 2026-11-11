@@ -343,3 +343,36 @@ def test_a_session_running_at_the_return_redoes_it() -> None:
     owners = (*OWNERS, Owner("qa-1", "qa"))
     roles = {r.role: r for r in throughput((task_,), sessions, owners, (), START, END)}
     assert roles["developer"].reworked == ("C",) and roles["qa"].reworked == ()
+
+
+# --- the day's bottleneck (role or stage) ------------------------------------------------
+
+
+def test_the_bottleneck_is_the_role_and_stage_where_tasks_waited_longest() -> None:
+    from kelpie.report.throughput import RoleThroughput, bottleneck
+
+    roles = [
+        RoleThroughput("developer", 24.0, agents=2, busy_hours=46.0,
+                       stages={"working": 30.0, "queue": 12.0, "waiting": 2.0}),
+        RoleThroughput("reviewer", 24.0, agents=1, busy_hours=4.0,
+                       stages={"working": 50.0, "review": 6.0}),
+    ]  # fmt: skip
+    found = bottleneck(roles)
+    assert found is not None
+    assert (found.role, found.stage, found.hours) == ("developer", "queue", 12.0)
+    assert round(found.share, 2) == 0.6 and round(found.utilization or 0, 2) == 0.96
+    assert found.runner_up == ("reviewer", "review", 6.0)
+
+
+def test_no_bottleneck_without_an_hour_waited() -> None:
+    from kelpie.report.throughput import RoleThroughput, bottleneck
+
+    assert bottleneck([]) is None
+    busy = RoleThroughput("developer", 24.0, stages={"working": 40.0, "queue": 0.5})
+    assert bottleneck([busy]) is None
+    tie = [
+        RoleThroughput("b", 24.0, stages={"queue": 2.0}),
+        RoleThroughput("a", 24.0, stages={"review": 2.0}),
+    ]
+    found = bottleneck(tie)
+    assert found is not None and (found.role, found.stage) == ("a", "review")

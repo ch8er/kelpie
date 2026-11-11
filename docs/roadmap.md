@@ -850,8 +850,8 @@ Not started. The inputs exist: time per stage and role (#78), the top-3 list in 
 report (#52) and `kelpie fix` before/after (#54, #258).
 
 **Acceptance criteria**
-- [ ] The current bottleneck role or stage identified each day
-- [ ] Recommendations ranked and fed into the top 3 of the daily report
+- [x] The current bottleneck role or stage identified each day (the "Bottleneck of the day" line of Farm throughput; #PR)
+- [x] Recommendations ranked and fed into the top 3 of the daily report (sections' advice competes with the built-in ones, ranked by dollars and hours; already in main, ticked in #PR)
 - [ ] Before/after verification applies to accepted recommendations
 
 ### docs: install, configuration and extension guides
@@ -1156,7 +1156,7 @@ The Hermes state.db reader (#271) is on main now, so loads can be counted.
 
 **Acceptance criteria**
 - [ ] Tokens a day from counted loads (Hermes `skill_view`, Claude Code skill loads), `token_basis = "loads"`, falling back to sessions and saying which
-- [ ] Daily report section: the top instruction files by tokens a day, with growth and copies
+- [x] Daily report section: the top instruction files by tokens a day, with growth and copies (with `token_basis` loads or sessions, an estimate said so; already in main, ticked in #PR)
 - [ ] `kelpie fix` before/after for a split: tokens a day on instructions and tokens per completed task for that role
 - [ ] Files on `kelpie agent` hosts measured and their sessions counted
 
@@ -1173,7 +1173,7 @@ has no per-board view, so two projects on one farm read as one.
 ### report: backlog-release spike and toolchain version in outages (#193 follow-up)
 labels: P1, area:core
 **Acceptance criteria**
-- [ ] A throughput spike right after a fix that unblocked a queue is named as a backlog release, and the next full day is preferred for the comparison
+- [x] A throughput spike right after a fix that unblocked a queue is named as a backlog release, and the next full day is preferred for the comparison (`Release` in report/verify.py; already in main, ticked in #PR)
 - [ ] Toolchain version (e.g. Xcode / CoreSimulator, read through the textfile collector as config data) recorded per host; an outage that starts when it changes names the change as the likely cause (incident 20)
 
 ### rules: unanswered asks — a question to a person or another agent is an obligation until answered
@@ -1187,7 +1187,7 @@ answered. Questions to people stay rule 13's (blocks with approval reasons).
 - [x] Reminder only while the recipient is idle (no live session), at most once per escalation step; a snooze on the asking task holds it
 - [x] Delivery not confirmed is `unknown`, never assumed failed or resent
 - [x] Fixtures: answered (no alert), unanswered with the recipient busy (no reminder), idle (one reminder), snoozed (silent until the date)
-- [ ] The daily report counts agent-hours spent on unanswered asks, by recipient
+- [x] The daily report counts agent-hours spent on unanswered asks, by recipient (the "Unanswered asks" section; #PR)
 - [ ] Asks from block reasons (blocked tasks stay rule 4's today) and comment asks to people (rule 13 reads blocks only)
 
 ### docs: reconcile the roadmap with what is merged
