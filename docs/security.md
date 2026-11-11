@@ -147,6 +147,16 @@ so it is kept for Kelpie's own user:
   write cannot make Kelpie write elsewhere, and a symlink at the marker's name is replaced,
   never followed. The folder's parents are trusted: keep them out of the agents' reach if
   Kelpie runs with more privilege than the agents.
+- Kelpie also reads those markers back, to tell a stop the hook or plugin does not enforce.
+  A marker's time is used only inside the range in which it can still say anything about
+  the spool: from `FUTURE_SKEW` (5 minutes) ahead back to the lookback plus a week (the
+  longest tool call) plus the stop TTL. A marker dated outside it (year 9999, year 1) is
+  ignored with one warning per session, as the hook and plugin ignore one dated ahead; such
+  a marker used to raise out of the adapter's snapshot and blind every rule on that adapter
+  while it stayed (#388). Malformed markers are ignored as before. An agent that can write
+  the folder can still write a well-dated marker for another agent's session: that is the
+  same reach as signalling its process, so keep agents that do not trust each other out of
+  one stop folder.
 - Put `kelpie.db` in a folder only Kelpie's user can enter. The container image creates
   `/data` 0700, owned by the `kelpie` user; a named volume takes that mode when it is
   first created, an existing volume or bind mount keeps its own.

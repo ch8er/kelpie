@@ -130,6 +130,7 @@ WATCH_ENDED = timedelta(hours=1)  # a watched session found gone is reported thi
 WATCH_UNKNOWN = 3  # snapshots in a row a watched session's process cannot be told, then dropped
 # A stop not enforced: the session still records tool calls this long after its marker.
 STOP_GRACE = timedelta(minutes=2)
+MARKER_TTL = timedelta(seconds=hook.DEFAULT_STOP_TTL)  # as the hook holds one
 MAX_MARKER = 4096
 SPOOL_TAIL = 65536  # bytes read from the end of the spool to find its newest line
 MAX_SPOOL_READ = 64 * 1024 * 1024  # bytes read per spool file and snapshot
@@ -417,7 +418,7 @@ class ClaudeCodeAdapter:
         updates = self._status_updates(events)
         tasks, dependencies = self._tasks(files, updates, cutoff)
         check = self._checker()
-        sessions = self._sessions(events, self._markers(events), now, check)
+        sessions = self._sessions(events, self._markers(events, now), now, check)
         sessions += self._still_watched(sessions, now, check)
         owners = {t.owner_id for t in tasks if t.owner_id} | {s.owner_id for s in sessions}
         return Snapshot(
@@ -602,18 +603,35 @@ class ClaudeCodeAdapter:
                 latest[ref] = e.at
         return latest
 
-    def _markers(self, events: Sequence[SpoolEvent]) -> dict[str, datetime]:
-        """Stop marker times of sessions in the spool (``{}`` without a stop directory)."""
+    def _markers(self, events: Sequence[SpoolEvent], now: datetime) -> dict[str, datetime]:
+        """Stop marker times of sessions in the spool (``{}`` without a stop directory).
+
+        Agents can write the stop directory, so a marker dated outside the range in which it
+        could still say anything about the spool's tool calls is ignored, with one warning
+        per session: later than ``FUTURE_SKEW`` ahead (the hook ignores it too), or so old
+        that the hook's TTL ran out before the oldest call in the lookback began. Inside
+        that range a marker is used exactly as before (#388)."""
         if self.stop_dir is None:
             return {}
         try:
             names = set(os.listdir(self.stop_dir))
         except OSError:
             return {}
+        back = self.lookback + timedelta(milliseconds=MAX_DURATION_MS) + MARKER_TTL
         found: dict[str, datetime] = {}
         for sid in {e.session_id for e in events}:
-            if f"{sid}.json" in names and (at := read_marker(self.stop_dir, sid)) is not None:
+            if f"{sid}.json" not in names or (at := read_marker(self.stop_dir, sid)) is None:
+                continue
+            if _spool.within(at, now, back, FUTURE_SKEW):
                 found[sid] = at
+            else:
+                self._warn(
+                    f"marker-range:{sid}",
+                    "claude-code: the stop marker of session %s is dated %s, outside the range "
+                    "a marker can hold in; it is ignored",
+                    sid,
+                    at.isoformat(),
+                )
         return found
 
     def _sessions(
@@ -900,11 +918,11 @@ def _ignored_stop(events: Sequence[SpoolEvent], marked: datetime) -> bool:
     if any(e.type == "stopped" for e in after):
         return False
     # A call counts by its start (a long call begun before the stop is not a miss), and only
-    # while the marker holds for the hook (it ignores markers older than its TTL).
-    expires = marked + timedelta(seconds=hook.DEFAULT_STOP_TTL)
+    # while the marker holds for the hook (it ignores markers older than its TTL). Compared
+    # as differences from the marker, which cannot overflow whatever date it holds (#388).
     return any(
         e.type == "tool"
-        and marked + STOP_GRACE < e.at - timedelta(milliseconds=e.duration_ms) < expires
+        and STOP_GRACE < e.at - timedelta(milliseconds=e.duration_ms) - marked < MARKER_TTL
         for e in after
     )
 

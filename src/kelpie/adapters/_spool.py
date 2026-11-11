@@ -16,7 +16,7 @@ import os
 import secrets
 import stat
 from collections.abc import Iterator
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 
@@ -109,6 +109,13 @@ def spool_lines(spool: Path | None, cutoff: datetime, limit: int, max_line: int)
             yield from read_lines(path, limit, max_line)
         except OSError:
             continue
+
+
+def within(at: datetime, now: datetime, back: timedelta, ahead: timedelta) -> bool:
+    """Whether ``at`` (a time an agent could write, such as a stop marker's) lies in
+    ``[now - back, now + ahead]``. Compared as a difference, which no two datetimes overflow,
+    so a time dated in year 1 or 9999 is simply out of range (#388)."""
+    return -back <= at - now <= ahead
 
 
 def tail_lines(spool: Path, size: int) -> list[str] | None:

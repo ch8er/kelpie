@@ -389,7 +389,7 @@ class OpenClawAdapter:
         cutoff = now - self.lookback
         events = sorted(self._events(cutoff, now + FUTURE_SKEW), key=lambda e: e.at)
         board = self._board_or_last(now)
-        sessions = self._sessions(events, board.cards, now, self._markers(events))
+        sessions = self._sessions(events, board.cards, now, self._markers(events, now))
         tasks = tuple(c.task for c in board.cards)
         owners = {t.owner_id for t in tasks if t.owner_id} | {s.owner_id for s in sessions}
         return Snapshot(
@@ -419,16 +419,33 @@ class OpenClawAdapter:
         self._last_board = (now, board)
         return board
 
-    def _markers(self, events: Sequence[SpoolEvent]) -> dict[str, datetime]:
+    def _markers(self, events: Sequence[SpoolEvent], now: datetime) -> dict[str, datetime]:
         """Stop marker times of sessions in the spool (``{}`` without a stop directory). Each
         session's marker is opened by name: agents can fill the directory, so it is never
-        listed."""
+        listed.
+
+        For the same reason a marker dated outside the range in which it could still say
+        anything about the spool is ignored, with one warning per session: later than
+        ``FUTURE_SKEW`` ahead (the plugin ignores it too), or so old that ``stop_ttl`` ran out
+        before the oldest call in the lookback began. Inside that range a marker is used
+        exactly as before (#388)."""
         if self.stop_dir is None:
             return {}
+        back = self.lookback + timedelta(milliseconds=MAX_DURATION_MS) + self.stop_ttl
         found: dict[str, datetime] = {}
         for sid in {e.session_id for e in events}:
-            if (at := read_marker(self.stop_dir, sid)) is not None:
+            if (at := read_marker(self.stop_dir, sid)) is None:
+                continue
+            if _spool.within(at, now, back, FUTURE_SKEW):
                 found[sid] = at
+            else:
+                self._warn(
+                    f"marker-range:{sid}",
+                    "openclaw: the stop marker of session %s is dated %s, outside the range a "
+                    "marker can hold in; it is ignored",
+                    sid,
+                    at.isoformat(),
+                )
         return found
 
     def _sessions(
@@ -755,11 +772,11 @@ def _ignored_stop(events: Sequence[SpoolEvent], marked: datetime, ttl: timedelta
     if any(e.type in STOP_LINES for e in after):
         return False
     # A call counts by its start (a long call begun before the stop is not a miss), and only
-    # while the marker holds for the plugin (it ignores markers older than its TTL).
-    expires = marked + ttl
+    # while the marker holds for the plugin (it ignores markers older than its TTL). Compared
+    # as differences from the marker, which cannot overflow whatever date it holds (#388).
     return any(
         e.type == "tool"
-        and marked + STOP_GRACE < e.at - timedelta(milliseconds=e.duration_ms) < expires
+        and STOP_GRACE < e.at - timedelta(milliseconds=e.duration_ms) - marked < ttl
         for e in after
     )
 
