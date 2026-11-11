@@ -37,7 +37,7 @@ from kelpie.core.model import Span
 from kelpie.core.spans import SpanStore
 from kelpie.traces import otlp
 from kelpie.traces.auth import TokenCheck, TokenFile
-from kelpie.traces.scope import ScopeGuard, stamp
+from kelpie.traces.scope import MAX_FUTURE, ScopeGuard, stamp
 from kelpie.traces.semconv import MappingOptions, map_spans
 
 log = logging.getLogger(__name__)
@@ -46,7 +46,6 @@ PATH = "/v1/traces"
 DEFAULT_MAX_BODY_BYTES = 8 * 1024 * 1024
 DEFAULT_MAX_CONCURRENT = 4
 DEFAULT_MAX_AGE = timedelta(days=7)
-MAX_FUTURE = timedelta(hours=1)  # clock skew tolerated for span times
 IGNORED = "ignored"  # kind label for decoded spans that are not GenAI steps
 INVALID_TIME = "invalid_time"
 _EPOCH_NS_PER_US = 1000

@@ -54,10 +54,11 @@ OUT_OF_SCOPE = "out_of_scope"  # spans_rejected reason
 SCOPE_BACKLOG = "scope_backlog"  # spans_rejected reason: a token bound too many unplaced ids
 INDEX_KEEP = timedelta(hours=24)  # a session or task the board stopped showing is kept this long
 UNPLACED_ACTIVE = timedelta(hours=24)  # an unplaced id counts toward the cap this long after use
-MAX_BINDINGS = 1_000_000  # all tokens; the least recently used go first
+MAX_BINDINGS = 1_000_000  # all tokens; past it the token holding the most loses its oldest
 MAX_INDEX = 200_000  # entries per map; the oldest go first
 MAX_UNPLACED = 10_000  # ids one token may hold bound while the board does not place them
 LOG_EVERY = timedelta(minutes=1)
+MAX_FUTURE = timedelta(hours=1)  # how far ahead ingest takes span times (clock skew)
 REMOVED_TOKEN = "<not configured>"  # the log name of every token no longer configured
 
 SESSION, TASK = "session_id", "task_id"  # binding kinds: the span column they name
@@ -303,7 +304,10 @@ class ScopeGuard:
     retention: timedelta = timedelta(days=7)
     index: ScopeIndex = field(default_factory=ScopeIndex)
     barrier: Barrier = field(default_factory=Barrier)
-    _bound: OrderedDict[tuple[str, str], _Binding] = field(default_factory=OrderedDict)
+    _bound: dict[tuple[str, str], _Binding] = field(default_factory=dict)
+    # per token: the ids bound to it, least recently used first (eviction is per token, so
+    # one token's flood evicts its own bindings, never another token's: #374)
+    _owned: dict[str, OrderedDict[tuple[str, str], None]] = field(default_factory=dict)
     # per token: unsettled ids it used within UNPLACED_ACTIVE, least recently used first
     _active: dict[str, OrderedDict[tuple[str, str], datetime]] = field(default_factory=dict)
     _logged: dict[str, datetime] = field(default_factory=dict)
@@ -314,8 +318,38 @@ class ScopeGuard:
             seen = self._logged.get(token)
             if seen is not None and timedelta(0) <= now - seen < LOG_EVERY:
                 return False
+            if len(self._logged) > len(self.scopes):  # slots past their minute are free
+                for name, at in list(self._logged.items()):
+                    if not timedelta(0) <= now - at < LOG_EVERY:
+                        del self._logged[name]
             self._logged[token] = now
             return True
+
+    def _own(self, key: tuple[str, str], binding: _Binding) -> None:
+        """Bind ``key`` (or refresh its use); with the lock held."""
+        self._bound[key] = binding
+        owned = self._owned.setdefault(binding.token, OrderedDict())
+        owned[key] = None
+        owned.move_to_end(key)
+
+    def _drop(self, key: tuple[str, str]) -> _Binding | None:
+        """Unbind ``key``; with the lock held."""
+        binding = self._bound.pop(key, None)
+        if binding is not None:
+            owned = self._owned.get(binding.token)
+            if owned is not None:
+                owned.pop(key, None)
+                if not owned:
+                    del self._owned[binding.token]
+            self._active.get(binding.token, {}).pop(key, None)
+        return binding
+
+    def _evict(self) -> None:
+        """Past :data:`MAX_BINDINGS`: the token holding the most bindings loses its least
+        recently used ones, so a token that floods ids evicts its own; with the lock held."""
+        while len(self._bound) > MAX_BINDINGS:
+            largest = max(self._owned.values(), key=len)
+            self._drop(next(iter(largest)))
 
     def _holder(self, kind: str, value: str) -> _Binding | None:
         with self._lock:
@@ -414,16 +448,13 @@ class ScopeGuard:
             for key, b in zip(ids, held, strict=True):
                 if b is None:
                     b = _Binding(token, now)
-                    self._bound[key] = b
                 else:
                     b.last = now
-                    self._bound.move_to_end(key)  # least recently used first
+                self._own(key, b)  # least recently used first
                 if not b.settled:
                     active[key] = now
                     active.move_to_end(key)
-            while len(self._bound) > MAX_BINDINGS:
-                key, b = self._bound.popitem(last=False)
-                self._active.get(b.token, {}).pop(key, None)
+            self._evict()
             return None
 
     def restore(self, after: datetime, now: datetime) -> int:
@@ -439,8 +470,9 @@ class ScopeGuard:
             for session_id, task_id, token in self.store.marked_ids(after, TOKEN_ATTRIBUTE):
                 for kind, value in ((SESSION, session_id), (TASK, task_id)):
                     if value is not None and (kind, value) not in self._bound:
-                        self._bound[(kind, value)] = _Binding(token, now)
+                        self._own((kind, value), _Binding(token, now))
                         bound += 1
+            self._evict()
         return bound
 
     # --- every tick -----------------------------------------------------------------------
@@ -462,10 +494,12 @@ class ScopeGuard:
         with self._lock:
             bindings = list(self._bound.items())
         for (kind, value), held in bindings:
-            if now - held.last > self.retention:
+            # A span may be dated up to MAX_FUTURE ahead: the binding outlives it by as much,
+            # so a revocation always finds the binding its spans were stored under (#374).
+            if now - held.last > self.retention + MAX_FUTURE:
                 with self._lock:
-                    self._bound.pop((kind, value), None)
-                    self._active.get(held.token, {}).pop((kind, value), None)
+                    if self._bound.get((kind, value)) is held:
+                        self._drop((kind, value))
                 continue
             if held.settled or held.revoked is not None:
                 continue
