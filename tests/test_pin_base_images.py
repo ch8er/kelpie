@@ -154,3 +154,9 @@ def test_what_cannot_be_pinned_is_reported_not_skipped(line: str, tmp_path: Path
 def test_stage_names_are_not_images() -> None:
     text = "FROM python:3.12 AS Build\nFROM build\nCOPY --from=BUILD /a /b\n"
     assert pin.unpinned(text) == ["python:3.12"]
+
+
+def test_the_repository_dockerfile_is_pinned_by_digest() -> None:
+    """Every base image stays pinned (audit L14): a tag-only FROM fails here, not in a
+    release."""
+    assert pin.unpinned((ROOT / "Dockerfile").read_text()) == []
