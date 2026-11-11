@@ -1971,6 +1971,21 @@ values are header names; the default is `remaining = "ratelimit-remaining"`,
 it as a whole. For `status_url` the values are dotted JSON paths and `fields` is required.
 `remaining` is `limit - used` when only `used` is given.
 
+**`quota_reset` conditions.** A task can wait on a provider's quota: a `quota_reset`
+condition with `params.provider` (one of these probes' names) and optionally
+`params.resets_at` (ISO 8601 with a zone). Kelpie itself registers none yet; an adapter or
+an extension that parks tasks on a quota does. Each tick, right after the probes, Kelpie
+evaluates them: one holds once the provider's latest probe reads quota left (`remaining`
+above 0, the key not rejected) **and** its `resets_at`, if given, has passed (a probe often
+reads a short request window, so it can delay a wake but never bring one forward); rule 2
+then wakes the task. A provider configured here but not probed yet, a failed probe or one
+without a reading leaves it unknown (`params.error`: `not_probed`, `probe_failed`,
+`no_reading`); a provider not configured here goes by `resets_at` alone (else `not_found`).
+Without `[connectors.llm_quotas]`, and offline (`kelpie why`, `kelpie run-once`), these
+conditions are not evaluated. Keep `interval` well below rule 4's `max_condition_age`, or a
+blocked task's quota condition reads as stale evidence between probes. On a multi-host farm
+the probes are the server's: an agent's condition is judged with the server's key.
+
 ## [connectors.cost_reports]
 
 Reads what each provider's cost report says was spent per day (the bill), so the spend

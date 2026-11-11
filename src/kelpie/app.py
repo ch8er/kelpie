@@ -70,6 +70,7 @@ from kelpie.core.budgets import BudgetConfig, BudgetStatus, BudgetUnit, evaluate
 from kelpie.core.conditions import (
     Contribution,
     carry_forward,
+    check_quota_reset,
     check_task_status,
     contribution,
     widen,
@@ -1317,6 +1318,10 @@ def merged_snapshot(
                     providers=merged.providers + tuple(statuses),
                     limit_hits=merged.limit_hits + tuple(hits),
                 )
+                # quota_reset conditions read the probes just taken; offline (kelpie why,
+                # run-once) and without [connectors.llm_quotas] they stay unchecked
+                configured = [p.name for p in getattr(providers, "providers", ())]
+                merged = check_quota_reset(merged, configured)
         folded = merge_hook_spans(merged.spans)
         metrics.hook_spans_merged(folded.merged)
         merged = replace(merged, spans=folded.spans)

@@ -4,10 +4,19 @@ attach conditions during snapshot assembly, so both read the linkage alike."""
 from __future__ import annotations
 
 from collections import Counter
+from collections.abc import Collection
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 
-from kelpie.core.model import Block, Condition, ConditionKind, Snapshot, Status, Task
+from kelpie.core.model import (
+    Block,
+    Condition,
+    ConditionKind,
+    ProviderStatus,
+    Snapshot,
+    Status,
+    Task,
+)
 
 # Keys :func:`check_task_status` writes into ``Condition.params``; cleared before each check.
 _TASK_STATUS_RESULTS = ("observed_status", "error", "terminal")
@@ -92,6 +101,107 @@ def _check_task_status(condition: Condition, snapshot: Snapshot) -> Condition:
     return replace(
         condition, params=params, satisfied=False, satisfied_at=None, checked_at=snapshot.now
     )
+
+
+# --- quota_reset ---------------------------------------------------------------------------
+
+# Keys :func:`check_quota_reset` writes into ``Condition.params``; cleared before each check.
+_QUOTA_RESULTS = ("error", "observed_remaining", "observed_resets_at", "observed_at")
+
+
+def check_quota_reset(snapshot: Snapshot, configured: Collection[str] = ()) -> Snapshot:
+    """Evaluate ``quota_reset`` conditions, as a snapshot step run right after the provider
+    probes (``Snapshot.providers``, ``[connectors.llm_quotas]``); ``configured`` names the
+    probed providers. Pure: the probes and the clock in the snapshot are the evidence.
+
+    A condition names its provider (``params.provider``) and may say when the quota resets
+    (``params.resets_at``, ISO 8601 with a zone). With a probe of the provider it holds once
+    the latest probe reads quota left (``remaining`` above 0, the key not rejected) **and**
+    ``resets_at`` (if given) has passed: a probe can delay a wake, never bring one forward
+    (a probe often reads a short request window, not the quota the agent ran out of). It
+    does not hold while the probe reads none left. A configured provider without a usable
+    reading is unknown (``params.error``: ``not_probed`` before its first probe,
+    ``probe_failed``, ``no_reading``). A provider that is not configured at all (or none
+    named) goes by ``resets_at`` alone, else is unknown (``not_found``); bad params are
+    ``invalid_params``. ``observed_*`` record what was read."""
+    if not any(c.kind is ConditionKind.QUOTA_RESET for c in snapshot.conditions):
+        return snapshot
+    probes = {p.name.strip().casefold(): p for p in snapshot.providers}
+    names = {n.strip().casefold() for n in configured} | set(probes)
+    return replace(
+        snapshot,
+        conditions=tuple(
+            _check_quota(c, snapshot, probes, names) if c.kind is ConditionKind.QUOTA_RESET else c
+            for c in snapshot.conditions
+        ),
+    )
+
+
+def _check_quota(
+    condition: Condition,
+    snapshot: Snapshot,
+    probes: dict[str, ProviderStatus],
+    configured: set[str],
+) -> Condition:
+    params = {k: v for k, v in condition.params.items() if k not in _QUOTA_RESULTS}
+    provider, at = params.get("provider"), params.get("resets_at")
+    resets_at = _aware(at) if at is not None else None
+    if (
+        (provider is not None and (not isinstance(provider, str) or not provider.strip()))
+        or (at is not None and resets_at is None)
+        or (provider is None and at is None)
+    ):
+        return _unknown(condition, params, "invalid_params", snapshot.now)
+    name = provider.strip().casefold() if isinstance(provider, str) else None
+    reset_passed = resets_at is None or snapshot.now >= resets_at
+    since = condition.satisfied_at if condition.satisfied else None
+    if name is None or name not in configured:
+        if resets_at is None:
+            return _unknown(condition, params, "not_found", snapshot.now)
+        return replace(
+            condition,
+            params=params,
+            satisfied=reset_passed,
+            satisfied_at=resets_at if reset_passed else None,
+            checked_at=snapshot.now,
+        )
+    probe = probes.get(name)
+    if probe is None:
+        return _unknown(condition, params, "not_probed", snapshot.now)
+    seen = probe.checked_at or snapshot.now
+    params["observed_at"] = seen.isoformat()
+    if not probe.ok or probe.auth_ok is False:
+        return _unknown(condition, params, "probe_failed", seen)
+    if probe.remaining is None:
+        return _unknown(condition, params, "no_reading", seen)
+    params["observed_remaining"] = probe.remaining
+    if probe.resets_at is not None:
+        params["observed_resets_at"] = probe.resets_at.isoformat()
+    held = probe.remaining > 0 and reset_passed
+    return replace(
+        condition,
+        params=params,
+        satisfied=held,
+        satisfied_at=(since or seen) if held else None,
+        checked_at=seen,
+    )
+
+
+def _unknown(
+    condition: Condition, params: dict[str, object], error: str, now: datetime
+) -> Condition:
+    params["error"] = error
+    return replace(condition, params=params, satisfied=None, satisfied_at=None, checked_at=now)
+
+
+def _aware(value: object) -> datetime | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        at = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    return at if at.tzinfo is not None else None
 
 
 # --- carrying a failed step's conditions forward ------------------------------------------
