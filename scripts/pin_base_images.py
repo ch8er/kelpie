@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Pin the Dockerfile's base images by digest (audit L14, #336).
 
-Every image the Dockerfile pulls (``FROM <image>`` and ``COPY --from=<image>``) is written
+Every image the Dockerfile pulls (``FROM <image>``, and ``COPY --from=<image>``, although
+the Dockerfile names uv in a stage of its own so Dependabot, which reads ``FROM`` lines
+only, sees it) is written
 as ``<image>:<tag>@sha256:<digest>``: the tag says which release it is, the digest is what
 is pulled. The digest is the image *index* (the multi-platform manifest list), so the
 release workflow's multi-arch build (linux/amd64 and linux/arm64) pulls the matching
@@ -31,11 +33,19 @@ from pathlib import Path
 
 PLATFORMS = ("linux/amd64", "linux/arm64")  # what the release workflow builds
 DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
-# ``FROM <ref> [AS name]`` and ``COPY --from=<ref> ...``; a stage name (no ``:`` and no
-# ``/`` and no ``@``) is not an image.
-_REF = r"(?P<ref>[a-z0-9][a-z0-9._/-]*(?::[A-Za-z0-9._-]+)?(?:@sha256:[0-9a-f]{64})?)"
-_FROM = re.compile(rf"^(?P<head>FROM\s+(?:--platform=\S+\s+)?){_REF}(?P<tail>(?:\s.*)?)$")
-_COPY = re.compile(rf"^(?P<head>COPY\s+(?:\S+\s+)*?--from=){_REF}(?P<tail>\s.*)$")
+# ``FROM [--platform=…] <ref> [AS name]`` and ``COPY … --from=<ref> …`` (instructions are
+# case-insensitive and may be indented). ``<ref>`` is anything up to a blank: what it is
+# (an image, a stage name, a build argument) is decided by :func:`classify`.
+_FROM = re.compile(
+    r"^(?P<head>\s*FROM\s+(?:--platform=\S+\s+)?)(?P<ref>\S+)(?P<tail>(?:\s.*)?)$", re.I
+)
+_COPY = re.compile(r"^(?P<head>\s*COPY\s+(?:\S+\s+)*?--from=)(?P<ref>\S+)(?P<tail>\s.*)$", re.I)
+_STAGE = re.compile(r"\sAS\s+(?P<name>\S+)\s*$", re.I)
+# registry[:port]/path:tag[@sha256:…], or a Docker Hub name:tag[@sha256:…]
+_IMAGE = re.compile(
+    r"(?P<image>(?:[a-z0-9.-]+(?::\d+)?/)?[a-z0-9]+(?:[._/-][a-z0-9]+)*)"
+    r":(?P<tag>[A-Za-z0-9_][A-Za-z0-9._-]{0,127})(?:@(?P<digest>sha256:[0-9a-f]{64}))?"
+)
 
 
 @dataclass(frozen=True)
@@ -46,13 +56,9 @@ class Ref:
 
     @classmethod
     def parse(cls, text: str) -> Ref | None:
-        """An image reference with a tag, or None (a stage name, or no tag to pin to)."""
-        name, _, digest = text.partition("@")
-        last = name.rsplit("/", 1)[-1]
-        if ":" not in last:
-            return None
-        image, _, tag = name.rpartition(":")
-        return cls(image, tag, digest or None)
+        """An image reference with a tag (and maybe a digest), or None."""
+        m = _IMAGE.fullmatch(text)
+        return None if m is None else cls(m["image"], m["tag"], m["digest"])
 
     @property
     def tagged(self) -> str:
@@ -62,25 +68,36 @@ class Ref:
         return f"{self.tagged}@{digest}"
 
 
-def image_lines(text: str) -> list[tuple[int, Ref]]:
-    """Line numbers (0-based) and references of every image the Dockerfile pulls."""
-    found: list[tuple[int, Ref]] = []
+def classify(text: str) -> tuple[list[tuple[int, Ref]], list[str]]:
+    """The images the Dockerfile pulls (0-based line numbers and references), and the
+    references it cannot pin: an image without a tag, a build argument, anything that is
+    neither an image with a tag nor an earlier stage's name."""
+    images: list[tuple[int, Ref]] = []
+    unknown: list[str] = []
+    stages: set[str] = set()
     for n, line in enumerate(text.splitlines()):
         m = _FROM.match(line) or _COPY.match(line)
-        if m is not None and (ref := Ref.parse(m["ref"])) is not None:
-            found.append((n, ref))
-    return found
+        if m is None:
+            continue
+        raw = m["ref"]
+        if (ref := Ref.parse(raw)) is not None:
+            images.append((n, ref))
+        elif raw.casefold() not in stages:
+            unknown.append(raw)
+        if m.re is _FROM and (stage := _STAGE.search(m["tail"])) is not None:
+            stages.add(stage["name"].casefold())
+    return images, unknown
+
+
+def image_lines(text: str) -> list[tuple[int, Ref]]:
+    """Line numbers (0-based) and references of every image the Dockerfile pulls."""
+    return classify(text)[0]
 
 
 def unpinned(text: str) -> list[str]:
-    """The images not pinned by digest, and image lines without a tag (unpinnable)."""
-    bad = [ref.tagged for _, ref in image_lines(text) if ref.digest is None]
-    for line in text.splitlines():
-        m = _FROM.match(line) or _COPY.match(line)
-        ref = m["ref"] if m else ""
-        if m and Ref.parse(ref) is None and ("/" in ref or "." in ref or "@" in ref):
-            bad.append(ref)
-    return bad
+    """The images not pinned by digest, then the references that cannot be pinned."""
+    images, unknown = classify(text)
+    return [ref.tagged for _, ref in images if ref.digest is None] + unknown
 
 
 def rewrite(text: str, digests: dict[str, str]) -> str:
@@ -130,7 +147,9 @@ def index_digest(tagged: str, read: Callable[[str], dict[str, object]] = inspect
     return digest
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(
+    argv: list[str] | None = None, read: Callable[[str], dict[str, object]] | None = None
+) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--dockerfile", type=Path, default=Path("Dockerfile"))
     mode = parser.add_mutually_exclusive_group()
@@ -144,10 +163,14 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         print("every base image is pinned by digest")
         return 0
+    images, unknown = classify(text)
+    if unknown:
+        print(f"cannot pin (no tag, or not an image): {', '.join(unknown)}", file=sys.stderr)
+        return 1
     digests: dict[str, str] = {}
-    for _, ref in image_lines(text):
+    for _, ref in images:
         if ref.tagged not in digests:
-            digests[ref.tagged] = index_digest(ref.tagged)
+            digests[ref.tagged] = index_digest(ref.tagged, read or inspect)
             print(f"{ref.tagged}@{digests[ref.tagged]}")
     if args.write:
         new = rewrite(text, digests)

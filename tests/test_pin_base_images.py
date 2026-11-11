@@ -66,7 +66,6 @@ def test_check_names_what_is_not_pinned() -> None:
         "ghcr.io/astral-sh/uv:0.11.32",
         "python:3.12-slim-bookworm",
     ]
-    assert pin.unpinned("FROM ghcr.io/x/untagged\n") == ["ghcr.io/x/untagged"]
 
 
 def test_the_repository_dockerfile_lists_its_base_images() -> None:
@@ -96,9 +95,11 @@ def test_main_check_and_write(
     dockerfile = tmp_path / "Dockerfile"
     dockerfile.write_text(DOCKERFILE)
     assert pin.main(["--dockerfile", str(dockerfile), "--check"]) == 1
-    monkeypatch.setattr(pin, "inspect", lambda tagged: index(A if "python" in tagged else B))
-    monkeypatch.setattr(pin.index_digest, "__defaults__", (pin.inspect,))
-    assert pin.main(["--dockerfile", str(dockerfile), "--write"]) == 0
+
+    def fake(tagged: str) -> dict[str, object]:
+        return index(A if "python" in tagged else B)
+
+    assert pin.main(["--dockerfile", str(dockerfile), "--write"], fake) == 0
     assert f"ghcr.io/astral-sh/uv:0.11.32@{B}" in capsys.readouterr().out
     assert pin.main(["--dockerfile", str(dockerfile), "--check"]) == 0
 
@@ -124,3 +125,32 @@ def test_dependabot_keeps_the_docker_digests_current() -> None:
     workflow = yaml.safe_load((ROOT / ".github/workflows/pin-base-images.yml").read_text())
     run = "\n".join(s.get("run", "") for s in workflow["jobs"]["pin"]["steps"])
     assert "scripts/pin_base_images.py --write" in run and "--check" in run
+
+
+@pytest.mark.parametrize(
+    ("line", "found"),
+    [
+        ("FROM localhost:5000/img:1", "localhost:5000/img:1"),
+        ("from python:3.12", "python:3.12"),
+        ("  FROM python:3.12 AS base", "python:3.12"),
+        ("FROM --platform=$BUILDPLATFORM python:3.12", "python:3.12"),
+        ("COPY --chown=x --from=ghcr.io/a/b:1 /x /y", "ghcr.io/a/b:1"),
+    ],
+)
+def test_image_line_forms(line: str, found: str) -> None:
+    ((_, ref),) = pin.image_lines(line + "\n")
+    assert ref.tagged == found
+    assert pin.unpinned(line + "\n") == [found]
+
+
+@pytest.mark.parametrize("line", ["FROM alpine", "FROM ${BASE}", "FROM ghcr.io/x/untagged"])
+def test_what_cannot_be_pinned_is_reported_not_skipped(line: str, tmp_path: Path) -> None:
+    assert pin.unpinned(line + "\n") == [line.split()[1]]
+    dockerfile = tmp_path / "Dockerfile"
+    dockerfile.write_text(line + "\n")
+    assert pin.main(["--dockerfile", str(dockerfile)], lambda _: index(A)) == 1
+
+
+def test_stage_names_are_not_images() -> None:
+    text = "FROM python:3.12 AS Build\nFROM build\nCOPY --from=BUILD /a /b\n"
+    assert pin.unpinned(text) == ["python:3.12"]

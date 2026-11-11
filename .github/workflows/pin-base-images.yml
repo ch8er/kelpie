@@ -37,6 +37,7 @@ jobs:
           persist-credentials: false
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
       - name: Resolve the digests
+        shell: bash  # -eo pipefail: a failed resolve must fail the job, not hide behind tee
         run: |
           python3 scripts/pin_base_images.py --write | tee pins.txt
           {
@@ -48,6 +49,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
           python3 scripts/pin_base_images.py --check
       - name: Open the pin PR
+        shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -60,7 +62,9 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git switch -c "$branch"
           git commit -q -m "chore(docker): pin the base images by digest (#336)" -- Dockerfile
-          git push -f "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "$branch"
+          gh auth setup-git  # the token through gh's credential helper, not on a command line
+          # Rewritten on every run: the branch holds only what this workflow resolved.
+          git push -f origin "$branch"
           open=$(gh pr list --head "$branch" --state open --json number --jq '.[].number')
           if [ -n "$open" ]; then
             echo "PR #$open updated."
@@ -69,7 +73,7 @@ jobs:
           body=$(printf '%s\n' \
             'Pins the Dockerfile base images by their multi-platform index digest, as resolved by the pin-base-images workflow (audit L14, #336):' \
             '' '```' "$(cat pins.txt)" '```' '' \
-            'A PR opened with the workflow token does not start CI: a maintainer closes and reopens it (or pushes to it) so ci-ok runs.')
+            'A PR opened with the workflow token does not start CI: a maintainer closes and reopens it so ci-ok runs. The workflow rewrites this branch on every run, so do not push to it.')
           if ! gh pr create --head "$branch" --base main \
             --title "chore(docker): pin the base images by digest (#336)" --body "$body"; then
             echo "::warning::Could not open the PR (is 'Allow GitHub Actions to create pull requests' off?). The branch $branch holds the pins; the digests are in the job summary."
