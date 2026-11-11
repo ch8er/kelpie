@@ -263,7 +263,7 @@ The plan marks only multi-host and the audit as blocking the release. Several ol
 
 **After 0.1.0a1, next:**
 
-- the audit's remaining medium and low items (M1 → #302; L4, L7–L11, L13, L14; M7 fixed in #321, enforced per machine; M4 in #324; M6 in #327)
+- the audit's remaining medium and low items (M1 → #302; L7–L11; L4 and L13 fixed in #357, L14 in #336; M7 fixed in #321, enforced per machine; M4 in #324; M6 in #327)
 - the rest of #248
 - the open P1 items in the roadmap backlog
 - 10 conversations with farm owners and the naming check
