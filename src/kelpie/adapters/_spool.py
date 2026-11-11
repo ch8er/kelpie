@@ -32,10 +32,11 @@ log = logging.getLogger(__name__)
 
 # Per spool (the live file and ``.1`` together). A hook rotates at 20 MiB, so a spool holds
 # at most about 40 MiB: some 150,000 to 300,000 lines, all kept. Only an agent writing the
-# spool directly, past the rotation, reaches these.
+# spool directly, past the rotation, reaches these. The bytes kept between ticks are capped
+# at twice the per-file read limit: what the old full read took in each tick.
 MAX_LINES = 400_000  # lines parsed per tick, and lines kept between ticks (the newest)
-MAX_RUN_CALLS = 20_000  # tool calls kept per run or session (the newest), each snapshot
-READ_BLOCK = 1024 * 1024  # bytes read at a time
+MAX_RUN_CALLS = 20_000  # tool calls per named run or session in a snapshot (the newest)
+READ_BLOCK = 256 * 1024  # bytes read (and split into lines) at a time
 HEAD = 256  # bytes of a file's start remembered, to tell a new file on a reused inode
 
 
@@ -165,6 +166,7 @@ class _File[T: _Item]:
     head: bytes = b""  # its first bytes, as read
     skipping: bool = False  # in a line too long (or cut by a skip) whose end is not read yet
     items: list[T] = field(default_factory=list)  # its parsed lines, in file order
+    sizes: list[int] = field(default_factory=list)  # each one's bytes in the file
 
 
 @dataclass(slots=True)
@@ -183,12 +185,17 @@ class SpoolCache[T: _Item]:
     except that past ``limit`` new bytes in a file the newest ``limit`` are read, not the
     oldest.
 
-    Agents can append to the spool without bound, so three caps keep a tick's time and
-    memory bounded, each counted in :attr:`dropped` and logged once: at most ``limit`` new
-    bytes read per file and tick (the newest), ``max_lines`` lines parsed per tick and kept
-    between ticks (the newest), and ``max_run_calls`` tool calls (``capped`` items) per run
-    or session in what a call returns (the newest; anything else, such as a session's first
-    line, is always kept). A spool the hooks rotate reaches none of them.
+    Agents can append to the spool without bound, so caps keep a tick's time and memory
+    bounded, each counted in :attr:`dropped` and logged once: at most ``limit`` new bytes
+    read per file and tick (the newest); ``max_lines`` lines parsed per tick, and kept
+    between ticks with at most ``2 * limit`` bytes of lines (the newest); and
+    ``max_run_calls`` tool calls (``capped`` items) per named run or session in what a call
+    returns (the newest; a run's first line and anything not ``capped`` are always kept;
+    lines naming no run are not capped this way). A spool the hooks rotate reaches none of
+    them. ``dropped["run_calls"]`` is the count left out of the latest call (it applies to
+    each call afresh); the others add up.
+
+    One cache serves one control loop (no lock: snapshots are taken one at a time).
     """
 
     name: str
@@ -203,15 +210,16 @@ class SpoolCache[T: _Item]:
     _floor: datetime | None = None
     _files: dict[tuple[int, int], _File[T]] = field(default_factory=dict)
     _warned: set[str] = field(default_factory=set)
+    _partial: bytes | None = None  # the last file's unterminated line, from _read
 
     def items(self, spool: Path | None, cutoff: datetime) -> list[T]:
         """The spool's parsed lines dated at or after ``cutoff``, in file order (the rotated
         file first)."""
+        if spool is None:
+            return []  # a copy without a spool (a board-only reader) leaves the cache alone
         if spool != self._spool or (self._floor is not None and cutoff < self._floor):
             self._files.clear()
         self._spool, self._floor = spool, cutoff
-        if spool is None:
-            return []
         rotated = spool.with_name(spool.name + ".1")
         seen: list[tuple[_File[T], bytes | None]] = []  # with its unterminated last line
         keys: set[tuple[int, int]] = set()
@@ -230,32 +238,37 @@ class SpoolCache[T: _Item]:
                 state = self._files.get(key)
                 if state is None or not self._same(fd, state, info.st_size):
                     state = self._files[key] = _File()
-                lines, partial = self._read(fd, state, info.st_size)
+                read += self._read(fd, state, info.st_size, fresh, len(seen))
+                partial = self._partial
             except OSError:
                 continue
             finally:
                 os.close(fd)
             keys.add(key)
-            fresh.extend((len(seen), line) for line in lines)
             seen.append((state, partial))
-            read += len(lines)
         if read > len(fresh):
             self._drop("lines", read - len(fresh), "parsed in one tick")
         for index, line in fresh:
             if (item := self.parse(line.decode("utf-8", "replace"), cutoff)) is not None:
-                seen[index][0].items.append(item)
+                state = seen[index][0]
+                state.items.append(item)
+                state.sizes.append(len(line) + 1)
         self._files = {k: f for k, f in self._files.items() if k in keys}
-        kept = 0
+        kept, held = 0, 0
         for state, _ in seen:
-            state.items = [item for item in state.items if item.at >= cutoff]
+            keep = [i for i, item in enumerate(state.items) if item.at >= cutoff]
+            if len(keep) < len(state.items):
+                state.items = [state.items[i] for i in keep]
+                state.sizes = [state.sizes[i] for i in keep]
             kept += len(state.items)
+            held += sum(state.sizes)
         for state, _ in seen:  # the oldest go first: the rotated file's head
-            if kept <= self.max_lines:
-                break
-            cut = min(kept - self.max_lines, len(state.items))
-            del state.items[:cut]
-            kept -= cut
-            self._drop("lines", cut, "kept between ticks")
+            cut = 0
+            while cut < len(state.items) and (kept > self.max_lines or held > 2 * self.limit):
+                kept, held, cut = kept - 1, held - state.sizes[cut], cut + 1
+            if cut:
+                del state.items[:cut], state.sizes[:cut]
+                self._drop("kept", cut, "kept between ticks")
         out: list[T] = []
         for state, partial in seen:
             out.extend(state.items)
@@ -272,16 +285,25 @@ class SpoolCache[T: _Item]:
             return False
         return not state.head or os.pread(fd, len(state.head), 0) == state.head
 
-    def _read(self, fd: int, state: _File[T], size: int) -> tuple[list[bytes], bytes | None]:
-        """The whole lines appended since ``state.offset`` (overlong ones skipped), and the
-        unterminated last line (None when there is none or it is too long). Advances
+    def _read(
+        self,
+        fd: int,
+        state: _File[T],
+        size: int,
+        into: deque[tuple[int, bytes]],
+        index: int,
+    ) -> int:
+        """Append ``(index, line)`` to ``into`` for each whole line appended since
+        ``state.offset`` (empty and overlong ones skipped; ``into`` keeps only the newest, so
+        a flood of short lines never piles up). Returns how many; the unterminated last line
+        goes to ``self._partial`` (None when there is none or it is too long). Advances
         ``state.offset`` past the whole lines."""
         start = state.offset
         if size - start > self.limit:
             self._drop("bytes", size - self.limit - start, "read in one tick")
             start = size - self.limit
             state.skipping = os.pread(fd, 1, start - 1) != b"\n"  # mid-line: from the next
-        lines: list[bytes] = []
+        count = 0
         buf = b""
         pos = start
         while pos < size:
@@ -294,45 +316,53 @@ class SpoolCache[T: _Item]:
             for raw in parts:
                 if state.skipping:
                     state.skipping = False
-                elif len(raw) < self.max_line:  # with its newline, at most max_line
-                    lines.append(raw)
+                elif raw and len(raw) < self.max_line:  # with its newline, at most max_line
+                    into.append((index, raw))
+                    count += 1
             if len(buf) > self.max_line:
                 buf, state.skipping = b"", True
         state.offset = pos - len(buf)
         if not state.head and state.offset > 0:
             state.head = os.pread(fd, min(HEAD, state.offset), 0)
-        partial = buf if buf and not state.skipping else None
-        return lines, partial
+        self._partial = buf if buf and not state.skipping else None
+        return count
 
     def _cap_runs(self, items: list[T]) -> list[T]:
-        """At most ``max_run_calls`` capped items per run or session: its newest."""
-        counts = Counter(item.session_id for item in items if self.capped(item))
+        """At most ``max_run_calls`` capped items per named run or session (its newest; its
+        first line is always kept)."""
+        counts = Counter(i.session_id for i in items if i.session_id is not None and self.capped(i))
         over = {run: n - self.max_run_calls for run, n in counts.items() if n > self.max_run_calls}
+        self.dropped["run_calls"] = 0
         if not over:
             return items
         out: list[T] = []
+        first: set[str] = set()
         for item in items:
             run = item.session_id
-            if run in over and over[run] > 0 and self.capped(item):
+            if run is not None and run not in first:
+                first.add(run)  # the run's start stays where it was
+            elif run in over and over[run] > 0 and self.capped(item):
                 over[run] -= 1
-                self._drop("run_calls", 1, "per run or session")
                 continue
             out.append(item)
+        self._drop("run_calls", len(items) - len(out), "per run or session in a snapshot")
         return out
 
     def _drop(self, cap: str, count: int, what: str) -> None:
         self.dropped[cap] += count
+        caps = {
+            "lines": f"{self.max_lines} lines",
+            "kept": f"{self.max_lines} lines or {2 * self.limit} bytes",
+            "bytes": f"{self.limit} bytes",
+            "run_calls": f"{self.max_run_calls} tool calls",
+        }
         if cap not in self._warned:
             self._warned.add(cap)
             log.warning(
                 "%s: the spool is over Kelpie's cap of %s %s; the oldest are left out "
-                "(%d so far; logged once)",
+                "(%d this time; logged once)",
                 self.name,
-                {
-                    "lines": f"{self.max_lines} lines",
-                    "bytes": f"{self.limit} bytes",
-                    "run_calls": f"{self.max_run_calls} tool calls",
-                }[cap],
+                caps[cap],
                 what,
-                self.dropped[cap],
+                count,
             )

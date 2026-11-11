@@ -24,6 +24,7 @@ from kelpie.adapters.claude_code import adapter as claude_code
 from kelpie.adapters.hermes import adapter as hermes
 from kelpie.adapters.hermes.boards import HermesBoards
 from kelpie.adapters.openclaw import adapter as openclaw
+from kelpie.core.model import SpanKind
 
 NOW = datetime(2026, 11, 11, 12, tzinfo=UTC)
 CUTOFF = NOW - timedelta(hours=24)
@@ -221,8 +222,8 @@ def test_lines_per_tick_keep_the_newest(spool: Path, caplog: pytest.LogCaptureFi
         assert parse.calls == 10
         append(spool, *(text(n) for n in range(25, 30)))
         assert numbers(c.items(spool, CUTOFF)) == list(range(20, 30))  # kept between ticks
-    assert c.dropped["lines"] == 15 + 5
-    assert sum("spool is over" in r.getMessage() for r in caplog.records) == 1
+    assert (c.dropped["lines"], c.dropped["kept"]) == (15, 5)
+    assert sum("spool is over" in r.getMessage() for r in caplog.records) == 2  # each cap
 
 
 def test_bytes_per_tick_keep_the_newest(spool: Path) -> None:
@@ -257,6 +258,78 @@ def test_a_normal_spool_reaches_no_cap(spool: Path) -> None:
     assert hermes.MAX_SPOOL_READ >= 20 * 1024 * 1024
 
 
+def test_bytes_kept_between_ticks_are_capped(spool: Path) -> None:
+    """Long lines: the bytes kept stay within twice the read limit, the oldest going first."""
+    long = [
+        json.dumps({"at": NOW.timestamp(), "n": n, "x": "y" * 150}) + "\n" for n in range(10, 40)
+    ]
+    c = cache(limit=len(long[0]) * 5)  # all the same length
+    for n in range(0, 30, 5):
+        append(spool, *long[n : n + 5])
+        got = numbers(c.items(spool, CUTOFF))
+    assert got == list(range(30, 40))
+    assert c.dropped["kept"] == 20
+
+
+def test_a_flood_of_tiny_lines_is_not_held_whole(spool: Path) -> None:
+    """Empty and tiny lines stream through the per-tick cap: never a list of all of them."""
+    spool.write_bytes(b"\n" * 2_000_000 + b"ab\n" * 1_000_000 + text(1).encode())
+    c = cache(limit=16 << 20, max_lines=1_000)
+    tracemalloc.start()
+    try:
+        assert numbers(c.items(spool, CUTOFF)) == [1]
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+    assert peak < 16 << 20  # a few blocks and the newest 1,000 lines, not 3 million lines
+    assert c.dropped["lines"] == 1_000_000 + 1 - 1_000
+
+
+def test_lines_naming_no_run_are_not_capped_per_run(spool: Path) -> None:
+    """Hermes lines without a run id (interactive use, older plugins) share no cap."""
+    c = cache(max_run_calls=3)
+    append(spool, *(text(n, s=None) for n in range(10)))  # type: ignore[arg-type]
+    assert numbers(c.items(spool, CUTOFF)) == list(range(10))
+
+
+def test_a_hard_link_is_read_once_and_an_old_rotated_file_is_skipped(spool: Path) -> None:
+    rotated = spool.with_name(spool.name + ".1")
+    append(spool, text(1))
+    os.link(spool, rotated)
+    c = cache()
+    assert numbers(c.items(spool, CUTOFF)) == [1]
+    rotated.unlink()
+    append(rotated, text(0, NOW - timedelta(hours=30)))
+    old = (NOW - timedelta(hours=30)).timestamp()
+    os.utime(rotated, (old, old))
+    assert numbers(c.items(spool, CUTOFF)) == [1] == fresh(spool)
+
+
+def test_a_reader_without_a_spool_leaves_the_cache_alone(spool: Path) -> None:
+    parse = Parser()
+    c = cache(parse)
+    append(spool, text(1))
+    c.items(spool, CUTOFF)
+    assert c.items(None, CUTOFF) == []
+    assert numbers(c.items(spool, CUTOFF)) == [1]
+    assert parse.calls == 1
+
+
+def test_a_normal_hermes_spool_keeps_every_span(spool: Path) -> None:
+    """Under the rotation size, run-less and run lines alike: what the old full read gave."""
+    now = datetime.now(UTC)
+    lines = [
+        json.dumps({"type": "tool", "at": now.timestamp() - 3000 + i / 20, "task_id": "t_1"}) + "\n"
+        for i in range(30_000)
+    ] + [hermes_line(i, now.timestamp() - 1000 + i / 30) for i in range(30_000)]
+    append(spool, *lines)
+    assert spool.stat().st_size < 20 * 1024 * 1024
+    a = hermes.HermesAdapter(db_path=spool.parent / "kanban.db", spool=spool)
+    spans = a._spans(now - a.lookback, now + hermes.FUTURE_SKEW)
+    assert sum(1 for s in spans if s.kind is SpanKind.TOOL) == 60_000
+    assert not a.spool_cache or not +a.spool_cache.dropped
+
+
 # --- the adapters -------------------------------------------------------------------------
 
 
@@ -284,6 +357,19 @@ def test_hermes_line_dated_ahead_counts_once_it_is_current(spool: Path) -> None:
     tools = lambda at: [s for s in a._spans(at - a.lookback, at + hermes.FUTURE_SKEW) if s.tool]  # noqa: E731
     assert tools(now) == []
     assert len(tools(now + timedelta(minutes=6))) == 1
+
+
+def test_claude_code_line_dated_ahead_counts_once_it_is_current(tmp_path: Path) -> None:
+    now = datetime.now(UTC)
+    spool = tmp_path / "spool.jsonl"
+    sid = "0b5c6f7e-0000-4000-8000-000000000001"
+    line = {"type": "tool", "session_id": sid, "v": 2, "tool": "Bash"}
+    append(spool, json.dumps({**line, "at": (now + timedelta(minutes=10)).timestamp()}) + "\n")
+    cc = claude_code.ClaudeCodeAdapter(
+        tasks_dir=tmp_path / "tasks", spool=spool, stop_dir=None, process_check=lambda p, r: None
+    )
+    assert cc.snapshot(now).sessions == ()
+    assert len(cc.snapshot(now + timedelta(minutes=6)).sessions) == 1
 
 
 def test_hermes_boards_keep_one_cache(tmp_path: Path) -> None:
@@ -360,7 +446,7 @@ def test_a_large_spool_is_bounded_in_time_and_memory(
     with caplog.at_level(logging.WARNING):
         spans = a._spans(now - a.lookback, now + hermes.FUTURE_SKEW)
     assert parse.calls == 20_000
-    assert sum(1 for s in spans if s.tool) == 5 * 2_000  # five runs, each capped
+    assert sum(1 for s in spans if s.tool) == 5 * 2_000  # five runs: each its first and newest
     assert a.spool_cache.dropped["lines"] == 100_000
     append(spool, *(hermes_line(i, now.timestamp()) for i in range(100)))
     parse.calls = 0
@@ -375,4 +461,5 @@ def test_a_large_spool_is_bounded_in_time_and_memory(
     assert parse.calls == 100
     assert took < 5  # seconds, under tracemalloc on a slow runner; about 0.1 s untraced
     assert peak < 64 * 1024 * 1024
-    assert sum("spool is over" in r.getMessage() for r in caplog.records) == 2  # lines, runs
+    logged = sum("spool is over" in r.getMessage() for r in caplog.records)
+    assert logged == 3  # lines parsed, lines kept, calls per run: once each
