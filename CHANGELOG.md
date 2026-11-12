@@ -10,6 +10,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ### Added
 
+- The Grafana dashboard links to traces in Langfuse (#455). Set the new **Langfuse traces
+  URL** variable to your project's traces page, and the "Traces in Langfuse" dashboard
+  link and the trace panels' links open it. The variable is empty by default; see
+  docs/dashboard.md.
 - Multi-host: `kelpie agent`'s OTLP relay forwards Claude Code's cost and token metrics
   (`/v1/metrics`) to the hub under the agent's token, as it does spans; the hub ingests
   them with `/v1/metrics`' checks and puts every point's session and task in the agent's

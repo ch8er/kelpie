@@ -668,7 +668,7 @@ open in Langfuse.
 - [x] `/metrics`: idle time per role: `kelpie_role_idle_seconds_total` (agent-seconds idle, tick to tick, gaps over 10 minutes or 3 intervals not counted), with a dashboard panel (#381)
 - [x] `/metrics`: idle agents per role (count)
 - [x] Grafana dashboard JSON provisioned by docker compose
-- [ ] Dashboard links to traces in Langfuse when configured (not started)
+- [x] Dashboard links to traces in Langfuse when configured (a "Langfuse traces URL" variable, empty by default; the dashboard link and the trace panels' links open it, #455)
 
 ### core: budgets and spend — thresholds, burn-rate forecast, spend sources
 labels: P0, week-2, area:core
