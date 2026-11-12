@@ -913,16 +913,18 @@ decides otherwise: M1 (forged spans or spool lines can make rule 10 stop another
 a decision for the owner, see #275), M4–M7 and L4, L5, L7–L11, L13, L14 (Dockerfile digests,
 the release job's checkout). Verdict: safe to tag 0.1.0a1 once M1 is decided and the release
 notes say `kelpie serve` stays on loopback or behind a limiting proxy until M5 is fixed.
+Since then (0.1.0a1–a3): M1 → #302 (per-agent tokens, opt-in; residual risk documented), M4–M7
+and L4, L5, L7–L11, L13, L14 fixed (#321, #322, #324, #327, #329, #330, #314, #357, #336).
 
 **Acceptance criteria**
 - [x] Subprocess calls (Hermes CLI, git): no injection, minimal environment, no token leakage (#275)
 - [x] No SQL built from strings with untrusted data (#275; L1, the read-only URI, fixed in #280)
 - [x] Secrets never reach logs, metrics, `kelpie status`, errors, reports or the LLM section (audited in #275; L6 fixed in #280; L7 and L8, the command-redaction gaps, in #322; what redaction still cannot see, `echo` behind an unknown launcher and a bare secret word with no credential word before it, is documented in privacy.md; ticked in #449)
 - [x] Outbound HTTP: no redirects with credentials, TLS verified, response size limits (#275; M3 and L12 fixed in #279; M4, the Linear client's deadline, in #324)
-- [x] OTLP and `/metrics` endpoints: auth, bind address, body limits (audited in #275; M2 fixed in #279, M5 in #309; M1 by per-agent traces tokens, #302; L10 in #329, L11 in #330; ticked in #449)
+- [x] OTLP and `/metrics` endpoints: auth, bind address, body limits (audited in #275; M2 fixed in #279, M5 in #309; M1 by per-agent traces tokens, opt-in, #302 and #340, residual risk in security.md "Known residual risks"; L10 in #329, L11 in #330; ticked in #449)
 - [x] File paths from config and data: no traversal, safe symlink handling (H1, H2 fixed in #278)
-- [x] Report and LLM root-cause section: prompt injection from agent text, what data leaves the host (#275; L9, no length cap on agent reasons, open)
-- [x] Clear fixes as small PRs (#278, #279, #280, #321, #322, #324, #327, #329, #330); design questions as issues (M1 → #302; L4, L13, L14 → #336; both closed; ticked in #449)
+- [x] Report and LLM root-cause section: prompt injection from agent text, what data leaves the host (#275; L9, no length cap on agent reasons, fixed in #329)
+- [x] Clear fixes as small PRs (#278, #279, #280, #314, #321, #322, #324, #327, #329, #330, #340, #357); design questions as issues (M1 → #302; L4, L13, L14 → #336; both closed; ticked in #449)
 - [x] `docs/security.md`: threat model, what Kelpie trusts, what it never stores (in place; updated by the audit in #279)
 
 ### deploy: `kelpie demo` — see Kelpie work without a farm
