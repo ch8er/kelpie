@@ -47,6 +47,7 @@ from kelpie.remote.protocol import (
     depth_ok,
     encode_action,
     namespace_span,
+    namespaced,
 )
 
 log = logging.getLogger(__name__)
@@ -55,7 +56,9 @@ log = logging.getLogger(__name__)
 PENDING_TTL = timedelta(hours=1)
 MAX_REPLY_BYTES = 512 * 1024  # of a poll reply (the agent reads at most 1 MiB)
 # Authenticated requests in flight per agent, by kind.
-IN_FLIGHT = {"report": 1, "poll": 2, "traces": 2}
+# Trace and metric exports share one budget ("otlp"): together they stay at half of ingest's
+# decode slots at the default ``max_concurrent`` (4), so one agent cannot hold them all.
+IN_FLIGHT = {"report": 1, "poll": 2, "otlp": 2}
 MAX_POLL_BYTES = 2 * 1024 * 1024  # a poll carries results only
 _LOG_EVERY = 60.0  # seconds between refusal warnings per peer
 
@@ -165,9 +168,10 @@ class Hub:
     # --- agent side -----------------------------------------------------------------------
 
     def enter(self, agent: str, kind: str) -> None:
-        """Count a request of ``kind`` (report, poll, traces) in flight for the agent; Busy
-        over :data:`IN_FLIGHT`. Authenticated requests are limited here, per agent, so one
-        token cannot hold more than a few threads. Pair with :meth:`leave`."""
+        """Count a request of ``kind`` (report, poll, otlp: trace and metric exports
+        together) in flight for the agent; Busy over :data:`IN_FLIGHT`. Authenticated
+        requests are limited here, per agent, so one token cannot hold more than a few
+        threads. Pair with :meth:`leave`."""
         with self._cond:
             state = self._agents[agent]
             if state.in_flight[kind] >= IN_FLIGHT[kind]:
@@ -428,6 +432,8 @@ def _key(action: WireAction) -> str:
 
 
 TRACES_PATH = "/v1/traces"
+METRICS_PATH = "/v1/metrics"  # Claude Code's cost and token metrics (kelpie.traces.metrics)
+OTLP_KINDS = {TRACES_PATH: "traces", METRICS_PATH: "metrics"}  # for logs and labels
 
 
 class TraceSink(Protocol):
@@ -440,6 +446,15 @@ class TraceSink(Protocol):
         *,
         authenticated: bool = False,
         rewrite: Callable[[Span], Span] | None = None,
+    ) -> Any: ...
+
+    def handle_metrics(
+        self,
+        headers: Any,
+        read: Callable[[int], bytes],
+        *,
+        authenticated: bool = False,
+        rename: Callable[[str], str] | None = None,
     ) -> Any: ...
 
 
@@ -521,7 +536,7 @@ class HubHandler(GuardedHandler):
     def do_POST(self) -> None:
         self.close_connection = True  # one request per connection
         path = self.path.split("?")[0]
-        if path not in (REPORT_PATH, ACTIONS_PATH, TRACES_PATH):
+        if path not in (REPORT_PATH, ACTIONS_PATH, TRACES_PATH, METRICS_PATH):
             self._json(404, {"error": "not found"})
             return
         hub = self.server.hub
@@ -534,12 +549,13 @@ class HubHandler(GuardedHandler):
             self._json(401, {"error": "missing or invalid bearer token"})
             return
         self.admit()
-        kinds = {REPORT_PATH: "report", ACTIONS_PATH: "poll", TRACES_PATH: "traces"}
+        kinds = {REPORT_PATH: "report", ACTIONS_PATH: "poll", TRACES_PATH: "otlp"}
+        kinds[METRICS_PATH] = "otlp"
         kind = kinds[path]
         try:
             hub.enter(agent, kind)
         except Busy:
-            if kind == "traces":  # exporters retry 503 (OTLP/HTTP), not 409
+            if path in OTLP_KINDS:  # exporters retry 503 (OTLP/HTTP), not 409
                 self._json(503, {"error": "busy, retry later"}, {"Retry-After": "1"})
                 return
             self.server.warn_once(
@@ -551,32 +567,43 @@ class HubHandler(GuardedHandler):
             self._json(409, {"error": f"too many {kind} requests in flight"})
             return
         try:
-            if path == TRACES_PATH:
-                self._traces(agent)
+            if path in OTLP_KINDS:
+                self._otlp(agent, path)
             else:
                 self._handle(hub, agent, path)
         finally:
             hub.leave(agent, kind)
 
-    def _traces(self, agent: str) -> None:
-        """An OTLP export the agent relayed: ingest's own limits apply, and every span goes
-        into the agent's namespace before it is stored."""
+    def _otlp(self, agent: str, path: str) -> None:
+        """An OTLP export the agent relayed (spans, or Claude Code's metrics): ingest's own
+        limits apply, and every span, or every metric point's session and task, goes into
+        the agent's namespace before it is stored. An agent can therefore only add to its
+        own host's sessions, whatever ids its exporters send."""
         sink = self.server.traces
+        kind = OTLP_KINDS[path]
         if sink is None:
-            self._json(404, {"error": "traces are not enabled on this server"})
+            self._json(404, {"error": "OTLP ingest is not enabled on this server"})
             return
         try:
-            reply = sink.handle(
-                self.headers,
-                self.read_body,
-                authenticated=True,
-                rewrite=partial(namespace_span, agent),
-            )
+            if path == METRICS_PATH:
+                reply = sink.handle_metrics(
+                    self.headers,
+                    self.read_body,
+                    authenticated=True,
+                    rename=partial(namespaced, agent),
+                )
+            else:
+                reply = sink.handle(
+                    self.headers,
+                    self.read_body,
+                    authenticated=True,
+                    rewrite=partial(namespace_span, agent),
+                )
         except OSError as exc:
-            log.info("hub: trace export from agent %s aborted: %s", agent, exc)
+            log.info("hub: %s export from agent %s aborted: %s", kind, agent, exc)
             return
         except Exception:
-            log.exception("hub: trace ingest failed")
+            log.exception("hub: %s ingest failed", kind)
             self._json(500, {"error": "internal error"})
             return
         self.send_response(reply.status)

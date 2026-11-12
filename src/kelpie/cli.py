@@ -542,7 +542,7 @@ def _agent(settings: Settings) -> int:
     if relay is not None:
         threading.Thread(target=relay.serve_forever, name="kelpie-relay", daemon=True).start()
         host, port = config.relay or ("", 0)
-        log.info("OTLP relay on http://%s:%d/v1/traces", host, port)
+        log.info("OTLP relay on http://%s:%d (/v1/traces, /v1/metrics)", host, port)
     try:
         agent.run()
     finally:

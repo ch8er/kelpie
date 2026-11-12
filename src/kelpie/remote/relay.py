@@ -1,8 +1,9 @@
 """The agent's OTLP relay: exporters on an agent host send trace exports to
 ``127.0.0.1:4318/v1/traces`` (the usual OTLP/HTTP port; in single-host mode they go to
-Kelpie's own 9464 instead); the relay forwards
-each export unchanged to the hub's ``/v1/traces`` under the agent's token, and hands the
-hub's answer back. The hub puts the spans in the agent's namespace.
+Kelpie's own 9464 instead), and Claude Code its cost and token metrics to ``/v1/metrics``
+on the same port; the relay forwards each export unchanged to the same path on the hub
+under the agent's token, and hands the hub's answer back. The hub puts the spans, and the
+metric points' sessions and tasks, in the agent's namespace.
 
 It listens on loopback only and asks nothing of local senders, like the hooks' spool:
 anything on the host that can reach it can add spans to this host's traces, which is what
@@ -29,6 +30,8 @@ from kelpie.httpguard import host_allowed
 log = logging.getLogger(__name__)
 
 PATH = "/v1/traces"
+METRICS_PATH = "/v1/metrics"
+PATHS = frozenset({PATH, METRICS_PATH})  # forwarded to the same path on the hub
 MAX_REPLY_BYTES = 64 * 1024
 MAX_CONNECTIONS = 16
 
@@ -109,7 +112,8 @@ class RelayHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         self.close_connection = True
-        if self.path.split("?")[0] != PATH:
+        path = self.path.split("?")[0]
+        if path not in PATHS:
             self._reply(404, b"not found\n", "text/plain")
             return
         if self.headers.get("Origin") is not None:
@@ -143,7 +147,7 @@ class RelayHandler(BaseHTTPRequestHandler):
         try:
             response = self.server.post(
                 self.server.target,
-                PATH,
+                path,
                 headers,
                 body,
                 self.server.timeout_seconds,
@@ -151,7 +155,8 @@ class RelayHandler(BaseHTTPRequestHandler):
                 context=self.server.context,
             )
         except net.RequestError as exc:
-            log.warning("relay: forwarding spans to the hub failed: %s", exc.detail)
+            what = "metrics" if path == METRICS_PATH else "spans"
+            log.warning("relay: forwarding %s to the hub failed: %s", what, exc.detail)
             self._reply(503, b"hub unreachable, retry later\n", "text/plain", {"Retry-After": "5"})
             return
         content_type = response.headers.get("content-type", "application/octet-stream")

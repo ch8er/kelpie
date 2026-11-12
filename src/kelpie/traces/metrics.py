@@ -31,7 +31,7 @@ from __future__ import annotations
 import json
 import math
 from collections import Counter
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field, replace
 from typing import Any
 
@@ -281,6 +281,13 @@ def merged(points: Iterable[MetricPoint]) -> list[MetricPoint]:
             else replace(old, value=old.value + p.value, task_id=old.task_id or p.task_id)
         )  # fmt: skip
     return list(found.values())
+
+
+def renamed(point: MetricPoint, rename: Callable[[str], str]) -> MetricPoint:
+    """``point`` with its session and task ids mapped by ``rename`` (the multi-host hub's
+    namespace for the agent that relayed it). The model is a model, not an id: kept."""
+    task = None if point.task_id is None else rename(point.task_id)
+    return replace(point, session_id=rename(point.session_id), task_id=task)
 
 
 def plausible(point: MetricPoint, oldest_ns: int, latest_ns: int) -> bool:

@@ -1,7 +1,9 @@
 """``kelpie serve`` with ``[hub]``: refused next to in-process adapters; otherwise the hub
 listens, an agent's board is merged into the tick and actions route back to it."""
 
+import http.client
 import socket
+import threading
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -11,6 +13,7 @@ from kelpie.app import ConfigError, build_app, load_settings
 from kelpie.remote.agent import Agent
 from kelpie.remote.config import AgentSettings
 from kelpie.remote.hub import HubService
+from kelpie.server import make_server
 from tests.remote.test_hub import BoardAdapter
 
 TOKEN = "0123456789abcdef" * 3
@@ -65,6 +68,17 @@ def test_an_agents_board_is_merged_and_actions_route_back(
     try:
         assert app.engine.fallback is False
         assert app.ingest is None  # spans come through agents only
+        main = make_server("127.0.0.1", 0, app.metrics, app.ingest)
+        threading.Thread(target=main.serve_forever, daemon=True).start()
+        try:  # neither OTLP path is open on the main port with [hub]
+            for path in ("/v1/traces", "/v1/metrics"):
+                conn = http.client.HTTPConnection("127.0.0.1", main.server_address[1], timeout=5)
+                conn.request("POST", path, body=b"{}", headers={"Content-Type": "application/json"})
+                assert conn.getresponse().status == 404
+                conn.close()
+        finally:
+            main.shutdown()
+            main.server_close()
         (service,) = [s for s in app.services if isinstance(s, HubService)]
         service.start()
         settings = AgentSettings(

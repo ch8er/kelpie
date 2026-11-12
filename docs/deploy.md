@@ -152,7 +152,9 @@ OTLP endpoint. The relay forwards
 the spans to the hub under the agent's token. With a hub, the main port's `/v1/traces` is
 off: spans whose ids no agent token vouches for could be filed under any machine. If something
 else already listens on 4318 (an OpenTelemetry collector), set `[agent] relay` to another
-loopback port, or `relay = false` when the server has traces off.
+loopback port, or `relay = false` when the server has traces off. Claude Code's cost and
+token metrics go to the same relay: `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT=http://127.0.0.1:4318/v1/metrics`,
+again without a token.
 
 **7. Resources.** node_exporter runs on both machines and Prometheus scrapes both, as in
 single-host mode (Prometheus reaching the laptop needs a private network such as Tailscale;
