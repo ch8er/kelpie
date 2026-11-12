@@ -86,6 +86,9 @@ from kelpie.core.conditions import (
     widen,
 )
 from kelpie.core.config import EngineConfig, Mode
+from kelpie.core.delegation import RULE as DELEGATION
+from kelpie.core.delegation import Policy
+from kelpie.core.delegation import history as delegation_history
 from kelpie.core.engine import Engine
 from kelpie.core.host_sleep import SleepWatch
 from kelpie.core.ledger import LedgerStore, MemoryLedgerStore
@@ -1370,7 +1373,11 @@ def merged_snapshot(
                 # run-once) and without [connectors.llm_quotas] they stay unchecked
                 configured = [p.name for p in getattr(providers, "providers", ())]
                 merged = check_quota_reset(merged, configured)
-        folded = merge_hook_spans(merged.spans)
+        # A scoped token's span folds a hook span only into a span it may report (#374),
+        # judged against this tick's board.
+        if scopes is not None:
+            scopes.refresh(merged)
+        folded = merge_hook_spans(merged.spans, scopes.may_fold if scopes is not None else None)
         metrics.hook_spans_merged(folded.merged)
         merged = replace(merged, spans=folded.spans)
         if scopes is not None and spans is not None:  # after folding: a fold moves sessions
@@ -2066,10 +2073,23 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
             "that a branch has no open PR (or set wip_without_pr_check = true where task "
             "branches never carry PRs)"
         )
+    if getattr(checkpoints, "wip_ci", None) == "draft_pr" and any(
+        isinstance(a, hermes.HermesAdapter | HermesBoards) for a in adapters
+    ):
+        log.warning(
+            "checkpoints wip_ci = draft_pr: Hermes commits WIP locally and never pushes, so "
+            "its WIP commits are refused and become alerts; use wip_ci = skip_ci"
+        )
     for adapter in adapters:  # Kelpie's park and stop markers are issued on the app's clock
         if isinstance(adapter, hermes.HermesAdapter | HermesBoards):
             adapter.clock = clock
     _refuse_unimplemented_actions(settings, loaded, adapters)
+    _check_operators(settings, delegation_policy(loaded))
+    if settings.hub is not None and delegation_policy(loaded) is not None:
+        raise ConfigError(
+            "[engine.rules.delegation] needs the boards' adapters inside kelpie serve: with "
+            "[hub] the boards are the agents', and delegation is not supported there yet"
+        )
     hub = _build_hub(settings, adapters, clock)
     registry = condition_registry(settings, clock)
     enrich, connectors = connector_steps(settings, metrics, clock, registry=registry)
@@ -2162,6 +2182,7 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
             instructions=instruction_watch(settings, adapters),
         )
         loop = ControlLoop(engine, source, metrics, housekeeping=ledger_retention.maybe_start)
+        _with_delegation(loop, loaded, store)
         app = App(
             settings,
             loaded,
@@ -2243,7 +2264,12 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
         resources=reader,
         enrich=enrich,
         providers=quotas,
-        offenders=OffenderWatch(span_store, traces.outputs, settings.report.tz),
+        offenders=OffenderWatch(
+            span_store,
+            traces.outputs,
+            settings.report.tz,
+            pairable=guard.may_fold if guard is not None else None,
+        ),
         remote=remote,
         snoozes=snooze_reader(settings, store),
         instructions=instruction_watch(settings, adapters),
@@ -2255,6 +2281,7 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
         metrics,
         housekeeping=_both(retention.maybe_start, ledger_retention.maybe_start),
     )
+    _with_delegation(loop, loaded, store)
     alerts = _start_alerts(settings, engine, metrics, store, clock, loop)
     if hub is not None:
         # A span whose ids no agent token vouches for could be forged into any host's
@@ -2473,6 +2500,76 @@ def _answer_runner(
             '[alerts] answer buttons need a database: set [storage] path (not ":memory:")'
         )
     return AnswerRunner(store, engine, answer_boards(settings), settings.engine.dry_run, clock)
+
+
+def delegation_policy(loaded: LoadedRules) -> Policy | None:
+    """The delegation policy of the loaded rules (#347), or None when nothing is delegated."""
+    rule = next((r for r in loaded.rules if r.name == DELEGATION), None)
+    policy = getattr(rule, "policy", None)
+    return policy if isinstance(policy, Policy) and policy.enabled else None
+
+
+def _check_operators(settings: Settings, policy: Policy | None) -> None:
+    """Refuse a ``delegate_to`` operator that is a person or Kelpie itself on Hermes (its
+    ``human_owners``, Kelpie's ``author``, Hermes' default CLI author ``user``): a card
+    could only be refused at act time, after paging someone."""
+    if policy is None or settings.hermes is None:
+        return
+    from kelpie.adapters.hermes.adapter import _PROFILE as HERMES_PROFILE
+    from kelpie.adapters.hermes.adapter import CLI_USER, UNASSIGN_WORDS
+
+    hermes = settings.hermes
+    people = {h.casefold() for h in hermes.human_owners} | {hermes.author.casefold(), CLI_USER}
+    boards = {"hermes", *(b.name for b in hermes.boards)}
+    names = {o.strip().casefold() for b, o in policy.delegate_to.items() if b in boards}
+    if bad := sorted(n for n in names if not HERMES_PROFILE.match(n) or n in UNASSIGN_WORDS):
+        raise ConfigError(f"[engine.rules.delegation] delegate_to {bad}: not Hermes profile names")
+    if bad := sorted(names & people):
+        raise ConfigError(
+            f"[engine.rules.delegation] delegate_to {bad}: an operator is an agent profile, "
+            "not a human owner, Kelpie or Hermes' default CLI author (user)"
+        )
+
+
+def _with_delegation(loop: ControlLoop, loaded: LoadedRules, store: LedgerStore) -> None:
+    """Fill ``Snapshot.problems``, ``resolved_problems`` and ``delegations`` from the state
+    store and the ledger while a delegation policy is on (#347). A failed read leaves no
+    problems, so nothing is delegated on a history Kelpie could not read (fails closed)."""
+    policy = delegation_policy(loaded)
+    if policy is None:
+        return
+    if not isinstance(store, SqliteLedgerStore):
+        raise ConfigError(
+            '[engine.rules.delegation] needs a database: set [storage] path (not ":memory:")'
+        )
+    source = loop.snapshot_source
+
+    def read() -> Snapshot:
+        snapshot = source()
+        after = snapshot.now - policy.history
+        try:
+            entries = [*store.by_rule(DELEGATION, after), *store.delegated(after)]
+            problems, resolved, events = delegation_history(
+                store.open_states(), store.closed_states(after), entries
+            )
+        except Exception as exc:
+            log.error("delegation history not read: %s; nothing is delegated", type(exc).__name__)
+            return replace(
+                snapshot,
+                problems=(),
+                resolved_problems=(),
+                delegations=(),
+                delegation_read=False,  # the engine holds nothing back
+            )
+        return replace(
+            snapshot,
+            problems=problems,
+            resolved_problems=resolved,
+            delegations=events,
+            delegation_read=True,
+        )
+
+    loop.snapshot_source = read
 
 
 def _with_answers(
@@ -3010,9 +3107,12 @@ def _open_span_store(db_path: Path | None) -> SpanStore:
 
 
 # Rules whose effects on a platform are actions the Hermes adapter carries out: stop, wait
-# (park), wake of a parked task, comment (plus alerts). Update with the adapter.
+# (park), wake of a parked task, comment, a local WIP commit, a delegation card (plus
+# alerts). Update with the adapter.
 HERMES_ACT_RULES = frozenset(
     {
+        "checkpoints",
+        "delegation",
         "loop_breaker",
         "wait_condition",
         "conflict_warning",
@@ -3032,6 +3132,7 @@ _VERBS: dict[ActionKind, str] = {
     ActionKind.REASSIGN: "reassign tasks",
     ActionKind.CLOSE: "close tasks",
     ActionKind.WIP_COMMIT: "make WIP commits",
+    ActionKind.DELEGATE: "hand problems to an operator agent",
     ActionKind.COMMENT: "comment on tasks",
     ActionKind.STOP: "stop runs",
     ActionKind.CANCEL_BUILD: "cancel builds",

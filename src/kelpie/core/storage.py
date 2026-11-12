@@ -610,6 +610,30 @@ class SqliteLedgerStore:
 
         return self._write(write).rowcount > 0
 
+    def by_rule(self, rule: str, after: datetime) -> list[LedgerEntry]:
+        """The entries of ``rule`` newer than ``after``, oldest first (delegation, #347)."""
+        return self._query(
+            f"SELECT {_COLUMNS} FROM actions WHERE rule = ? AND at > ? ORDER BY at, id",
+            (rule, _ts(after)),
+        )
+
+    def delegated(self, after: datetime) -> list[LedgerEntry]:
+        """The alerts the engine held back for an operator agent after ``after`` (#347)."""
+        return self._query(
+            f"SELECT {_COLUMNS} FROM actions WHERE outcome = ? AND at > ? ORDER BY at, id",
+            ("delegated", _ts(after)),
+        )
+
+    def closed_states(self, after: datetime) -> list[tuple[OpenState, datetime]]:
+        """The alert states closed after ``after``, each with when, oldest first."""
+        sql = (
+            f"SELECT {self._STATE_COLUMNS}, closed_at FROM states WHERE closed_at > ?"
+            " ORDER BY closed_at, rowid_"
+        )
+        with self._lock:
+            rows = self._db.execute(sql, (_ts(after),)).fetchall()
+        return [(open_state(r), datetime.fromisoformat(r["closed_at"])) for r in rows]
+
     def answers(self, after: datetime) -> list[LedgerEntry]:
         """The chat answer entries (#300) newer than ``after``, oldest first."""
         return self._query(

@@ -1,0 +1,39 @@
+id: "08-delegate-fixed-verified"
+incident: 8
+title: "Delegation: a delegated stale block is fixed, and Kelpie verifies it by its own check"
+description: >
+  ops-1 got a card about the stale block on T-841 at 12:00 and cleared the block; stale_blocks
+  stopped reporting it and Kelpie closed the state at 12:50. After the 30 minute hold the fix
+  is verified by Kelpie's own condition, not by the card's status, and the person gets one
+  message: fixed, verified. T-842's problem cleared only ten minutes ago, still inside the
+  hold, so nothing is said about it yet.
+rule: delegation
+config:
+  classes: {stale_blocks: agent}
+  delegate_to: {hermes: ops-1}
+snapshot:
+  now: "2026-03-02T13:30:00+00:00"
+  owners:
+    - {id: agent-dev-1, role: dev}
+    - {id: ops-1, role: ops}
+  tasks:
+    - {id: T-841, title: "Payment retries", status: ready, status_since: "2026-03-02T12:40:00+00:00", source: hermes}
+    - {id: T-842, title: "Export job", status: ready, status_since: "2026-03-02T13:15:00+00:00", source: hermes}
+    - {id: T-851, title: "Kelpie: stale_blocks on T-841", status: done, status_since: "2026-03-02T12:45:00+00:00", owner_id: ops-1, source: hermes}
+    - {id: T-852, title: "Kelpie: stale_blocks on T-842", status: done, status_since: "2026-03-02T13:15:00+00:00", owner_id: ops-1, source: hermes}
+  resolved_problems:
+    - {id: "stale-block:T-841", rule: stale_blocks, resolved_at: "2026-03-02T12:50:00+00:00", task_id: T-841}
+    - {id: "stale-block:T-842", rule: stale_blocks, resolved_at: "2026-03-02T13:20:00+00:00", task_id: T-842}
+  delegations:
+    - {problem: "stale-block:T-841", incident: "task:T-841", attempt: 1, kind: card, at: "2026-03-02T12:00:00+00:00", outcome: executed, task_id: T-841, operator: ops-1, card_id: T-851}
+    - {problem: "stale-block:T-842", incident: "task:T-842", attempt: 1, kind: card, at: "2026-03-02T12:30:00+00:00", outcome: executed, task_id: T-842, operator: ops-1, card_id: T-852}
+expected_actions:
+  - kind: alert
+    task_id: T-841
+    severity: warning
+    reason_contains: "Fixed, verified"
+    params: {verdict: verified, attempt: 1, card_id: T-851}
+not_expected_actions:
+  - kind: alert
+    task_id: T-842
+  - kind: delegate

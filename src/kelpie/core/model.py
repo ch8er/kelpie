@@ -977,6 +977,60 @@ class Answer:
 
 
 @dataclass(frozen=True, slots=True)
+class Problem:
+    """An alert state Kelpie holds open: a lasting condition a rule reports (an ownerless
+    task, a block nothing will clear), as the state store keeps it. Filled on the server
+    (never from an agent's board) for delegation (#347), which may hand it to an operator
+    agent and verifies the fix by this same state. ``severity`` is the alert's (``info``,
+    ``warning``, ``critical``); ``summary`` the reason that last announced it."""
+
+    id: str
+    rule: str
+    severity: str
+    since: datetime
+    opened_at: datetime
+    summary: str
+    task_id: str | None = None
+    # What the rule called it (its alert key up to the first ``:``: ``unlinked``,
+    # ``orphan``, ...), when it was last reported, and the mode it was last announced in.
+    kind: str | None = None
+    last_seen: datetime | None = None
+    mode: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ResolvedProblem:
+    """A problem whose state Kelpie closed (the rule stopped reporting it), and when.
+    Filled on the server from the state store, for the hold period of a delegated fix."""
+
+    id: str
+    rule: str
+    resolved_at: datetime
+    task_id: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class DelegationEvent:
+    """What the delegation rule did about a problem (#347), from the ledger (filled on the
+    server): ``kind`` ``card`` (a card handed to ``operator``; ``card_id`` once the board
+    made it), ``verdict`` (``verified``, ``still_broken``, ``not_fixed``, ``kept``, ...) or
+    ``held`` (the engine held an alert about ``problem`` back for the operator).
+    ``outcome`` is the ledger's (``executed``, ``suggested``, ``observed``, ``failed``,
+    ...): only an executed card is on the operator's queue."""
+
+    problem: str
+    incident: str
+    attempt: int
+    kind: Literal["card", "verdict", "held"]
+    at: datetime
+    outcome: str
+    task_id: str | None = None
+    operator: str | None = None
+    card_id: str | None = None
+    verdict: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class HostSleep:
     """A stretch when a machine running agents was suspended (a laptop lid closed), issue
     #296. Found from a wall-clock jump against the monotonic clock between two ticks of the
@@ -1107,6 +1161,14 @@ class Snapshot:
     # its clocks and the agents' from their reports: rules count an age in awake time
     # (``slept``), so a gap the host slept through raises no stale-session alert.
     host_sleeps: tuple[HostSleep, ...] = ()
+    # Delegation (#347), filled on the server only while a delegation policy is on: the open
+    # alert states, those closed lately, and what the delegation rule did (from the ledger).
+    problems: tuple[Problem, ...] = ()
+    resolved_problems: tuple[ResolvedProblem, ...] = ()
+    delegations: tuple[DelegationEvent, ...] = ()
+    # Whether the server read that history this tick: without it the engine holds nothing
+    # back for the operator (fails closed: every alert reaches the person).
+    delegation_read: bool = False
     _spans_by_session: dict[str, tuple[Span, ...]] | None = field(
         default=None, init=False, repr=False, compare=False
     )

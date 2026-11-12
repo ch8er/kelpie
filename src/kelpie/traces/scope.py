@@ -44,6 +44,7 @@ from enum import StrEnum
 
 from kelpie.core.model import Snapshot, Span
 from kelpie.core.spans import INGEST_MARK, Attribution, SpanKey, SpanStore, span_key
+from kelpie.traces.hooks import fold
 
 log = logging.getLogger(__name__)
 
@@ -363,6 +364,38 @@ class ScopeGuard:
     def _holder(self, kind: str, value: str) -> _Binding | None:
         with self._lock:
             return self._bound.get((kind, value))
+
+    def may_fold(self, otlp: Span, hook: Span, strict: bool = True) -> bool:
+        """Whether an OTLP tool span may take a hook span of the same call
+        (:func:`kelpie.traces.hooks.merge_hook_spans`, #374): only when its ingest token
+        may report the folded span (the hook's session and task). A span without a token
+        mark (unscoped ingest) may; one whose token is no longer configured may not.
+        Otherwise another token's span carrying the call id of a hook could fold it into a
+        span the check then deletes, and the hook's call would vanish from rule 10."""
+        token = otlp.attributes.get(TOKEN_ATTRIBUTE)
+        if not isinstance(token, str):
+            return True
+        if token not in self.scopes:
+            return False
+        folded = fold(otlp, hook)
+        sid = folded.session_id
+        if (
+            strict
+            and sid is not None
+            and sid != otlp.session_id
+            and self.index.session(sid) is None
+        ):
+            # a session the board does not place (yet): no other session's call is taken, as
+            # the check after the fold could not tell; ``strict=False`` where no check
+            # follows (the daily report: runs left the board since)
+            return False
+        return self.judge(token, folded)[0] is not Verdict.OUT
+
+    def refresh(self, snapshot: Snapshot, remembered: Attribution | None = None) -> None:
+        """Read the board into the index before hook spans are folded (:meth:`may_fold`
+        judges against it), as :meth:`check` does before judging."""
+        with self.barrier.exclusive():
+            self.index.update(snapshot, remembered)
 
     def judge(self, token: str, span: Span) -> tuple[Verdict, list[tuple[str, str]]]:
         """Whether ``token`` may report ``span``, and the ids the board does not place that

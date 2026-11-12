@@ -391,7 +391,7 @@ def test_build_app_wires_the_pull_requests_step(
 
 
 class _WipCommits:
-    """A platform adapter that carries out WIP commits (no shipped adapter does yet)."""
+    """A platform adapter that carries out WIP commits (stands in for Hermes' local ones)."""
 
     name = "wip"
     actions = frozenset({ActionKind.WIP_COMMIT})
@@ -409,6 +409,52 @@ def test_checkpoints_warning_only_where_wip_commits_are_made(
     unchecked = CONFIG + "[engine.rules.checkpoints]\nwip_without_pr_check = true\n"
     build_app(load_settings(write(tmp_path, unchecked))).close()
     assert "checkpoints makes no WIP commits" not in caplog.text
+
+
+def test_draft_pr_wip_commits_are_warned_about_on_hermes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Hermes commits WIP locally and never pushes: a draft PR cannot be made (#399)."""
+    monkeypatch.setenv("GITHUB_TOKEN", TOKEN)
+    caplog.set_level("INFO")
+    hermes = CONFIG + f'[adapters.hermes]\ndb_path = "{tmp_path / "kanban.db"}"\nspool = false\n'
+    draft = hermes + '[engine.rules.checkpoints]\nwip_ci = "draft_pr"\n'
+    build_app(load_settings(write(tmp_path, draft))).close()
+    assert "Hermes commits WIP locally and never pushes" in caplog.text
+    caplog.clear()
+    build_app(load_settings(write(tmp_path, hermes))).close()
+    assert "never pushes" not in caplog.text
+
+
+def test_delegation_is_refused_on_a_hub(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A hub's boards are the agents': delegation is not supported there yet (#347)."""
+    from kelpie.app import ConfigError
+
+    monkeypatch.setenv("GITHUB_TOKEN", TOKEN)
+    monkeypatch.setenv("KELPIE_TEST_AGENT_TOKEN", TOKEN)
+    hub = CONFIG + (
+        f'[hub]\nlisten = "127.0.0.1:{free_port()}"\nallow_plain_http = true\n'
+        '[[hub.agents]]\nname = "laptop"\ntoken_env = "KELPIE_TEST_AGENT_TOKEN"\n'
+        '[engine.rules.delegation]\nclasses = { orphan_status = "agent" }\n'
+        'delegate_to = { "laptop/hermes" = "ops-1" }\n'
+    )
+    with pytest.raises(ConfigError, match="delegation is not supported there yet"):
+        build_app(load_settings(write(tmp_path, hub)))
+
+
+def test_a_person_cannot_be_the_operator(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from kelpie.app import ConfigError
+
+    monkeypatch.setenv("GITHUB_TOKEN", TOKEN)
+    for who in ("alice", "user", "kelpie", " Alice ", "none", "Bad Name"):
+        text = CONFIG + (
+            f'[adapters.hermes]\ndb_path = "{tmp_path / "kanban.db"}"\nspool = false\n'
+            'human_owners = ["alice"]\n'
+            '[engine.rules.delegation]\nclasses = { orphan_status = "agent" }\n'
+            f'delegate_to = {{ hermes = "{who}" }}\n'
+        )
+        with pytest.raises(ConfigError, match=r"agent profile|profile name"):
+            build_app(load_settings(write(tmp_path, text)))
 
 
 def test_checkpoints_warning_on_a_hub(

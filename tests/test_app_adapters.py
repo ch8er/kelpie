@@ -402,10 +402,10 @@ def test_act_mode_for_stop_only_rules_is_allowed_with_hermes(tmp_path: Path) -> 
     mixed = EngineConfig.from_mapping(
         {
             "dry_run": False,
-            "rules": {"loop_breaker": {"mode": "act"}, "checkpoints": {"mode": "act"}},
+            "rules": {"loop_breaker": {"mode": "act"}, "exit_contract": {"mode": "act"}},
         }
     )
-    with pytest.raises(ConfigError, match=r"\['checkpoints'\]"):
+    with pytest.raises(ConfigError, match=r"\['exit_contract'\]"):
         build_app(Settings(engine=mixed, db_path=None, hermes=hermes))
 
 
@@ -423,14 +423,21 @@ def test_status_shows_spool_age(tmp_path: Path) -> None:
 
 def test_act_allow_list_matches_what_hermes_carries_out() -> None:
     """Rules allowed to act on Hermes emit only what the adapter carries out (stop, wait,
-    wake of a parked task, comment, unblock, reassign) and alerts, plus orphan_status's
-    close, which becomes an alert at runtime (a gap, not a refusal)."""
+    wake of a parked task, comment, unblock, reassign, a local WIP commit, a delegation
+    card) and alerts, plus orphan_status's close, which becomes an alert at runtime (a gap,
+    not a refusal)."""
     import importlib
 
     from kelpie.app import HERMES_ACT_RULES
 
-    carried_out = {"ALERT", "ESCALATE", "STOP", "WAIT", "WAKE", "COMMENT", "UNBLOCK", "REASSIGN"}
+    carried_out = {
+        *("ALERT", "ESCALATE", "STOP", "WAIT", "WAKE", "COMMENT", "UNBLOCK", "REASSIGN"),
+        "WIP_COMMIT",
+        "DELEGATE",
+    }
     assert {
+        "checkpoints",
+        "delegation",
         "loop_breaker",
         "wait_condition",
         "conflict_warning",
@@ -616,7 +623,7 @@ def test_what_keeps_a_rule_from_acting_is_said_plainly(tmp_path: Path) -> None:
     found = {r: b.reason for r, b in act_blockers(hermes, build_adapters(hermes)).items()}
     assert "stale_blocks" not in found
     assert found["orphan_status"] == "Hermes can't close tasks yet"
-    assert found["checkpoints"] == "Hermes can't make WIP commits yet"
+    assert "checkpoints" not in found  # local WIP commits (#399)
     assert found["exit_contract"] == "Hermes requeues only tasks Kelpie parked"
     assert found["ci_economy"] == (
         "Kelpie cancels no builds and proposes no CI changes: no CI connector is configured "

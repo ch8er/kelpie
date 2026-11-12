@@ -1,0 +1,47 @@
+id: "08-delegate-never-human-or-critical"
+incident: 8
+title: "Delegation: human-only classes, critical problems, notices and outages stay with the person"
+description: >
+  Only a problem class the farm lists as agent may be handed to the operator. stale_blocks
+  is listed as human here, so its block stays with the person; orphan_status is agent, but
+  its critical problem goes to the person at once and its notice only to the daily report;
+  a CI outage is a farm-wide incident and is never delegated; a board with no delegate_to
+  has no operator. Only the ownerless warning on T-815 goes to the operator.
+rule: delegation
+config:
+  classes: {stale_blocks: human, orphan_status: agent, wait_condition: agent}
+  delegate_to: {hermes: ops-1}
+snapshot:
+  now: "2026-03-02T14:00:00+00:00"
+  owners:
+    - {id: agent-dev-1, role: dev}
+    - {id: ops-1, role: ops}
+  tasks:
+    - {id: T-811, title: "Fix flaky login test", status: blocked, status_since: "2026-03-02T09:00:00+00:00", owner_id: agent-dev-1, source: hermes}
+    - {id: T-812, title: "Release notes", status: review, status_since: "2026-03-02T08:00:00+00:00", source: hermes}
+    - {id: T-813, title: "Docs index", status: review, status_since: "2026-03-02T12:00:00+00:00", source: hermes}
+    - {id: T-814, title: "Migrate settings", status: waiting, status_since: "2026-03-02T09:00:00+00:00", owner_id: agent-dev-1, source: other-board}
+    - {id: T-816, title: "Storm anchor", status: blocked, status_since: "2026-03-02T10:00:00+00:00", owner_id: agent-dev-1, source: hermes}
+    - {id: T-815, title: "Changelog", status: review, status_since: "2026-03-02T10:00:00+00:00", source: hermes}
+  problems:
+    - {id: "stale-block:T-811", rule: stale_blocks, severity: warning, since: "2026-03-02T09:00:00+00:00", opened_at: "2026-03-02T11:00:00+00:00", summary: "T-811 is blocked on a green CI run.", task_id: T-811, last_seen: "2026-03-02T13:59:00+00:00", mode: act}
+    - {id: "orphan:T-812", rule: orphan_status, severity: critical, since: "2026-03-02T08:00:00+00:00", opened_at: "2026-03-02T09:00:00+00:00", summary: "T-812 sits in review with no owner; 9 tasks wait behind it.", task_id: T-812, last_seen: "2026-03-02T13:59:00+00:00", mode: act}
+    - {id: "orphan:T-813", rule: orphan_status, severity: info, since: "2026-03-02T12:00:00+00:00", opened_at: "2026-03-02T13:00:00+00:00", summary: "T-813 sits in review with no owner.", task_id: T-813, last_seen: "2026-03-02T13:59:00+00:00", mode: act}
+    - {id: "orphan_status:outage:0123456789ab", rule: orphan_status, severity: warning, since: "2026-03-02T10:00:00+00:00", opened_at: "2026-03-02T10:05:00+00:00", summary: "Block storm: 6 tasks blocked on one reason.", task_id: T-816, last_seen: "2026-03-02T13:59:00+00:00", mode: act}
+    - {id: "wait:T-814", rule: wait_condition, severity: warning, since: "2026-03-02T09:00:00+00:00", opened_at: "2026-03-02T10:00:00+00:00", summary: "T-814 waits on a condition nobody checks.", task_id: T-814, last_seen: "2026-03-02T13:59:00+00:00", mode: act}
+    - {id: "orphan:T-815", rule: orphan_status, severity: warning, since: "2026-03-02T10:00:00+00:00", opened_at: "2026-03-02T11:00:00+00:00", summary: "T-815 sits in review with no owner.", task_id: T-815, last_seen: "2026-03-02T13:59:00+00:00", mode: act}
+expected_actions:
+  - kind: delegate
+    task_id: T-815
+    params: {attempt: 1, operator: ops-1, problem_rule: orphan_status}
+not_expected_actions:
+  - kind: delegate
+    task_id: T-811
+  - kind: delegate
+    task_id: T-812
+  - kind: delegate
+    task_id: T-813
+  - kind: delegate
+    task_id: T-814
+  - kind: delegate
+    task_id: T-816

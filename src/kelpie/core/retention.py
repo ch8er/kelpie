@@ -46,8 +46,27 @@ class StorageRetention:
 
 def ledger_keep(engine: EngineConfig) -> timedelta:
     """What the ledger itself reads back: a day at least, its cooldown and retry window,
-    and its once-actions' window. Neither retention nor the size cap prunes within it."""
-    return max(timedelta(days=1), engine.cooldown, engine.retry_after, engine.once_window)
+    its once-actions' window, and the history delegation's guards read (#347). Neither
+    retention nor the size cap prunes within it."""
+    return max(
+        timedelta(days=1),
+        engine.cooldown,
+        engine.retry_after,
+        engine.once_window,
+        _delegation_history(engine),
+    )
+
+
+def _delegation_history(engine: EngineConfig) -> timedelta:
+    """How far back delegation reads the ledger and closed states, when its policy is on."""
+    from kelpie.core.delegation import policy_from_config  # delegation imports the ledger
+
+    raw = {k: v for k, v in engine.rules.get("delegation", {}).items() if k != "mode"}
+    try:
+        policy = policy_from_config(raw)
+    except ValueError:
+        return timedelta(0)  # refused when the rules load
+    return policy.history if policy.enabled else timedelta(0)
 
 
 def load_storage_retention(section: Mapping[str, Any], engine: EngineConfig) -> StorageRetention:
@@ -60,7 +79,8 @@ def load_storage_retention(section: Mapping[str, Any], engine: EngineConfig) -> 
     if retention < keep:
         raise ValueError(
             f"[storage] retention must cover the ledger's own windows (engine once_window, "
-            f"cooldown, retry_after, and a day at least): at least {_days(keep)}"
+            f"cooldown, retry_after, twice the longer of delegation's cooldown and "
+            f"same_incident, and a day at least): at least {_days(keep)}"
         )
     if retention > MAX_RETENTION:
         raise ValueError("[storage] retention must be at most 3650d")

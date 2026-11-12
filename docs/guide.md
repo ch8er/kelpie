@@ -167,6 +167,7 @@ P0 is the MVP; P1 and P2 rules are backlog.
 | 13 | "Needs you" inbox (P1) | Per person: human tasks with agent work behind them and agents waiting for their input or approval, sorted by cost of delay (agent-hours waited) → one escalation per person | 13 |
 | 14 | Compaction gate (P2) | Agent acts against the task's gate right after a context compaction | field |
 | – | Unanswered asks (P1) | An agent's `@question` to another agent in a task comment, unanswered while the recipient is idle → one reminder per escalation step (1h, 4h, 12h, 24h); snoozable; blocked and waiting tasks and questions to people stay with rules 4, 2 and 13 | field |
+| – | Delegation (P1) | A problem another rule keeps open whose class the farm lists as `agent` (board hygiene), at warning severity → a card on the operator agent's queue; Kelpie verifies the fix itself; off by default (#347, in progress) | 1, 8, 11 |
 | – | Instruction bloat (P1) | A skill or role instruction file that crosses a size, grows fast or is large and read into every session, and copies of sections and values across a role's files → alert recommending a short core plus topic references; Kelpie never edits the files | 21 |
 
 P1 also extends rule 1 ("done" requires evidence; reopened-after-done rate) and rule 3 (stop
@@ -176,7 +177,7 @@ evidence from other farms rather than one of the 13 incidents.
 Rule names in code: `exit_contract`, `wait_condition`, `orphan_status`, `stale_blocks`,
 `ping_pong`, `bottlenecks`, `resources`, `ci_economy`, `loop_breaker`, `no_progress`,
 `conflict_warning`, `dispatch_gate`, `needs_you`, `compaction_gate`, `return_causes`,
-`output_offenders`, `instruction_bloat`, `unanswered_asks`, `checkpoints`.
+`output_offenders`, `instruction_bloat`, `unanswered_asks`, `delegation`, `checkpoints`.
 
 Foundation work alongside the rules (no LLM): **traces** (OpenTelemetry GenAI spans over
 OTLP, stored locally, optionally forwarded to Langfuse, Phoenix or Datadog; adapters write
@@ -364,7 +365,7 @@ board the report is unchanged.
 - **Top 3 recommendations**: output filters for huge tool outputs (RTK first; see
   `[traces.outputs]`), rules that would have fixed part of the chaos in act mode (only rules
   the farm's adapters can carry out, so `kelpie serve` starts with the advice applied; for
-  the others the report says what is missing, such as "Hermes can't make WIP commits yet", here
+  the others the report says what is missing, such as "Hermes can't close tasks yet", here
   and under "Would have done in act mode"), and fixed remedies for the largest causes,
   ranked by dollars (hours count when `hour_usd` is set). Remedies and the biggest wait's
   suggestion check what the farm already has (`kelpie.report.farm`, from config: approvers
@@ -409,6 +410,13 @@ board the report is unchanged.
   Comments are read as of the day's end (an answer after the day leaves the ask open within
   it); a task finished since counts as open until its finish. An ask answered within the day
   is not counted, so it is a lower bound.
+- **Delegation to operator agents** (#347, when the `delegation` rule did something within
+  the day, or agents worked on its cards): the cards handed to operator agents (and those it would have handed in suggest
+  mode), the alerts held back for them, the verdicts the person got by Kelpie's own check
+  (fixed and verified, still broken, given back, held then kept with the person), cards by
+  operator, and the tokens agents spent on Kelpie's cards (counted model calls whose task,
+  or whose session's task, is one of Kelpie's cards, also cards made before the day, within the days the report
+  reads).
 - **Instruction files** (with `[instructions]`, incident 21): the files each role loads that
   cost the most tokens a day, as measured when the report runs (the 24 hours before), with
   where the figure comes from (counted skill loads, or size times sessions: an *estimate*,
@@ -618,8 +626,8 @@ To watch a Hermes farm (observe mode), add the section below to `kelpie.toml`
 and install the hooks plugin on the Hermes host; see
 [`src/kelpie/adapters/hermes/README.md`](../src/kelpie/adapters/hermes/README.md). Kelpie
 carries out on Hermes, through its CLI, stops (rule 10), parks and wakes (rules 2, 12 and
-the dispatch gate), comments, unblocks (rule 4) and reassignments (rule 3), each only in
-`act` mode; closing a parent and WIP commits stay alerts.
+the dispatch gate), comments, unblocks (rule 4), reassignments (rule 3) and local WIP commits
+(rule 5, never pushed), each only in `act` mode; closing a parent stays an alert.
 
 ```toml
 [adapters.hermes]

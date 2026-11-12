@@ -270,6 +270,7 @@ The rules:
 | `output_offenders` | commands whose output floods a role's context day after day |
 | `instruction_bloat` | skills and role instructions that only grow, and the facts copied between them |
 | `unanswered_asks` | an agent's question to another agent, unanswered while the other is idle |
+| `delegation` | hands a problem to the operator agent as a card, off by default (in progress, #347) |
 
 The incidents behind each rule, the design and the daily report in full:
 [How Kelpie works](https://github.com/ch8er/kelpie/blob/main/docs/guide.md).

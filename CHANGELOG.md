@@ -10,6 +10,42 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ### Added
 
+- Hermes makes WIP commits (#399, option 1): `checkpoints` in `act` mode commits a dirty
+  worktree locally on the task branch after its session ended, and never pushes. Git runs
+  with a fixed environment (no global or system config, no hooks, no signing, a fixed
+  author `Kelpie <kelpie@kelpie.invalid>`) through plumbing with a compare-and-swap on the
+  branch; a worktree with includes or filter drivers in its config, a filter attribute on a
+  changed file (LFS), an operation in progress, unmerged files, submodule changes, a nested
+  repository, another branch or a very large file is refused and a person is told. The
+  ledger keeps the commit. `wip_ci = "draft_pr"` is unsupported on Hermes. `checkpoints`
+  may now run in `act` mode on Hermes.
+- Delegation to an operator agent, first part (#347): the `delegation` rule and its policy
+  in `[engine.rules.delegation]`: problem classes (`agent`, `human`, `kelpie`) per rule as
+  config data with an empty default, `delegate_to` per board, and the loop guards (one open
+  card per incident, at most two attempts then a cooldown, no delegation about cards or the
+  operator's own tasks, hourly and daily limits, a circuit breaker). Only `warning`
+  problems of an `agent` class are delegated; `critical`, notices, outages and human-only
+  rules never are. The rule asks for a `delegate` action with the card's text (facts, the
+  rule's text quoted as data, what counts as fixed, a fixed how-to-handle block); no
+  adapter carries it out yet, so it stays in observe or suggest. Off by default.
+- Delegation, second part (#347): Hermes carries out `delegate` with `hermes kanban create`
+  (assigned to the board's operator; a card made before is found by its key line, so a
+  retried create makes no second card; the card's id read from `--json`), and
+  `delegation` may run in act mode on Hermes behind the act checklist. Not with `[hub]`
+  yet (refused at startup). An operator that is a person or Kelpie is refused.
+- Delegation, third part (#347): verification and the person's messages. A delegated
+  problem is "fixed, verified" only when Kelpie's own state for it has been closed for
+  `hold`; a card the operator closes while the problem stays gives "agent says fixed,
+  still broken" and a second card; a blocked card, a failed last attempt or a missed
+  pick-up or finish deadline gives "not fixed, yours now". In act mode the engine holds
+  back the alerts (and the resolved notice) of a problem the operator has, recorded as
+  `delegated` in the ledger, so the person hears once on hand-off and once at the end; a
+  problem it held back that the rule does not hand over is said to be the person's, and
+  the circuit breaker alerts once. Critical problems always reach the person.
+- Delegation, fourth part (#347): the daily report's "Delegation to operator agents"
+  section: cards handed over (and those suggest mode would have handed), alerts held back,
+  the verdicts the person got, cards by operator, and the tokens operator agents spent on
+  Kelpie's cards.
 - `POST /conditions`: an agent registers the condition its task waits for (task id, kind,
   params), off by default (`[conditions] enabled`). On the main listener (loopback by
   default, behind the Host and connection guards), with a bearer token of its own
@@ -219,6 +255,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ### Security
 
+- Hook fold across ingest tokens (#374): an OTLP tool span takes the hook span of the same
+  call only when its scoped ingest token may report the folded span (the hook's session and
+  task; a token no longer configured takes none), and in the live loop never the call of a
+  session the board does not place yet (the board is read before the fold); the daily
+  report and the tool-output scan fold alike. Another token's span carrying a run's
+  call ids could fold the run's verified hook calls into a span the scope check then
+  deleted, so rule 10 missed the run's loop. Rule 10's logic and thresholds are unchanged.
 - The Docker image's base images are pinned by digest without hand-copied values: the new
   `pin-base-images` workflow resolves each base image's multi-platform index digest on
   GitHub Actions (`docker buildx imagetools inspect`, checked for linux/amd64 and

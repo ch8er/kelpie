@@ -201,6 +201,39 @@ so it is kept for Kelpie's own user:
   `/data` 0700, owned by the `kelpie` user; a named volume takes that mode when it is
   first created, an existing volume or bind mount keeps its own.
 
+## Git in agents' worktrees
+
+Agents' worktrees are untrusted: everything git reads there (config, attributes, objects)
+was written by an agent. Kelpie reads git state there with a fixed environment and
+read-only plumbing, and on Hermes makes one kind of write: a **local WIP commit, never
+pushed** (#399, option 1), for `checkpoints` in `act` mode. Git runs with no system or
+global config (`GIT_CONFIG_NOSYSTEM`, `GIT_CONFIG_GLOBAL=/dev/null`), only `PATH` and
+`HOME` from Kelpie's environment (no tokens, no inherited `GIT_*`), no hooks
+(`core.hooksPath=/dev/null`), no fsmonitor, no signing, no automatic gc, no transport
+(`GIT_ALLOW_PROTOCOL=none`, `protocol.allow=never`), and a fixed author. A worktree whose own
+config has includes, config-defined hooks or filter drivers, a symbolic link in the git
+directory where the commit writes or git reads config (objects, refs, reflogs, index,
+config), a hard-linked ref or reflog, the branch checked out in another worktree, a changed file with a filter attribute (LFS), an
+operation in progress, submodules (checked before any `status`, which would run a child git
+under the submodule's own config), unmerged changes, a nested repository, another branch
+than the task's, or a file over 25 MiB is refused and a person is told. The commit is
+plumbing (`add -A`, `write-tree`, `commit-tree`) and lands with a compare-and-swap
+(`update-ref <branch> <new> <old>`). No push means no remote, credential helper or SSH
+command the worktree names is ever run. Details: the Hermes README, "Trust model" and "WIP
+commits".
+
+WIP commits need Kelpie to run as the user that owns the worktrees (it refuses another
+owner's). Agents running as that user can read Kelpie's config, environment and keys, so
+these measures stop an agent from making Kelpie run a program through git, not from reading
+Kelpie's secrets; where that matters, run Kelpie as its own user and leave `checkpoints`
+out of `act` on Hermes (WIP commits then become alerts), as the read side advises.
+
+Residual risks: git itself parses the hostile repository; a sibling worktree of the same
+repository shares its config and could add a filter driver, or a symbolic link, after
+Kelpie's check and before the step it guards (a narrow race, rechecked right before `add`
+and `update-ref`); a worker started between Kelpie's run check and the commit races with
+it (the index lock and the compare-and-swap make that a failure, not a lost change).
+
 ## Outbound connections
 
 Every outbound client (the `kelpie.net` requests of the alert channels, Prometheus, LLM
@@ -369,7 +402,17 @@ way the multi-host hub limits each `kelpie agent` to its own host:
   them), and a
   span takes a missing session or task from its parent only
   when both came with the same scoped token. Hook spans are folded into OTLP spans before
-  the snapshot check, so a fold that moves a span into another session is caught too.
+  the snapshot check, so a fold that moves a span into another session is caught too. A
+  scoped token's span takes a hook span only when that token may report the folded span
+  (the hook's session and task; a token no longer configured takes none, #374): another
+  token's span carrying a run's (provider-generated) call ids stays a span of its own, in
+  its own session, and the run's verified hook calls stay rule 10's evidence instead of
+  being folded into a span the check deletes. The board is read before the fold, and a
+  span never takes the call of another session the board does not place yet; the daily
+  report and the largest-tool-outputs scan fold with the same rule (the report judges
+  against the board and the sessions the store remembers, and lets a run that left the
+  board take its own calls). A span of a token no longer configured takes no hook call: it
+  stays next to it, so the report may count that call twice; better than losing it.
 - **What a forger can still do.** Claim a session id before its agent starts (Hermes run ids
   are sequential) and report spans for it until the board shows the run; from then on they
   are deleted, and the agent's own token reports for it. Hold up to 10,000 such ids used
@@ -389,8 +432,9 @@ way the multi-host hub limits each `kelpie agent` to its own host:
   agents of one role do not trust each other. Requests are forwarded (`[[traces.forward]]`)
   as received, rejected spans included. The largest tool outputs and the daily report fold
   stored OTLP tool calls with hook calls by their call id over the whole day, outside the
-  snapshot the check sees: a span carrying another agent's (provider-generated) tool call id
-  could be counted under that agent's session there, never in rule 10 or budgets. A removed
+  snapshot the check sees, with the same pairing (#374): a span whose token may not
+  report a session the board (or the store's memory of sessions) places takes none of its
+  calls. A removed
   (or renamed) entry covers nothing: its spans stay while the board does not show their
   session or task, and are deleted once it does, so removing a misbehaving agent's token
   also removes what it claimed in advance. The shared token, when set, still

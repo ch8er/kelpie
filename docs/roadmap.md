@@ -311,7 +311,7 @@ Implement `requeue`, `unblock`, `comment`, `wake`, `reassign` and `wip_commit` f
 - [x] Actions are idempotent (re-running the same action is a no-op) (the ledger stops repeats; an action already in effect raises `NothingToDo` and is recorded as nothing to do with a note: a second park, a wake of an awake task, a requeue of a task already queued, an unblock of an unblocked task, a reassignment to the current assignee, #378; a requeue of a task neither queued nor parked by Kelpie still reaches a person, as Hermes cannot carry it out)
 - [x] Concurrent writes with Hermes handled safely (transactions, retry on lock) (Kelpie never writes `kanban.db`: every write goes through the `hermes kanban` CLI; reads are read-only with a busy timeout; #13, #75)
 - [x] Tasks in Kelpie's `waiting` status are reported to the Hermes dispatcher as waiting and alive, never as dead (the "waiting" heartbeat of rule 2) (a parked task sits in Hermes `scheduled`, which the dispatcher does not treat as dead; `test_a_parked_ready_task_does_not_make_its_assignee_look_active`, #75)
-- [ ] `unblock`, `reassign` and `wip_commit` for Hermes (`unblock` and `reassign` done and declared, tested against the simulated Hermes CLI, #367; `wip_commit` raises `NotImplementedError` and is not declared: how it may commit and push in an agent's worktree is a decision, #399)
+- [x] `unblock`, `reassign` and `wip_commit` for Hermes (`unblock` and `reassign` done and declared, tested against the simulated Hermes CLI, #367; `wip_commit` commits locally in the task's worktree and never pushes, `draft_pr` is unsupported, #399 option 1)
 
 ### adapters: Hermes plugin for post_tool_call and on_session_end
 labels: P0, week-1, area:adapters
@@ -964,16 +964,16 @@ plan lists there (token optimization, throughput metrics, 10 conversations).
 
 ### actions: delegate a problem to the operator agent, verify the fix, tell the person
 labels: P1, area:core
-Design in docs/plan.md ("Delegation to an operator agent"). Not scheduled: development waits
-for the owner's go.
+Design in docs/plan.md ("Delegation to an operator agent"). Built from 2026-11-12 on the
+owner's go (#347): Hermes first; GitHub issue and Claude Code cards and `[hub]` are left.
 
 **Acceptance criteria**
-- [ ] Problem classes (agent may / human only / Kelpie itself) as config data, empty default; severity decides when the person hears (critical always at once; warning delegated only when its class allows; notice never delegated)
-- [ ] `delegate` action through the adapters: a card on the operator's queue (Hermes `kanban create --assignee`, GitHub issue, Claude Code task) with facts, quoted agent text as data, "done when", fingerprint and a fixed how-to-handle block; `delegate_to` per board
-- [ ] Verification by Kelpie's own condition with a hold period; "fixed, verified", "agent says fixed, still broken" and "not fixed, yours now" messages; one message on hand-off
-- [ ] Loop guards: one open card per fingerprint, at most two attempts then the person and a cooldown, no delegation about delegation cards or the operator's own tasks, same-incident window after a fix, hourly and daily limits, circuit breaker on failed verifications, pick-up and finish deadlines
-- [ ] Off by default; observe → suggest ("would delegate") → act; act-checklist gate; the operator's tokens on Kelpie cards in the report
-- [ ] Fixtures: a delegated stale block fixed and verified; the agent closes but the block stays (person told); two failed attempts (escalated, no third card); a human-only class never delegated; a critical alert always reaches the person
+- [x] Problem classes (agent may / human only / Kelpie itself) as config data, empty default; severity decides when the person hears (critical always at once; warning delegated only when its class allows; notice never delegated) (`[engine.rules.delegation] classes`, per rule or `<rule>.<kind>`; some rules fixed to human or Kelpie; #347 parts 1 and 3)
+- [ ] `delegate` action through the adapters: a card on the operator's queue (Hermes `kanban create --assignee`, GitHub issue, Claude Code task) with facts, quoted agent text as data, "done when", fingerprint and a fixed how-to-handle block; `delegate_to` per board (Hermes done, #347 part 2; GitHub issue and Claude Code task cards, and `[hub]`, not yet)
+- [x] Verification by Kelpie's own condition with a hold period; "fixed, verified", "agent says fixed, still broken" and "not fixed, yours now" messages; one message on hand-off (part 3: the engine holds the problem's alerts back while the operator has it)
+- [x] Loop guards: one open card per fingerprint, at most two attempts then the person and a cooldown, no delegation about delegation cards or the operator's own tasks, same-incident window after a fix, hourly and daily limits, circuit breaker on failed verifications, pick-up and finish deadlines (parts 1 and 3)
+- [x] Off by default; observe → suggest ("would delegate") → act; act-checklist gate; the operator's tokens on Kelpie cards in the report (part 4: the "Delegation to operator agents" section)
+- [x] Fixtures: a delegated stale block fixed and verified; the agent closes but the block stays (person told); two failed attempts (escalated, no third card); a human-only class never delegated; a critical alert always reaches the person (`08-delegate-*`; the engine never holds a critical alert back, tested in `tests/rules/test_delegation_verdicts.py`)
 
 ### rules: ci_economy — propose a better CI configuration (rule 9, incident 5)
 labels: P1, area:rules

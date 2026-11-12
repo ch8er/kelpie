@@ -170,7 +170,7 @@ is accepted and ignored with a warning. Rules run in the order below.
 
 | # | Name | Priority | Status | Actions | Act needs |
 | --- | --- | --- | --- | --- | --- |
-| – | `checkpoints` | P0 | implemented | `comment`, `wip_commit` | adapter `comment`, `wip_commit` (not in Hermes yet) |
+| – | `checkpoints` | P0 | implemented | `comment`, `wip_commit` | adapter `comment`, `wip_commit` (Hermes: a local commit, never pushed) |
 | 1 | `exit_contract` | P0 | implemented | `requeue`, `alert`, `comment` | adapter `requeue` (not in Hermes yet), `comment` (acceptance criteria) |
 | 2 | `wait_condition` | P0 | implemented | `wake`, `comment`, `alert` | adapter `requeue` (a wake puts the task back in the ready queue), `comment` (not in Hermes yet) |
 | 3 | `orphan_status` | P0 | implemented | `alert`, `reassign` | adapter with `SupportsReassign` |
@@ -189,6 +189,7 @@ is accepted and ignored with a warning. Rules run in the order below.
 | – | `return_causes` | P1 | implemented | `alert`, `comment` | adapter `comment` |
 | – | `output_offenders` | P1 | implemented | `comment`, `alert` | adapter `comment` (Hermes: `hermes kanban comment`) |
 | – | `instruction_bloat` | P1 | implemented | `alert` | alert channel |
+| – | `delegation` | P1 | implemented | `delegate` | adapter with `SupportsDelegate` (Hermes: `hermes kanban create`); not with `[hub]` yet |
 | – | `unanswered_asks` | P1 | implemented | `alert` | alert channel |
 
 Several rules share these terms:
@@ -856,6 +857,99 @@ split. Kelpie never edits instruction files; the rule only alerts.
 | `max_tokens_per_day` | `500000` | integer > 0 | Daily read cost that makes a file over `max_chars` worth splitting even when it is stable. |
 | `min_span` | `"1d"` | duration > 0 | Growth is judged only over at least this much history. |
 
+### delegation
+
+Hands a problem Kelpie found to the farm's main agent (the *operator*) as a card on that
+agent's own queue (#347; design in [plan.md](plan.md), "Delegation to an operator agent").
+A problem is an alert state another rule keeps open (an ownerless task, a block nothing
+clears); Kelpie verifies the fix by that rule's own condition, not by the agent's word.
+**Off by default**: nothing is delegated until `classes` lists a rule as `agent` and
+`delegate_to` names an operator for the task's board. It needs a database (`[storage]
+path`, not `":memory:"`): the guards read back what the rule did from the ledger, and the
+problems from the alert states. If that read fails, nothing is delegated that tick.
+Not with `[hub]` yet (refused at startup). On Hermes a card is `hermes kanban create
+<title> --body ... --assignee <operator> --idempotency-key ... --json` on the task's board.
+The operator is a profile name that is not a person or Kelpie: an operator in
+`human_owners`, Kelpie's `author` or Hermes' default CLI author `user` is refused at
+startup, and one the farm knows as a person is skipped. With several Hermes boards
+(`[[adapters.hermes.boards]]`), a `delegate_to` key may name a board; it wins over the
+adapter name.
+
+What is delegated: a problem whose kind is listed as `agent`, with severity `warning`,
+reported within the last 15 minutes and announced in suggest or act mode, on a task whose
+board has a `delegate_to` operator, that is not held by a person, not the operator's own
+task (held by it or assigned to it), not a delegation card and not an outage. A kind is a
+rule (`orphan_status`) or one kind of its problems, `<rule>.<kind>` with the kind the
+first part of the rule's alert key (`stale_blocks.unlinked`, `stale_blocks.overdue`): the
+kind wins over the rule, so `"stale_blocks.overdue" = "human"` keeps long waits with the
+person while other stale blocks go to the operator. A `critical` problem goes to the person at once and is
+not delegated; an `info` (notice) never is. `needs_you`, `resources`, `instruction_bloat`,
+`output_offenders`, `no_progress` and `delegation` itself are human-only, and
+`loop_breaker` and `ci_economy` are Kelpie's own: listing one of them as `agent` is refused.
+
+```toml
+[engine.rules.delegation]
+mode = "observe"                     # observe -> suggest ("would hand ... to ops-1") -> act
+classes = { orphan_status = "agent", "stale_blocks.unlinked" = "agent" }
+delegate_to = { hermes = "ops-1" }   # board (a task's source) -> operator profile
+```
+
+| Key | Default | Allowed | Meaning |
+| --- | --- | --- | --- |
+| `classes` | `{}` | kind = `agent` \| `human` \| `kelpie` | Who may fix the problems of a rule, or of one kind of them (`<rule>.<kind>`). A kind not listed is `human`; a rule that is not planned is refused. |
+| `delegate_to` | `{}` | board = profile | The operator agent of each board: a named Hermes board, the adapter name (`hermes`), or `<agent>/<adapter>` on a hub (the operator is then `<agent>:<profile>` on the board). A board not listed never delegates. |
+| `max_attempts` | `2` | 1 to 2 | Cards per incident (a task, or the problem when it has none) within `cooldown`; then the person. |
+| `same_incident` | `"1d"` | duration, > 0 | A card whose fix was verified closes its incident only once the fix held this long: the problem back sooner is another attempt of the same incident. |
+| `cooldown` | `"7d"` | duration, > 0, at most 30d | Cards counted for `max_attempts`, and no new card for an incident given back to the person, within this. The server reads back twice the longest of `cooldown` and `same_incident` (a problem opened before that is not delegated), and `[storage] retention` must cover it. |
+| `hold` | `"30m"` | duration, > 0 | How long a fix must stay clear before Kelpie calls it verified: Kelpie's own state for the problem closed at least this long ago (the rule stopped reporting it). A closed card waits this long for Kelpie's check to catch up. |
+| `pickup_within` | `"1h"` | duration, < `finish_within` | A card nobody picked up by then goes back to the person ("not fixed, yours now"). |
+| `finish_within` | `"6h"` | duration, > 0 | A card not finished by then goes back to the person ("not fixed, yours now"). |
+| `max_per_hour` | `3` | integer >= 1 | New cards carried out per hour; the oldest problems go first. |
+| `max_per_day` | `10` | integer >= 1 | New cards carried out per day. |
+| `breaker_failures` | `3` | integer >= 1 | Failed verifications within a day that stop all delegation (the circuit breaker): one alert to the person while it lasts; nothing is held back or handed over, and each problem held for the operator is sent to the person. |
+
+**When the person hears.** While `delegation` is in `act` mode (and not under dry-run),
+the engine holds back the alerts of a problem the operator may have (its class, `warning`,
+a board with an operator, not a person's or the operator's task, not an outage), and the
+"resolved" notice of one the operator holds a card about; the ledger records them as
+`delegated`. The person gets one message on hand-off ("Handed the problem on T-1 to
+ops-1; card t_9a for ops-1."), one at the end, and nothing in between:
+
+- **Fixed, verified**: Kelpie's own state for the problem has been closed for `hold`
+  (whatever the card says);
+- **Agent says fixed, still broken**: the operator closed the card, `hold` passed, and the
+  problem is still reported; the next card follows (attempt 2);
+- **Not fixed, yours now**: the operator blocked the card (its reason quoted), closed the
+  last allowed attempt while the problem stays, nobody picked the card up within
+  `pickup_within` (when Kelpie cannot see the card because its id was not read, only the
+  finish deadline applies), or it was not finished within `finish_within`; from then on the
+  problem's alerts reach the person again, and no new card is made within `cooldown`;
+- **Kelpie did not hand this to ops-1 (why); it is yours**: a problem the engine held back
+  (the ledger's `delegated` entries) that the rule does not hand over, whatever the reason:
+  the hourly or daily limit, the attempts used, the circuit breaker, a person who took the
+  task, the task given back, a problem about one of Kelpie's own cards, one older than the
+  history, a card that could not be made. From then on its alerts reach the person, and no
+  card is made for that task within `cooldown`.
+
+A verdict or "it is yours" whose sending fails every retry is sent again the next hour, and
+the engine stops holding that problem's alerts at once. A card whose creation failed three
+times (or kept failing for `pickup_within`), or that no adapter carries out, counts as one
+that could not be made. If the server cannot read the delegation history in a tick,
+nothing is held back in it.
+Turning delegation off (or out of act mode) while cards are open leaves their problems'
+next escalations to reach the person, but no verdict is sent for those cards; switch back to
+act, or look at the operator's queue.
+
+A `critical` problem is never held back: the person hears it at once. In `suggest` mode
+nothing is held back; the person gets the problem's alerts and "Suggested: hand the problem
+on T-1 to ops-1".
+
+Guards: one open card per incident (a card carried out with no verdict yet); after
+`max_attempts` cards within `cooldown`, or once the incident was given back to the person,
+no new card; no delegation about a delegation card or the operator's own tasks. Each card
+is carried out once per problem, opening and attempt (`Action.once`); attempts are
+numbered over the incident's history, so a card's idempotency key never repeats.
+
 ### unanswered_asks
 
 Issue #297: a question one agent puts to another in a task comment is an obligation until
@@ -903,7 +997,7 @@ agents' sessions or edits their instructions.
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `path` | `"kelpie.db"` | SQLite database: action ledger, alert states, snoozes, spans, recorded fixes, observed task status transitions. `":memory:"` keeps it in memory. `$KELPIE_DB` overrides it. |
-| `retention` | `"30d"` | Raw action-ledger rows, alert states closed, and observed task status transitions older than this are pruned, hourly. At least the ledger's own windows: `[engine] once_window`, `cooldown`, `retry_after` and a day; at most `3650d`. |
+| `retention` | `"30d"` | Raw action-ledger rows, alert states closed, and observed task status transitions older than this are pruned, hourly. At least the ledger's own windows: `[engine] once_window`, `cooldown`, `retry_after`, a day, and, when delegation is on, twice the longer of its `cooldown` and `same_incident`; at most `3650d`. |
 | `max_rows` | `1000000` | Raw action-ledger rows kept at most, and, counted apart, observed task status transitions; past it the oldest whole days of the ledger (the oldest transitions) go first, but never within the ledger's own windows (above). In memory (`":memory:"`) the ledger keeps at most 100,000 entries, the newest, whatever their age: a farm that fills that within the ledger's windows may see an action repeat; use a database file. |
 
 What retention keeps and drops:

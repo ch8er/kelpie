@@ -84,16 +84,22 @@ class PlatformAdapter(Protocol):
 
     def wip_commit(
         self, task_id: str, message: str, *, branch: str | None = None, draft_pr: bool = False
-    ) -> None:
-        """Commit and push everything uncommitted in the task's worktree, on ``branch`` when
-        given. With ``draft_pr`` the push goes to a draft PR (which does not run CI) instead
-        of relying on ``[skip ci]`` in the message. Afterwards the adapter reports the new
-        commit as the session's ``last_commit``, so the next session can resume from it.
+    ) -> str | None:
+        """Commit everything uncommitted in the task's worktree, on ``branch`` when given,
+        and, where the adapter pushes at all, push it. With ``draft_pr`` the push goes to a
+        draft PR (which does not run CI) instead of relying on ``[skip ci]`` in the message.
+        Afterwards the adapter reports the new commit as the session's ``last_commit``, so the
+        next session can resume from it. May return a few words on what was committed (the
+        ledger keeps them).
 
-        The commit and the push go to ``branch`` exactly: rule 5 checked that branch for open
-        PRs, not whatever the worktree has checked out. Raise (do nothing) when ``branch`` is
-        None, the worktree's HEAD is another branch, or a run is active on the task (a new
-        session may be starting in that worktree)."""
+        An adapter may commit locally and never push (Hermes, #399): the work then survives
+        in the task's branch for the next session in the same worktree, and ``draft_pr``
+        raises :class:`UnsupportedAction`.
+
+        The commit (and any push) goes to ``branch`` exactly: rule 5 checked that branch for
+        open PRs, not whatever the worktree has checked out. Raise (do nothing) when
+        ``branch`` is None, the worktree's HEAD is another branch, or a run is active on the
+        task (a new session may be starting in that worktree)."""
         ...
 
     def events(self, since: datetime) -> Iterable[PlatformEvent]: ...
@@ -166,6 +172,22 @@ class SupportsClose(Protocol):
     """Optional capability: move a task to done (a parent whose subtasks are finished)."""
 
     def close(self, task_id: str, reason: str) -> None: ...
+
+
+@runtime_checkable
+class SupportsDelegate(Protocol):
+    """Optional capability (#347): put a card on the operator agent's own queue.
+
+    ``task_id`` is the task the problem is about (its board is where the card goes);
+    ``operator`` the profile to assign it to; ``title`` and ``body`` the card's text, which
+    already quotes other agents' text as data; ``key`` an idempotency key: an adapter
+    returns the card it made for that key before rather than make a second one, as far as
+    it can tell. Returns the card's task id on the board, in the same namespace as
+    :attr:`Task.id`. Raises :class:`UnsupportedAction` before any side effect when the
+    operator is not a valid agent name, or a person or Kelpie itself (whether the profile
+    exists on the board is not checked)."""
+
+    def delegate(self, task_id: str, operator: str, title: str, body: str, key: str) -> str: ...
 
 
 def declared_actions(adapter: object) -> frozenset[ActionKind] | None:
