@@ -2533,7 +2533,10 @@ def _check_operators(settings: Settings, policy: Policy | None) -> None:
     """Refuse a ``delegate_to`` operator that is a person or Kelpie itself on Hermes (its
     ``human_owners``, Kelpie's ``author``, Hermes' default CLI author ``user``): a card
     could only be refused at act time, after paging someone."""
-    if policy is None or settings.hermes is None:
+    if policy is None:
+        return
+    _check_issue_operators(settings, policy)
+    if settings.hermes is None:
         return
     from kelpie.adapters.hermes.adapter import _PROFILE as HERMES_PROFILE
     from kelpie.adapters.hermes.adapter import CLI_USER, UNASSIGN_WORDS
@@ -2593,6 +2596,33 @@ def _check_hub_operators(settings: Settings, policy: Policy | None) -> None:
             f"[engine.rules.delegation] delegate_to {bare}: with [hub] an adapter's board is "
             '<agent>/<adapter>, e.g. "laptop/hermes"'
         )
+
+
+def _check_issue_operators(settings: Settings, policy: Policy) -> None:
+    """On the issue trackers an operator is one of the adapter's ``agents`` (Kelpie starts
+    it on the card as it starts it on any issue); Linear opens no cards yet."""
+    where = "[engine.rules.delegation] delegate_to"
+    if "linear" in policy.delegate_to:
+        raise ConfigError(f"{where}.linear: Linear cannot take delegation cards yet")
+    operator = policy.delegate_to.get("github-issues")
+    if operator is None:
+        return
+    issues = settings.github_issues
+    if issues is None or not issues.enabled:
+        raise ConfigError(f'{where}."github-issues": [adapters.github_issues] is not configured')
+    agent = issues.agents.get(operator)
+    if agent is None:
+        raise ConfigError(
+            f'{where}."github-issues" = {operator!r}: not one of [adapters.github_issues] '
+            f"agents ({', '.join(sorted(issues.agents)) or 'none'})"
+        )
+    if agent.assignee is None and agent.label is None and agent.mention is None:
+        raise ConfigError(
+            f'{where}."github-issues" = {operator!r}: Kelpie cannot start it (no assignee, '
+            "label or mention)"
+        )
+    if not any(not b.agents or operator in b.agents for b in issues.boards):
+        raise ConfigError(f'{where}."github-issues" = {operator!r}: no board takes it (agents)')
 
 
 def _with_delegation(loop: ControlLoop, loaded: LoadedRules, store: LedgerStore) -> None:
