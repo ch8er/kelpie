@@ -261,9 +261,21 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 - Incident fixture `15-green-main-red-pr.yaml`: with main green and the awaited PR's head
   red, rule 4 keeps the block; a task waiting for a PR to merge stays blocked while the PR
   is open, whatever CI says.
+- Holds on issue trackers (rule 6): GitHub Issues and Linear read pauses and flags. A
+  board's `pause_labels` (both) and Linear's `pause_states` make an open issue `blocked`
+  on a pause (block category `pause`), which `kind = "pause"` holds match; a locked GitHub
+  issue carries the flag `locked`. With `allow_lift_holds` (off by default) the adapter
+  lifts a pause hold that names it as `executor` (`lift_hold`, act mode only): the pause
+  label the hold is named after (only that one) comes off each held task that still
+  carries it, at most 4 a lift. A pause state, a flag or a label hold is left to a person.
+  Rule 4 still alerts on a paused task as on any block without a condition. Adapters gain
+  the optional `SupportsLiftHold` capability; `lift_hold` is not offered to a hub.
 
 ### Changed
 
+- Linear: a task whose time comes from when Kelpie first saw it as it is (no history
+  read) now counts again from its last change when its workflow state changes, as it
+  already did for labels and assignees.
 - Internal, no behaviour change (#248 D13, adapter twins): one copy of the adapters'
   shared helpers in `kelpie.adapters._common`: `format_age` (Hermes, Claude Code,
   OpenClaw), the spool time `_utc` and `_warn`/`act_locks` (Claude Code, OpenClaw), the

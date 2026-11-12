@@ -1325,3 +1325,42 @@ def test_the_agents_user_lookup_of_a_refresh_is_within_its_budget(lin: FakeLinea
     reader.client.monotonic = ticking
     assert set(tasks(a)) == {"ENG-1"}  # served from the last good read
     assert sent == []  # not even the users' lookup went out
+
+
+def test_a_pause_hold_takes_its_label_off_through_linear(lin: FakeLinear) -> None:
+    lin.label("on-hold", "ENG")
+    lin.issue("ENG-6", "x", ago(days=1), labels=["on-hold", "keep"])
+    board = Board("ENG", pause_labels=("on-hold",))
+    a = adapter(lin, (board,))
+    a.lift_holds = True
+    a.snapshot(NOW)
+    assert a.lift_hold("on-hold", "pause", ["ENG-6"], "past its expiry") == (
+        "label 'on-hold' off ENG-6"
+    )
+    assert lin.issues["ENG-6"].labels == ["keep"]
+    removed = [
+        r["variables"]["input"]["removedLabelIds"]
+        for r in lin.requests
+        if r["operationName"] == "KelpieUpdate" and "removedLabelIds" in r["variables"]["input"]
+    ]
+    assert removed == [["label-ENG-on-hold"]]  # the team's label, looked up before the write
+
+
+def test_a_pause_label_linear_lacks_is_refused_before_any_write(lin: FakeLinear) -> None:
+    lin.label("on-hold", "PARENT")  # a parent team's label: not found for ENG
+    lin.issue("ENG-1", "x", ago(days=1), labels=["on-hold"])
+    a = adapter(lin, (Board("ENG", pause_labels=("on-hold",)),))
+    a.lift_holds = True
+    a.snapshot(NOW)
+    with pytest.raises(IssuesError) as err:
+        a.lift_hold("on-hold", "pause", ["ENG-1"], "r")
+    assert err.value.public_reason == "Linear has no label 'on-hold'"
+    assert lin.issues["ENG-1"].labels == ["on-hold"] and lin.issues["ENG-1"].comments == []
+
+
+def test_a_pause_state_counts_from_when_it_was_seen(lin: FakeLinear) -> None:
+    lin.issue("ENG-1", "x", ago(days=2), state="Paused", state_type="started")
+    a = adapter(lin, (Board("ENG", pause_states=("paused",)),))
+    first = tasks(a)["ENG-1"]
+    assert first.status is Status.BLOCKED and first.block is not None
+    assert first.block.category == "pause"

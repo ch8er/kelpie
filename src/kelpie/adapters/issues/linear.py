@@ -841,8 +841,8 @@ class LinearIssues:
         return item
 
     def reserve(self, writes: int, agents: Sequence[Agent] = ()) -> None:
-        """Hold the action's writes, then look up every id they may need (the team's blocked
-        and agent labels, the agents' users, the state to reopen to), so no lookup can fail
+        """Hold the action's writes, then look up every id they may need (the team's blocked,
+        pause and agent labels, the agents' users, the state to reopen to), so no lookup can fail
         between two writes. A lookup Linear cannot answer now defers the action."""
         backoff = self.client.backoff_until
         waiting = "backoff" if backoff is not None and self.clock() < backoff else None
@@ -865,7 +865,11 @@ class LinearIssues:
             return
         team = self._target(item_id)
         board = self._board(team)
-        labels = [*board.blocked_labels, *(a.label for a in self.agents.values() if a.label)]
+        labels = [
+            *board.blocked_labels,
+            *board.pause_labels,  # a lift_hold takes one off
+            *(a.label for a in self.agents.values() if a.label),
+        ]
         try:
             self._look_up_labels(team, labels)
             self._look_up_users([a.assignee for a in self.agents.values() if a.assignee])

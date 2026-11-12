@@ -25,6 +25,7 @@ Tasks are issues (`owner/repo#12`); pull requests in the issue lists are left ou
 | closed as completed | `done` | closed |
 | closed as not planned / duplicate | `cancelled` | closed |
 | open, a `blocked_labels` label | `blocked` (block reason `label '<name>'`) | the label was put on |
+| open, a `pause_labels` label (or, on Linear, a `pause_states` state) | `blocked` on a pause (block category `pause`, reason `paused: label '<name>'`) | the label was put on (a state: the earlier of the issue's last change and when Kelpie first saw it so) |
 | open, a linked ready pull request | `review` | the pull request was opened (not when a draft was marked ready: GitHub's list does not say) |
 | open, a linked draft pull request, or someone holds it | `in_progress` | the agent or person was assigned / labelled, else the pull request was opened |
 | open, a `ready_labels` label, no open blocker off the boards | `ready` | created, reopened, or last unassigned |
@@ -40,6 +41,8 @@ it). Tasks and agents default to the role `issue-agent`, apart from other adapte
   GitHub's own link: it closes the issue on merge. Mentions never link (incident 17); forks
   link nothing. Its head branch becomes the task's `branch`, so Kelpie's pull request lists
   ([connectors.github.pulls]) link the pull request to the task too.
+- **Flags** (rule 6's `kind = "flag"` holds): a locked GitHub issue (conversation locked)
+  carries `locked`. Linear records none.
 - **Owner**, first match: an agent assigned (`assignee`), an agent's `label`, the agent whose
   account (`author`) opened the linked pull request, a person assigned, the person (or bot)
   who opened the linked pull request (a contributor's draft is not an orphan; a `[bot]`
@@ -115,6 +118,7 @@ write makes the next read of that repository ask GitHub rather than the cache.
 | `unblock` | the board's blocked labels come off, each by itself (`DELETE /labels/{name}`; a name that cannot be a path: the other labels are put back) |
 | `requeue` | the task starts over: a closed issue is reopened (not one closed as not planned or duplicate), and the agent holding it restarted: unassigned and assigned again, its label removed and put back, or its mention posted again. No agent holds an open issue: refused |
 | `reassign` | the new agent is assigned, labelled or mentioned first, then the one holding it is unassigned (or its label removed): a failure halfway leaves the issue held. Only an agent of this adapter the board allows, only on an open issue. A mention cannot be taken back |
+| `lift_hold` | with `allow_lift_holds` (off by default), rule 6's pause hold naming this adapter as `executor`, past its expiry, and named after one of the board's `pause_labels`: that label (only that one) comes off each held task of this adapter that still carries it (not one closed or blocked by a blocked label), with a note. At most 4 tasks per lift, each re-read right before its own writes; the rest, and tasks that cannot be read now, are left to a person (the alert says how many). A pause state (Linear), a flag hold, a label hold or a hold named after no pause label: refused, a person is told |
 | `wake`, `wip_commit`, `stop`, `wait`, `close` | refused: these agents run on someone else's machines, and Kelpie parks no issue task |
 
 **What Kelpie writes.** Rule reasons can quote text anyone wrote (issue titles, block

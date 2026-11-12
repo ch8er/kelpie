@@ -190,6 +190,36 @@ class SupportsDelegate(Protocol):
     def delegate(self, task_id: str, operator: str, title: str, body: str, key: str) -> str: ...
 
 
+@runtime_checkable
+class SupportsLiftHold(Protocol):
+    """Optional capability: lift a hold rule 6 found past its expiry (``lift_hold``) on the
+    adapter's own tasks, when the hold names the adapter as its ``executor``.
+
+    ``hold`` is the hold's name, ``kind`` how it holds (``label``, ``flag``, ``pause``) and
+    ``task_ids`` the held tasks of the snapshot the rule read (any adapter's: the adapter
+    lifts only its own and leaves the rest alone). ``lift_holds`` is the adapter's own
+    opt-in (off by default): while it is off, and for a kind or a task the platform cannot
+    lift, :class:`UnsupportedAction` is raised before any side effect, so a person is told.
+    Each task is re-read first; one no longer held is skipped, and none left to lift raises
+    :class:`NothingToDo`. Returns what was lifted, in a few words."""
+
+    lift_holds: bool
+
+    def lift_hold(self, hold: str, kind: str, task_ids: Sequence[str], reason: str) -> str: ...
+
+
+def lifts_holds(adapter: object) -> bool:
+    """Whether ``adapter`` lifts holds here: it has the capability, declares ``lift_hold``
+    and its config turned lifting on."""
+    declared = declared_actions(adapter)
+    return (
+        isinstance(adapter, SupportsLiftHold)
+        and declared is not None
+        and ActionKind.LIFT_HOLD in declared
+        and adapter.lift_holds is True
+    )
+
+
 def declared_actions(adapter: object) -> frozenset[ActionKind] | None:
     """The action kinds ``adapter`` declares in ``actions``; None when it declares none."""
     actions = getattr(adapter, "actions", None)

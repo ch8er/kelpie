@@ -411,7 +411,7 @@ alert with a rebalancing suggestion.
 - [x] Overloaded role with idle roles elsewhere → `alert` with a rebalancing suggestion
 - [x] Farm or role idle longer than N minutes (config) while ready work waits (queued tasks, mergeable PRs from the GitHub connector) → `alert` with the idle time, the waiting work and the likely cause (an active hold, an empty queue upstream)
 - [x] Holds have an owner and an expiry (default from config); expired hold → `alert` with the owner and the idle cost (#48, #90)
-- [x] Holds matched by flag or pause, not only by PR label; in act mode the executor that owns a hold lifts it: `kind = "flag"`/`"pause"` holds, a hold's `executor` gets `lift_hold`, and the GitHub pull request step lifts PR-label holds (opt-in, own token); board adapters lift no holds yet (#432)
+- [x] Holds matched by flag or pause, not only by PR label; in act mode the executor that owns a hold lifts it: `kind = "flag"`/`"pause"` holds, a hold's `executor` gets `lift_hold`, and the GitHub pull request step lifts PR-label holds (opt-in, own token) (#432); GitHub Issues and Linear read pause labels and states and GitHub's lock as a flag, and lift pause-label holds (opt-in)
 - [x] Idle hours caused by holds go to the cost-of-chaos report
 - [x] Fixtures: existing `09-sequential-chain-idle.yaml`; new `10-review-queue-bottleneck.yaml`, `14-forgotten-merge-hold.yaml` (hold set, promised lift missed, ready PRs waiting about 5 h)
 
