@@ -95,7 +95,7 @@ def run(
         problems=tuple(problems),
         delegations=tuple(events or ()),
     )
-    return list(Delegation(policy).evaluate(snap))
+    return [a for a in Delegation(policy).evaluate(snap) if a.kind is ActionKind.DELEGATE]
 
 
 # --- what may be delegated ---------------------------------------------------------------
@@ -154,7 +154,7 @@ def test_a_persons_task_is_not_delegated() -> None:
         owners=(Owner("alice", "ceo", OwnerKind.HUMAN),),
         problems=(problem(),),
     )
-    assert list(Delegation(POLICY).evaluate(snap)) == []
+    assert [a for a in Delegation(POLICY).evaluate(snap) if a.kind is ActionKind.DELEGATE] == []
 
 
 def test_on_a_hub_the_board_and_the_operator_are_namespaced() -> None:
@@ -269,7 +269,7 @@ def test_a_person_assigned_task_is_not_delegated() -> None:
         owners=(Owner("alice", "ceo", OwnerKind.HUMAN),),
         problems=(problem(),),
     )
-    assert list(Delegation(POLICY).evaluate(snap)) == []
+    assert [a for a in Delegation(POLICY).evaluate(snap) if a.kind is ActionKind.DELEGATE] == []
 
 
 def test_card_values_stay_on_their_line() -> None:
@@ -541,7 +541,7 @@ def test_an_operator_the_farm_knows_as_a_person_is_skipped() -> None:
         owners=(Owner("ops-1", "ceo", OwnerKind.HUMAN),),
         problems=(problem(),),
     )
-    assert list(Delegation(POLICY).evaluate(snap)) == []
+    assert [a for a in Delegation(POLICY).evaluate(snap) if a.kind is ActionKind.DELEGATE] == []
 
 
 def test_a_person_operator_is_matched_whatever_its_case() -> None:
@@ -554,4 +554,4 @@ def test_a_person_operator_is_matched_whatever_its_case() -> None:
         owners=(Owner("ops-1", "ceo", OwnerKind.HUMAN),),
         problems=(problem(),),
     )
-    assert list(Delegation(upper).evaluate(snap)) == []
+    assert [a for a in Delegation(upper).evaluate(snap) if a.kind is ActionKind.DELEGATE] == []

@@ -901,12 +901,35 @@ delegate_to = { hermes = "ops-1" }   # board (a task's source) -> operator profi
 | `max_attempts` | `2` | 1 to 2 | Cards per incident (a task, or the problem when it has none) within `cooldown`; then the person. |
 | `same_incident` | `"1d"` | duration, > 0 | A card whose fix was verified closes its incident only once the fix held this long: the problem back sooner is another attempt of the same incident. |
 | `cooldown` | `"7d"` | duration, > 0, at most 30d | Cards counted for `max_attempts`, and no new card for an incident given back to the person, within this. The server reads back twice the longest of `cooldown` and `same_incident` (a problem opened before that is not delegated), and `[storage] retention` must cover it. |
-| `hold` | `"30m"` | duration, > 0 | How long a fix must stay clear before Kelpie calls it verified (used once verdicts land, a later part of #347). |
-| `pickup_within` | `"1h"` | duration, < `finish_within` | A card nobody picked up by then goes back to the person (a later part of #347). |
-| `finish_within` | `"6h"` | duration, > 0 | A card not finished by then goes back to the person (a later part of #347). |
+| `hold` | `"30m"` | duration, > 0 | How long a fix must stay clear before Kelpie calls it verified: Kelpie's own state for the problem closed at least this long ago (the rule stopped reporting it). A closed card waits this long for Kelpie's check to catch up. |
+| `pickup_within` | `"1h"` | duration, < `finish_within` | A card nobody picked up by then goes back to the person ("not fixed, yours now"). |
+| `finish_within` | `"6h"` | duration, > 0 | A card not finished by then goes back to the person ("not fixed, yours now"). |
 | `max_per_hour` | `3` | integer >= 1 | New cards carried out per hour; the oldest problems go first. |
 | `max_per_day` | `10` | integer >= 1 | New cards carried out per day. |
-| `breaker_failures` | `3` | integer >= 1 | Failed verifications within a day that stop all delegation (the circuit breaker; its alert to the person comes with the verdicts). |
+| `breaker_failures` | `3` | integer >= 1 | Failed verifications within a day that stop all delegation (the circuit breaker): one alert to the person while it lasts, and every problem goes to the person as before. |
+
+**When the person hears.** While `delegation` is in `act` mode (and not under dry-run),
+the engine holds back the alerts of a problem the operator may have (its class, `warning`,
+a board with an operator, not a person's or the operator's task, not an outage), and the
+"resolved" notice of one the operator holds a card about; the ledger records them as
+`delegated`. The person gets one message on hand-off ("Handed the problem on T-1 to
+ops-1; card t_9a for ops-1."), one at the end, and nothing in between:
+
+- **Fixed, verified**: Kelpie's own state for the problem has been closed for `hold`
+  (whatever the card says);
+- **Agent says fixed, still broken**: the operator closed the card, `hold` passed, and the
+  problem is still reported; the next card follows (attempt 2);
+- **Not fixed, yours now**: the operator blocked the card (its reason quoted), closed the
+  last allowed attempt while the problem stays, nobody picked the card up within
+  `pickup_within`, or it was not finished within `finish_within`; from then on the
+  problem's alerts reach the person again, and no new card is made within `cooldown`;
+- **Kelpie did not hand this to ops-1 (why); it is yours**: a problem the engine held back
+  that the rule does not hand over (the hourly or daily limit, the attempts used, a problem
+  about one of Kelpie's own cards, one older than the history).
+
+A `critical` problem is never held back: the person hears it at once. In `suggest` mode
+nothing is held back; the person gets the problem's alerts and "Suggested: hand the problem
+on T-1 to ops-1".
 
 Guards: one open card per incident (a card carried out with no verdict yet); after
 `max_attempts` cards within `cooldown`, or once the incident was given back to the person,

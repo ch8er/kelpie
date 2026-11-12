@@ -42,26 +42,28 @@ from typing import Any
 
 from kelpie.core.actions import Action, ActionKind, Severity
 from kelpie.core.delegation import (
+    EXECUTED,
+    FAILED,
     RULE,
+    VERIFIED,
     Policy,
+    breaker_open,
     card_for,
+    given_back,
     incident_of,
-    operator_ids,
     policy_from_config,
+    quote,
     why_not,
 )
-from kelpie.core.model import DelegationEvent, OwnerKind, Problem, Snapshot
+from kelpie.core.model import DelegationEvent, Problem, Snapshot, Status, Task
 from kelpie.rules import register
+from kelpie.rules._params import human
 
 NAME = RULE
-EXECUTED = "executed"
-# Verdicts that end an incident's delegation and give it back to the person.
-GAVE_UP = frozenset({"not_fixed"})
-VERIFIED = "verified"
-# Verdicts that count as a failed verification (the circuit breaker).
-FAILED = frozenset({"still_broken", "not_fixed", "not_picked_up", "not_finished"})
 DAY = timedelta(days=1)
 HOUR = timedelta(hours=1)
+# Card statuses that mean the operator picked it up (or finished with it).
+_PICKED = frozenset({Status.IN_PROGRESS, Status.REVIEW, Status.ACCEPTED, Status.BLOCKED})
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,45 +77,107 @@ class Delegation:
             return ()
         now = snapshot.now
         events = [e for e in snapshot.delegations if e.at > now - policy.history]
-        failures = [
-            e for e in events if e.kind == "verdict" and e.verdict in FAILED and e.at > now - DAY
-        ]
-        if len(failures) >= policy.breaker_failures:
-            return ()  # the circuit breaker: every problem stays with the person
         carried = [e for e in events if e.kind == "card" and e.outcome == EXECUTED]
-        card_tasks = {c.card_id for c in carried if c.card_id}
         verdicts = {(e.problem, e.attempt): e for e in events if e.kind == "verdict"}
+        actions: list[Action] = list(self._verdicts(snapshot, events, carried, verdicts))
+        if breaker_open(policy, events, now):
+            # Every problem stays with the person (the engine holds nothing back), said once.
+            failed = [e.at for e in events if e.kind == "verdict" and e.verdict in FAILED]
+            actions.append(_breaker(policy, min(at for at in failed if at > now - DAY)))
+            return actions
+        card_tasks = {c.card_id for c in carried if c.card_id}
         left = min(
             policy.max_per_hour - sum(1 for c in carried if c.at > now - HOUR),
             policy.max_per_day - sum(1 for c in carried if c.at > now - DAY),
         )
-        actions: list[Action] = []
         for problem in sorted(snapshot.problems, key=lambda p: (p.opened_at, p.id)):
-            if left <= 0:
-                break
             task = snapshot.task(problem.task_id) if problem.task_id else None
-            ids = (task.owner_id, task.assignee) if task is not None else ()
-            people = [snapshot.owner(who) for who in ids if who]
-            person = any(o is not None and o.kind is OwnerKind.HUMAN for o in people)
-            if task is None or why_not(policy, problem, task, now, person=person) is not None:
+            if task is None or why_not(policy, problem, task, now, owners=snapshot.owners):
                 continue
-            if problem.opened_at < now - policy.history:
-                continue  # its earlier cards may be out of the history: keys could repeat
-            if task.id in card_tasks:
-                continue  # a problem about a delegation card stays with the person
-            attempt = self._attempt(problem, events, carried, verdicts, now)
-            if attempt is None:
-                continue
+            if given_back(policy, incident_of(problem), events, now):
+                continue  # the person has it, and heard so from the verdict
             operator = policy.operator_for(task)
             assert operator is not None  # why_not checked it
-            ids = operator_ids(task.source or "", operator)
-            if any(o.kind is OwnerKind.HUMAN and o.id.casefold() in ids for o in snapshot.owners):
-                continue  # the configured operator is a person on this farm
-            key = f"{problem.id}:{int(problem.opened_at.timestamp())}:{attempt}"
-            card = card_for(problem, task, operator, attempt, f"kelpie-{key}")
-            actions.append(_delegate(problem, task.id, operator, attempt, key, card.params()))
-            left -= 1
+            if task.id in card_tasks:
+                why = "it is about one of Kelpie's own cards"
+            elif problem.opened_at < now - policy.history:
+                why = "it is older than the history Kelpie reads back"
+            elif (attempt := self._attempt(problem, events, carried, verdicts, now)) is None:
+                if _open(problem, carried, verdicts):
+                    continue  # with the operator: the verdict tells the person
+                why = f"{policy.max_attempts} attempts were made within {human(policy.cooldown)}"
+            elif left <= 0:
+                why = "the hourly or daily limit of cards is reached"
+            else:
+                key = f"{problem.id}:{int(problem.opened_at.timestamp())}:{attempt}"
+                card = card_for(problem, task, operator, attempt, f"kelpie-{key}")
+                actions.append(_delegate(problem, task.id, operator, attempt, key, card.params()))
+                left -= 1
+                continue
+            actions.append(_kept(problem, operator, why))
         return actions
+
+    def _verdicts(
+        self,
+        snapshot: Snapshot,
+        events: Sequence[DelegationEvent],
+        carried: Sequence[DelegationEvent],
+        verdicts: dict[tuple[str, int], DelegationEvent],
+    ) -> list[Action]:
+        """One verdict per card carried out that has none yet, by Kelpie's own check: the
+        problem stayed clear for ``hold`` (verified), or the operator blocked the card, closed
+        it while the problem stays (still broken; not fixed once the attempts are used), or
+        let a deadline pass (not picked up, not finished). Otherwise it waits."""
+        policy, now = self.policy, snapshot.now
+        open_ids = {p.id: p for p in snapshot.problems}
+        cleared: dict[str, datetime] = {}
+        for r in snapshot.resolved_problems:
+            cleared[r.id] = max(r.resolved_at, cleared.get(r.id, r.resolved_at))
+        found: list[Action] = []
+        for card in sorted(carried, key=lambda c: c.at):
+            if (card.problem, card.attempt) in verdicts:
+                continue
+            ctask = snapshot.task(card.card_id) if card.card_id else None
+            problem = open_ids.get(card.problem)
+            if problem is None:
+                clear = cleared.get(card.problem)
+                if clear is not None and now >= max(clear, card.at) + policy.hold:
+                    found.append(_verdict(card, VERIFIED, _said_verified(card, policy)))
+                elif clear is None and now >= card.at + policy.finish_within:
+                    # neither open nor closed in Kelpie's records: it cannot verify a fix
+                    said = (
+                        f"Not verified, yours now: Kelpie no longer sees {card.problem} but "
+                        f"has no record of it clearing; check {card.task_id or 'the task'}."
+                    )
+                    found.append(_verdict(card, "not_finished", said))
+                continue
+            if ctask is not None and ctask.status is Status.BLOCKED:
+                reason = ctask.block.reason if ctask.block is not None else ""
+                why = f"{card.operator} blocked card {card.card_id}" + (
+                    f":\n{quote(reason, 300)}" if reason else ""
+                )
+                found.append(_verdict(card, "not_fixed", _yours(card, problem, why)))
+            elif ctask is not None and ctask.status.is_terminal:
+                if now < ctask.status_since + policy.hold:
+                    continue  # let Kelpie's own check catch up with the fix
+                used = self._attempt(problem, events, carried, verdicts, now, closing=card)
+                said = (
+                    f"Agent says fixed, still broken: {card.operator} closed card "
+                    f"{card.card_id}, but Kelpie still reports {problem.rule} on "
+                    f"{problem.task_id or problem.id}."
+                )
+                if used is None:
+                    found.append(_verdict(card, "not_fixed", _yours(card, problem, said)))
+                else:
+                    more = f"{said} Kelpie hands it over once more (attempt {used})."
+                    found.append(_verdict(card, "still_broken", more))
+            elif now >= card.at + policy.finish_within:
+                why = f"card {card.card_id} was not finished within {human(policy.finish_within)}"
+                found.append(_verdict(card, "not_finished", _yours(card, problem, why)))
+            elif now >= card.at + policy.pickup_within and not _picked(ctask, snapshot):
+                why = f"nobody picked up card {card.card_id} within {human(policy.pickup_within)}"
+                found.append(_verdict(card, "not_picked_up", _yours(card, problem, why)))
+        return found
 
     def _attempt(
         self,
@@ -122,24 +186,20 @@ class Delegation:
         carried: Sequence[DelegationEvent],
         verdicts: dict[tuple[str, int], DelegationEvent],
         now: datetime,
+        closing: DelegationEvent | None = None,
     ) -> int | None:
         """The attempt a new card for ``problem`` would be (counted over the incident's
         cards in the history, so it never repeats), or None when a guard holds it back: a
         card still open for its incident, the incident given back to the person, or
         ``max_attempts`` cards that count within ``cooldown`` (a card whose fix was
-        verified more than ``same_incident`` ago closed its incident and no longer counts)."""
+        verified more than ``same_incident`` ago closed its incident and no longer counts).
+        ``closing``: the open card being judged now, counted as an attempt already made."""
         policy = self.policy
         incident = incident_of(problem)
         mine = [c for c in carried if c.incident == incident]
-        if any((c.problem, c.attempt) not in verdicts for c in mine):
+        if any((c.problem, c.attempt) not in verdicts and c is not closing for c in mine):
             return None  # one open card per incident
-        if any(
-            e.kind == "verdict"
-            and e.incident == incident
-            and e.verdict in GAVE_UP
-            and e.at > now - policy.cooldown
-            for e in events
-        ):
+        if given_back(policy, incident, events, now):
             return None  # given back to the person: no new card within the cooldown
 
         def counts(card: DelegationEvent) -> bool:
@@ -182,6 +242,94 @@ def _delegate(
             "problem_rule": problem.rule,
             "card": card,
         },
+    )
+
+
+def _open(
+    problem: Problem,
+    carried: Sequence[DelegationEvent],
+    verdicts: dict[tuple[str, int], DelegationEvent],
+) -> bool:
+    incident = incident_of(problem)
+    return any(c.incident == incident and (c.problem, c.attempt) not in verdicts for c in carried)
+
+
+def _picked(card: Task | None, snapshot: Snapshot) -> bool:
+    """Whether the operator picked the card up: it moved on, someone holds it, or a session
+    ran on it."""
+    if card is None:
+        return False
+    if card.status in _PICKED or card.status.is_terminal or card.owner_id:
+        return True
+    return bool(snapshot.sessions_for(card.id))
+
+
+def _headline(problem: Problem) -> str:
+    return problem.summary.strip().splitlines()[0] if problem.summary.strip() else problem.id
+
+
+def _said_verified(card: DelegationEvent, policy: Policy) -> str:
+    return (
+        f"Fixed, verified: the problem {card.operator} had on card {card.card_id} "
+        f"({card.problem}) has stayed clear for {human(policy.hold)} by Kelpie's own check."
+    )
+
+
+def _yours(card: DelegationEvent, problem: Problem, why: str) -> str:
+    return (
+        f"Not fixed, yours now: {why}. Kelpie still reports: {_headline(problem)} "
+        "No new card for this task until the cooldown ends."
+    )
+
+
+def _verdict(card: DelegationEvent, verdict: str, reason: str) -> Action:
+    return Action(
+        ActionKind.ALERT,
+        NAME,
+        reason,
+        task_id=card.task_id,
+        key=f"verdict:{card.problem}:{card.attempt}:{int(card.at.timestamp())}",
+        severity=Severity.WARNING,
+        once=True,
+        once_per_key=True,
+        params={
+            "problem": card.problem,
+            "incident": card.incident,
+            "attempt": card.attempt,
+            "operator": card.operator,
+            "card_id": card.card_id,
+            "verdict": verdict,
+        },
+    )
+
+
+def _kept(problem: Problem, operator: str, why: str) -> Action:
+    """The person's message about a problem the engine held back for the operator that the
+    rule does not hand over: it is theirs."""
+    return Action(
+        ActionKind.ALERT,
+        NAME,
+        f"Kelpie did not hand this to {operator} ({why}); it is yours: {_headline(problem)}",
+        task_id=problem.task_id,
+        key=f"kept:{problem.id}:{int(problem.opened_at.timestamp())}",
+        severity=Severity.WARNING,
+        once=True,
+        once_per_key=True,
+        params={"problem": problem.id, "kept": why},
+    )
+
+
+def _breaker(policy: Policy, since: datetime) -> Action:
+    return Action(
+        ActionKind.ALERT,
+        NAME,
+        f"Delegation stopped: {policy.breaker_failures} or more fixes failed Kelpie's check "
+        "within a day. Kelpie hands nothing to the operator for now; every problem comes to "
+        "you as before.",
+        key="breaker",
+        severity=Severity.WARNING,
+        state=f"{NAME}:breaker",
+        since=since,
     )
 
 
