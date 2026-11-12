@@ -637,3 +637,102 @@ def test_an_unreadable_source_through_the_engine_is_said_once() -> None:
     for minute in range(60, 120, 5):
         engine.tick(lambda m=minute: Snapshot(now=NOW + timedelta(minutes=m)))
     assert len(alerter.events) == 2 and "read again" in alerter.events[-1].reason
+
+
+def test_host_states_are_held_open_while_the_source_is_blind() -> None:
+    from kelpie.core.model import SourceFailure
+    from kelpie.rules.resources import SOURCE_STATE
+
+    rule = Resources()
+    blind = Snapshot(now=NOW, resources_failure=SourceFailure("timeout", NOW))
+    for state in (
+        "resources:disk:host-a:/",
+        "resources:memory:host-a:memory",
+        "resources:load:host-a:load",
+        "resources:processes:host-a:processes",
+        "resources:host-a:heavy",
+        "resources:disk:heavy",  # a host named "disk": its heavy state
+        "resources:heavy:unplaced",
+    ):
+        assert rule.holds(state, blind), state
+        assert not rule.holds(state, Snapshot(now=NOW)), state  # read: resolves as usual
+    for state in (
+        SOURCE_STATE,  # the blind warning itself resolves when readings come back
+        "resources:llm_quota:anthropic",  # providers are read elsewhere
+        "resources:auth:anthropic",
+        "resources:llm_quota:heavy",  # a quota named "heavy" is not a host's heavy state
+        "resources:auth:heavy",
+        "resources:ci_minutes:github",
+        "other_rule:disk:host-a:/",
+        "resources:nonsense",
+    ):
+        assert not rule.holds(state, blind), state
+
+
+def test_an_open_disk_alert_stays_open_through_a_blind_spell() -> None:
+    from kelpie.core.config import EngineConfig, Mode
+    from kelpie.core.engine import Engine
+    from kelpie.core.model import SourceFailure
+    from tests.fakes import FakeAdapter, FakeAlerter
+
+    alerter = FakeAlerter()
+    config = EngineConfig(dry_run=False, default_mode=Mode.SUGGEST)
+    engine = Engine([Resources()], adapters=[FakeAdapter()], alerter=alerter, config=config)  # type: ignore[list-item]
+
+    def full(at: datetime) -> Snapshot:
+        return Snapshot(
+            now=at, resources=(res(ResourceKind.DISK, 96, 100, name="host-a:/", at=at),)
+        )
+
+    engine.tick(lambda: full(NOW))
+    assert [e.severity for e in alerter.events] == [Severity.CRITICAL]
+    down = SourceFailure("connection", NOW + timedelta(minutes=5))
+    for minute in range(5, 65, 5):  # an hour blind: well past resolve_after
+        at = NOW + timedelta(minutes=minute)
+        engine.tick(lambda at=at: Snapshot(now=at, resources_failure=down))
+    reasons = [e.reason for e in alerter.events]
+    assert len(reasons) == 2 and "cannot read host resources" in reasons[1]
+    assert not any("no recent reading" in r for r in reasons)
+    # Readings back and the disk still full: no new "opened" alert for it, and the blind
+    # warning resolves.
+    for minute in range(65, 85, 5):
+        engine.tick(lambda m=minute: full(NOW + timedelta(minutes=m)))
+    later = [e.reason for e in alerter.events[2:]]
+    assert len(later) == 1 and "read again" in later[0]
+    # Readings back and the disk freed: it resolves on its reading.
+    for minute in range(85, 105, 5):
+        at = NOW + timedelta(minutes=minute)
+        engine.tick(
+            lambda at=at: Snapshot(
+                now=at, resources=(res(ResourceKind.DISK, 40, 100, name="host-a:/", at=at),)
+            )
+        )
+    assert (
+        "40% full" in alerter.events[-1].reason
+        or "under its threshold" in alerter.events[-1].reason
+    )
+
+
+def test_without_the_hold_a_blind_disk_alert_would_resolve() -> None:
+    """The negative case: the same spell with the hold switched off resolves the disk as
+    "no recent reading any more", which is what the hold prevents."""
+    from kelpie.core.config import EngineConfig, Mode
+    from kelpie.core.engine import Engine
+    from kelpie.core.model import SourceFailure
+    from tests.fakes import FakeAdapter, FakeAlerter
+
+    class Unheld(Resources):
+        def holds(self, state_id: str, snapshot: Snapshot) -> bool:
+            return False
+
+    alerter = FakeAlerter()
+    config = EngineConfig(dry_run=False, default_mode=Mode.SUGGEST)
+    engine = Engine([Unheld()], adapters=[FakeAdapter()], alerter=alerter, config=config)  # type: ignore[list-item]
+    engine.tick(
+        lambda: Snapshot(now=NOW, resources=(res(ResourceKind.DISK, 96, 100, name="host-a:/"),))
+    )
+    down = SourceFailure("connection", NOW + timedelta(minutes=5))
+    for minute in range(5, 65, 5):
+        at = NOW + timedelta(minutes=minute)
+        engine.tick(lambda at=at: Snapshot(now=at, resources_failure=down))
+    assert any("no recent reading" in e.reason for e in alerter.events)

@@ -176,8 +176,33 @@ the protocol.
 - An action on the wire is `{id, adapter, kind, rule, reason, task_id, params, ttl}`.
   `params` are checked per kind (`stop`: `session_id`; `wip_commit`: `branch` — a git ref
   name, no leading `-` — and `draft_pr`; `reassign`: `owner_id`; `wait`: at most 32
-  `conditions` of `{id, kind, params}` with scalar params); other keys are dropped; the
-  reason is cut at 4 KiB and control characters are removed.
+  `conditions` of `{id, kind, params}` with scalar params; `delegate`: `operator`, a
+  profile name, and `card`, exactly `{title, body, key}` — a printable title of at most 200
+  characters, a key of at most 512, a body of at most 8000 characters (what Hermes keeps)
+  without control characters but line breaks, whose last line is `kelpie-delegation: <key>`); other keys are dropped;
+  the reason is cut at 4 KiB and control characters are removed.
+- **Delegation** (#347): a `delegate` goes to the agent whose board holds the task, like
+  any task action (an action naming another host's task is never sent). The card names
+  its task in the agent's own ids: the hub writes `t_1a`, not `laptop:t_1a`, in its title
+  and body (other ids, such as the owner, keep the farm's form), but leaves the key line
+  as the rule wrote it (the agent's adapter finds a card
+  made before by it, so a retry never makes a second card). The agent answers
+  `card <id> for <operator>` and the hub puts the card's id in the agent's namespace
+  (`laptop:t_9`), so delegation finds the card on the merged board and verifies the fix
+  there. The loop guards, verdicts and messages run on the server, as on a single host;
+  the agent's adapter still refuses a person or Kelpie as operator (the hub refuses at
+  startup an operator on `<agent>/hermes` that is no Hermes profile name, `user` or
+  `kelpie`). An agent that should never make cards leaves `delegate` out of
+  `[agent] actions`; also remove its boards from `delegate_to`, or the hub still holds
+  their alerts back for an operator and the person then hears "the card could not be
+  made" a tick later instead of the plain alert. An agent older than this change offers no
+  `delegate` and behaves the same way: upgrade agents before adding their boards. A `delegate_to` key that is
+  a named Hermes board (`ops`) applies to the board of that name on every agent, since
+  board names are not namespaced; use `<agent>/<adapter>` for one host. One case a single
+  host never has: a card the agent makes after the hub gave up waiting is recorded as
+  failed, so the person may hear "the card could not be made" while the card sits on the
+  operator's queue; the hub then sends "carried out after all" for it, and the card's
+  verdict is not followed.
 - The adapter's own guards still apply: an `UnsupportedAction` comes back as "not
   executed".
 

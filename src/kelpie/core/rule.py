@@ -18,6 +18,11 @@ class Rule(Protocol):
     to say it per state: those states then resolve as usual while part of a multi-host farm
     is not observed (see ``Snapshot.unobserved``).
 
+    A rule may define ``holds(state_id, snapshot) -> bool``: True keeps one of its open
+    states open although the rule did not report it this tick, because the rule cannot see
+    it right now (rule 7's host states while host resources cannot be read), rather than
+    resolving it as gone. Pure like ``evaluate``; a hook that raises holds nothing.
+
     A rule may also define ``resolved(state_id, snapshot) -> str | None``: what is true of
     one of its states now that it stopped reporting it ("disk h:/ is 80% full (400 of
     500 GB), under its threshold and not filling."), for the "Resolved" notice. Pure like

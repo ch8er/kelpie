@@ -2085,11 +2085,7 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
             adapter.clock = clock
     _refuse_unimplemented_actions(settings, loaded, adapters)
     _check_operators(settings, delegation_policy(loaded))
-    if settings.hub is not None and delegation_policy(loaded) is not None:
-        raise ConfigError(
-            "[engine.rules.delegation] needs the boards' adapters inside kelpie serve: with "
-            "[hub] the boards are the agents', and delegation is not supported there yet"
-        )
+    _check_hub_operators(settings, delegation_policy(loaded))
     hub = _build_hub(settings, adapters, clock)
     registry = condition_registry(settings, clock)
     enrich, connectors = connector_steps(settings, metrics, clock, registry=registry)
@@ -2529,6 +2525,50 @@ def _check_operators(settings: Settings, policy: Policy | None) -> None:
         raise ConfigError(
             f"[engine.rules.delegation] delegate_to {bad}: an operator is an agent profile, "
             "not a human owner, Kelpie or Hermes' default CLI author (user)"
+        )
+
+
+def _check_hub_operators(settings: Settings, policy: Policy | None) -> None:
+    """With ``[hub]``, a ``delegate_to`` board is ``<agent>/<adapter>`` (an agent's board as
+    the hub names it) or a named board: refuse ``<agent>/...`` for an agent the hub does not
+    know, which could never delegate (a typo would leave delegation silently off), and a
+    board key without an agent outside the hub (``hermes``), which names no hub board."""
+    if policy is None or settings.hub is None:
+        return
+    from kelpie.remote.protocol import ADAPTER_NAMES
+
+    allowed = {a.name: a.adapters for a in settings.hub.agents}
+    bad = sorted(
+        b
+        for b in policy.delegate_to
+        if "/" in b and b.split("/", 1)[1] not in allowed.get(b.split("/", 1)[0], frozenset())
+    )
+    if bad:
+        raise ConfigError(
+            f"[engine.rules.delegation] delegate_to {bad}: with [hub] a board is "
+            f"<agent>/<adapter>, an agent of [[hub.agents]] ({', '.join(sorted(allowed))}) and "
+            "an adapter the hub takes from it (its adapters, by default every Kelpie adapter)"
+        )
+    # Hermes boards on agents: the profile checks _check_operators makes on a single host
+    # (the agent's own human_owners and author are its config; the merged board's people
+    # are refused by the rule itself, and the agent's adapter refuses the rest at act time).
+    from kelpie.adapters.hermes.adapter import _PROFILE as HERMES_PROFILE
+    from kelpie.adapters.hermes.adapter import CLI_USER, UNASSIGN_WORDS
+    from kelpie.adapters.hermes.stop import DEFAULT_AUTHOR
+
+    names = {o.strip().casefold() for b, o in policy.delegate_to.items() if b.endswith("/hermes")}
+    not_agents = {CLI_USER, DEFAULT_AUTHOR}
+    if bad := sorted(
+        n for n in names if not HERMES_PROFILE.match(n) or n in UNASSIGN_WORDS or n in not_agents
+    ):
+        raise ConfigError(
+            f"[engine.rules.delegation] delegate_to {bad}: an operator on a Hermes board is an "
+            "agent profile, not Kelpie or Hermes' default CLI author (user)"
+        )
+    if bare := sorted(b for b in policy.delegate_to if "/" not in b and b in ADAPTER_NAMES):
+        raise ConfigError(
+            f"[engine.rules.delegation] delegate_to {bare}: with [hub] an adapter's board is "
+            '<agent>/<adapter>, e.g. "laptop/hermes"'
         )
 
 
