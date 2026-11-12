@@ -660,6 +660,68 @@ def check_traces_scopes(
     return _pass(SCOPES_CHECK, detail)
 
 
+CONDITIONS_CHECK = "conditions tokens per agent"
+
+
+def check_conditions_tokens(settings: Settings, environ: Mapping[str, str]) -> Check:
+    """``POST /conditions`` tokens (#442). FAIL when ``kelpie serve`` would not start (no
+    token at all, or a token unreadable or weak); WARN while the shared ``[conditions]
+    token_env`` token is set (in the config, or its variable here): whoever holds it may
+    register a condition for any task, and so hold back another agent's wake."""
+    conditions = settings.conditions
+    if not conditions.enabled:
+        return _skip(CONDITIONS_CHECK, "[conditions] disabled")
+    if settings.hub is not None or settings.agent is not None:
+        return _skip(CONDITIONS_CHECK, "[conditions] is single-host only: serve refuses it here")
+    tokens = settings.traces.tokens
+    try:
+        shared = conditions.shared_token(environ)
+    except ValueError as exc:
+        return _fail(CONDITIONS_CHECK, str(exc), f"set ${conditions.token_env} to a strong token")
+    seen: dict[str, str] = {} if shared is None else {shared: f"${conditions.token_env}"}
+    for entry in tokens:
+        try:
+            value = entry.token(environ)
+        except ValueError as exc:
+            return _fail(CONDITIONS_CHECK, str(exc), "set the variable, or fix token_file")
+        if (other := seen.get(value)) is not None:  # serve refuses it; names, never values
+            return _fail(
+                CONDITIONS_CHECK,
+                f"{entry.name}: its token is the same as {other}'s; serve refuses it",
+                "give every agent a token of its own",
+            )
+        seen[value] = entry.name
+        if (weak := weak_token(value)) is not None:
+            return _fail(
+                CONDITIONS_CHECK,
+                f"{entry.name}: the token in {entry.where} {weak}; serve refuses it",
+                f"`kelpie traces rotate-token --token {entry.name}`, or a longer random token",
+            )
+    if shared is None and not tokens:
+        return _fail(
+            CONDITIONS_CHECK,
+            "no token: neither [[traces.tokens]] nor the shared "
+            f"${conditions.token_env} is set; serve refuses to start",
+            "give every agent its own [[traces.tokens]] entry (docs/security.md#per-agent-"
+            "conditions-tokens)",
+        )
+    if shared is not None or conditions.token_env_explicit:
+        where = f"${conditions.token_env}" + (
+            " ([conditions] token_env)" if conditions.token_env_explicit else ""
+        )
+        return _warn(
+            CONDITIONS_CHECK,
+            f"the shared token {where} is deprecated: whoever holds it may register a "
+            "condition for any task, and hold back another agent's wake",
+            "give every agent its own [[traces.tokens]] entry, move the agents to it, then "
+            f"unset ${conditions.token_env} and remove [conditions] token_env "
+            "(docs/security.md#per-agent-conditions-tokens)",
+        )
+    return _pass(
+        CONDITIONS_CHECK, f"{len(tokens)} per-agent token(s), each limited to its own tasks"
+    )
+
+
 def _paths(paths: list[Path], limit: int = 5) -> str:
     shown = ", ".join(str(p) for p in paths[:limit])
     return shown + (f" and {len(paths) - limit} more" if len(paths) > limit else "")
@@ -1763,6 +1825,8 @@ def run_checks(
     if settings.view.enabled:  # only when on, so the output of others stays as it was
         checks.append(check_view(settings, environ))
     checks.append(check_traces_scopes(settings, loaded, environ))
+    if settings.conditions.enabled:  # only when on, so the output of others stays as it was
+        checks.append(check_conditions_tokens(settings, environ))
     checks.append(check_private_files(settings))
     checks.append(check_database(settings, at))
     checks.append(check_prices(settings, at))

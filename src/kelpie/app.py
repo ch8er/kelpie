@@ -51,6 +51,9 @@ from kelpie.alerts.delivery import Delivery
 from kelpie.alerts.telegram import TelegramSettings
 from kelpie.answering import AnswerBoards, AnswerRunner
 from kelpie.conditions_api import (
+    OUT_OF_SCOPE,
+    RATE_LIMITED,
+    TOKEN_CAP,
     ConditionRegistry,
     ConditionSettings,
     load_conditions,
@@ -185,7 +188,7 @@ from kelpie.rules.no_progress import NoProgress
 from kelpie.rules.resources import Resources
 from kelpie.rules.stale_blocks import StaleBlocks
 from kelpie.traces.auth import TokenFile, TokenFileError, loose_mode
-from kelpie.traces.config import TraceSettings, load_traces
+from kelpie.traces.config import TraceSettings, load_traces, weak_token
 from kelpie.traces.forward import Forwarder
 from kelpie.traces.hooks import merge_hook_spans
 from kelpie.traces.ingest import IGNORED, ScopedToken, TraceIngest
@@ -1424,16 +1427,22 @@ def merged_snapshot(
 
 
 def _scoped_tokens(
-    traces: TraceSettings, shared: str | None, clock: Callable[[], datetime]
+    traces: TraceSettings,
+    shared: str | None,
+    clock: Callable[[], datetime],
+    *,
+    shared_label: str = "the shared [traces] token",
+    strong: bool = False,
+    warn_loose: bool = True,
 ) -> list[ScopedToken]:
-    """The ``[[traces.tokens]]`` tokens ingest checks (#302): from their env vars, or their
-    token files (trusted as ``[traces] token_file`` is, read again when they change). Each
-    must differ from the others and from the shared token, or which scope a request gets
-    would depend on the order. Raises ConfigError naming the entry, never a token."""
-    if not traces.enabled:
-        return []
+    """The ``[[traces.tokens]]`` tokens ingest checks (#302), and ``POST /conditions``
+    (#442, also with ``[traces]`` off): from their env vars, or their token files (trusted
+    as ``[traces] token_file`` is, read again when they change). Each must differ from the
+    others and from the shared token (``shared_label`` names it), or which scope a request
+    gets would depend on the order; with ``strong`` none may be weak. Raises ConfigError
+    naming the entry, never a token."""
     out: list[ScopedToken] = []
-    seen: dict[str, str] = {} if shared is None else {shared: "the shared [traces] token"}
+    seen: dict[str, str] = {} if shared is None else {shared: shared_label}
     for entry in traces.tokens:
         try:
             value = entry.token()
@@ -1456,8 +1465,13 @@ def _scoped_tokens(
                 f"[[traces.tokens]] {entry.name}: its token is the same as {other}'s; "
                 "give every agent a token of its own"
             )
+        if strong and (why := weak_token(value)) is not None:
+            raise ConfigError(
+                f"[[traces.tokens]] {entry.name}: the token in {entry.where} {why}; "
+                "[conditions] takes only strong tokens"
+            )
         seen[value] = f"[[traces.tokens]] {entry.name}"
-        if entry.token_file is not None and loose_mode(entry.token_file):
+        if warn_loose and entry.token_file is not None and loose_mode(entry.token_file):
             log.warning(
                 "[[traces.tokens]] %s: token_file %s can be read by others than its owner: "
                 "chmod 600 it",
@@ -2110,7 +2124,7 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
     _check_operators(settings, delegation_policy(loaded))
     _check_hub_operators(settings, delegation_policy(loaded))
     hub = _build_hub(settings, adapters, clock)
-    registry = condition_registry(settings, clock)
+    registry = condition_registry(settings, clock, metrics)
     enrich, connectors = connector_steps(settings, metrics, clock, registry=registry)
     costs_source = cost_report_source(settings)  # kelpie serve only: reads with the admin key
     tokens = None
@@ -2130,7 +2144,7 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
                 traces.token_file,
             )
         metrics.token_file = tokens.status
-    scoped = _scoped_tokens(traces, token, clock) if settings.hub is None else []
+    scoped = _scoped_tokens(traces, token, clock) if settings.hub is None and traces.enabled else []
     if settings.hub is not None and traces.tokens:
         log.warning(
             "[[traces.tokens]] is not used with [hub]: this port takes no spans, and each "
@@ -2142,6 +2156,8 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
         )
     except (OSError, sqlite3.Error, RuntimeError) as exc:
         raise ConfigError(f"cannot open ledger database {settings.db_path}: {exc}") from exc
+    if registry is not None:  # refused registrations get their ledger line (#442)
+        registry.audit = store
     # SQLite keeps open alert states across restarts; in memory they live with the process.
     states: StateStore = store if isinstance(store, SqliteLedgerStore) else MemoryStateStore()
     # Observed task status transitions (#157): in the database next to the ledger.
@@ -2732,12 +2748,15 @@ def _chat_control(
 
 
 def condition_registry(
-    settings: Settings, clock: Callable[[], datetime]
+    settings: Settings, clock: Callable[[], datetime], metrics: Metrics | None = None
 ) -> ConditionRegistry | None:
     """``POST /conditions`` and its snapshot step, with ``[conditions] enabled``; None
-    otherwise. ConfigError when its token is unset or weak (named, never shown), or there is
-    no database to keep registrations in."""
-    if not settings.conditions.enabled:
+    otherwise. Agents register with their own ``[[traces.tokens]]`` token, each for its own
+    tasks (#442); the shared ``token_env`` token still works, deprecated. ConfigError when
+    there is no token at all, a token is weak, unreadable or the same as another (named,
+    never shown), or there is no database to keep registrations in."""
+    conditions = settings.conditions
+    if not conditions.enabled:
         return None
     if settings.hub is not None or settings.agent is not None:
         raise ConfigError(
@@ -2746,14 +2765,46 @@ def condition_registry(
     if settings.db_path is None:
         raise ConfigError('[conditions] needs a database ([storage] path is ":memory:")')
     try:
-        token = settings.conditions.token()
+        shared = conditions.shared_token()
     except ValueError as exc:
         raise ConfigError(str(exc)) from None
-    log.info(
-        "[conditions] POST /conditions takes registrations with the token in $%s",
-        settings.conditions.token_env,
+    traces = settings.traces
+    scoped = _scoped_tokens(
+        traces,
+        shared,
+        clock,
+        shared_label=f"the shared [conditions] token (${conditions.token_env})",
+        strong=True,
+        warn_loose=not traces.enabled,  # ingest warns about a loose token file already
     )
-    return ConditionRegistry(settings.conditions, settings.db_path, clock, token)
+    if shared is None and not scoped:
+        raise ConfigError(
+            "[conditions] enabled needs per-agent tokens ([[traces.tokens]]: each agent "
+            f"registers for its own tasks) or the shared ${conditions.token_env} (deprecated)"
+        )
+    if scoped:
+        log.info(
+            "[conditions] POST /conditions takes registrations from %d per-agent token(s) "
+            "([[traces.tokens]]), each for its own tasks",
+            len(scoped),
+        )
+    if shared is not None:
+        log.warning(
+            "[conditions] the shared token in $%s may register conditions for every task: "
+            "deprecated; give every agent its own [[traces.tokens]] entry and unset it",
+            conditions.token_env,
+        )
+    if metrics is not None:
+        metrics.set_conditions(True, (OUT_OF_SCOPE, RATE_LIMITED, TOKEN_CAP))
+    return ConditionRegistry(
+        conditions,
+        settings.db_path,
+        clock,
+        shared or "",
+        scoped=scoped,
+        scopes={t.name: t.scope for t in traces.tokens},
+        observer=metrics,
+    )
 
 
 def connector_steps(
@@ -2773,7 +2824,12 @@ def connector_steps(
     # and the report read the registrations kelpie serve keeps, never changing them.
     db = settings.db_path
     if registry is None and settings.conditions.enabled and db is not None and db.exists():
-        registry = ConditionRegistry(settings.conditions, db, clock, readonly=True)
+        scopes = {t.name: t.scope for t in settings.traces.tokens}
+        # serve deletes the shared token's rows (token NULL) once it has no shared token,
+        # so the ones still stored are rows it attaches
+        registry = ConditionRegistry(
+            settings.conditions, db, clock, readonly=True, scopes=scopes, shared_rows=True
+        )
     if registry is not None:
         steps.insert(0, ("registered_conditions", registry))
     if settings.human_tasks is not None and settings.human_tasks.enabled:

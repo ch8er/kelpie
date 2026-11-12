@@ -41,6 +41,10 @@ class ActionKind(StrEnum):
     # A person answered an agent's question from a chat button (#300). Ledger only: the
     # audit line around the comment (and unblock) the answer writes; no rule emits it.
     ANSWER = "answer"
+    # A per-agent token was refused a condition registration for a task that is not its
+    # own (``POST /conditions``, #442). Ledger only: the audit line of the refusal; no rule
+    # emits it and no executor carries it out.
+    REGISTER = "register"
 
 
 class ActionResult(StrEnum):
