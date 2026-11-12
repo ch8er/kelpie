@@ -79,7 +79,7 @@ def load_storage_retention(section: Mapping[str, Any], engine: EngineConfig) -> 
     if retention < keep:
         raise ValueError(
             f"[storage] retention must cover the ledger's own windows (engine once_window, "
-            f"cooldown, retry_after, twice delegation's cooldown, and a day at least): at least "
+            f"cooldown, retry_after, twice the longer of delegation's cooldown and same_incident, and a day at least): at least "
             f"{_days(keep)}"
         )
     if retention > MAX_RETENTION:

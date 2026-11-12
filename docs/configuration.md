@@ -954,7 +954,7 @@ agents' sessions or edits their instructions.
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `path` | `"kelpie.db"` | SQLite database: action ledger, alert states, snoozes, spans, recorded fixes, observed task status transitions. `":memory:"` keeps it in memory. `$KELPIE_DB` overrides it. |
-| `retention` | `"30d"` | Raw action-ledger rows, alert states closed, and observed task status transitions older than this are pruned, hourly. At least the ledger's own windows: `[engine] once_window`, `cooldown`, `retry_after` and a day; at most `3650d`. |
+| `retention` | `"30d"` | Raw action-ledger rows, alert states closed, and observed task status transitions older than this are pruned, hourly. At least the ledger's own windows: `[engine] once_window`, `cooldown`, `retry_after`, a day, and, when delegation is on, twice the longer of its `cooldown` and `same_incident`; at most `3650d`. |
 | `max_rows` | `1000000` | Raw action-ledger rows kept at most, and, counted apart, observed task status transitions; past it the oldest whole days of the ledger (the oldest transitions) go first, but never within the ledger's own windows (above). In memory (`":memory:"`) the ledger keeps at most 100,000 entries, the newest, whatever their age: a farm that fills that within the ledger's windows may see an action repeat; use a database file. |
 
 What retention keeps and drops:
