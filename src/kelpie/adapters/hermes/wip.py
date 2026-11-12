@@ -21,8 +21,12 @@ than for reading:
   (:func:`~kelpie.adapters.hermes.git_state.common_dir`), ``HEAD`` detached, on another
   branch than ``branch`` or without a commit yet, a merge, rebase, cherry-pick, revert or
   bisect in progress, an ``index.lock``, unmerged entries, submodule changes, an untracked
-  nested repository, more than :data:`MAX_ENTRIES` changed entries, or a changed file over
-  :data:`MAX_FILE_BYTES`. A clean worktree has nothing to commit.
+  nested repository, more than :data:`MAX_ENTRIES` changed entries or more output than
+  :data:`MAX_LISTING`, or a changed file over :data:`MAX_FILE_BYTES`. Submodules are refused
+  before any ``status`` (a ``.gitmodules`` or a gitlink in the index, from ``ls-files -s``,
+  which does not recurse): ``status`` would run a child git in each submodule with the
+  submodule's own, unchecked config. ``status`` itself gets ``--ignore-submodules=all``. A
+  clean worktree has nothing to commit.
 - **Plumbing for the commit.** ``add -A`` (the agent's own index: the next session finds it
   matching the commit), ``write-tree``, ``commit-tree --no-gpg-sign`` with the message on
   standard input, then ``update-ref refs/heads/<branch> <new> <old>``: a compare-and-swap, so
@@ -31,10 +35,17 @@ than for reading:
 - **Never a push.** No remote is contacted: the commit stays in the task's branch for the next
   session in that worktree.
 
-Residual risk: git still parses the hostile repository (config, index, objects), as on the
-read side, and a worker the dispatcher starts on the task between the checks and the commit
-races with it (the adapter checks for a run right before; ``update-ref`` refuses a branch that
-moved, an index lock held by the worker fails ``add``).
+The config is checked again right before ``add``. Residual risks: git still parses the
+hostile repository (config, index, objects), as on the read side; linked worktrees of one
+repository share its ``config``, so an agent running in a sibling worktree could add a filter
+driver between that last check and ``add`` (a narrow race, as on the read side); a worker
+the dispatcher starts on the task between the checks and the commit races with it (the
+adapter checks for a run right before; ``update-ref`` refuses a branch that moved, an index
+lock held by the worker fails ``add``). ``HOME`` is passed on, so a ``~`` in the worktree's
+``core.excludesFile`` and git's default ``~/.config/git/ignore`` are read from Kelpie's home:
+they decide which files are added, nothing runs. WIP commits need Kelpie to run as the user
+that owns the worktrees (another owner's is refused; no ``safe.directory`` applies without a
+global config).
 """
 
 from __future__ import annotations
@@ -48,6 +59,7 @@ from kelpie.adapters.hermes.git_state import (
     ABBREV,
     SAFE_CONFIG,
     _run,
+    _run_capped,
     _Stop,
     common_dir,
     git_env,
@@ -59,6 +71,7 @@ AUTHOR = ("Kelpie", "kelpie@kelpie.invalid")  # author and committer of every WI
 MAX_ENTRIES = 1000  # changed entries of a worktree Kelpie still commits
 MAX_FILE_BYTES = 25 << 20  # a changed file larger than this is not committed
 MAX_MESSAGE = 4000  # characters of the commit message
+MAX_LISTING = 8 << 20  # characters of ls-files or status read; beyond: refused
 # Overrides on top of the read side's SAFE_CONFIG for every call of a WIP commit.
 WRITE_CONFIG = (
     "commit.gpgSign=false",
@@ -78,7 +91,7 @@ IN_PROGRESS = (
     "sequencer",
     "index.lock",
 )
-# Config keys of the worktree that are refused (lowercased section, see _refused_key).
+# Config sections of the worktree that are refused (lowercased, see _check_config).
 _REFUSED_SECTIONS = ("include", "includeif", "filter")
 _UNSET = ("unspecified", "unset")
 
@@ -144,23 +157,44 @@ def commit_wip(path: Path, branch: str, message: str, timeout: float) -> WipComm
     env = write_env(path)
     config = [arg for c in (*SAFE_CONFIG, *WRITE_CONFIG) for arg in ("-c", c)]
 
-    def git(*args: str, stdin: str | None = None, step: str) -> str:
+    def git(*args: str, stdin: str | None = None, step: str, cap: int | None = None) -> str:
         cmd = ["git", "-C", str(path), *config, *args]
         try:
-            code, out, _ = _run(cmd, timeout, None, path, env=env, stdin=stdin)
+            if cap is None:
+                code, out, _ = _run(cmd, timeout, None, path, env=env, stdin=stdin)
+            else:
+                code, out, _, cut = _run_capped(cmd, timeout, None, path, cap, env=env)
+                if cut:
+                    raise WipRefused(f"the worktree is too large to commit ({step})")
         except _Stop as stop:
             raise WipFailed(f"{step}: {stop.problem.value}") from stop
         if code != 0:
             raise WipFailed(f"{step}: git exited {code}")
         return out
 
-    _check_config(git("config", "-z", "--no-includes", "--show-scope", "--list", step="config"))
+    def check_config() -> None:
+        _check_config(git("config", "-z", "--no-includes", "--show-scope", "--list", step="config"))
+
+    check_config()
     gitdir = Path(git("rev-parse", "--absolute-git-dir", step="rev-parse").strip())
     for name in IN_PROGRESS:
         if os.path.lexists(gitdir / name):
             raise WipRefused(f"an operation is in progress in the worktree ({name})")
+    # Submodules before any status: git would run a child git inside each one, with the
+    # submodule's own config (filters, includes) that is not checked here.
+    if os.path.lexists(path / ".gitmodules"):
+        raise WipRefused("the worktree has submodules")
+    if _has_gitlink(git("ls-files", "-s", "-z", step="ls-files", cap=MAX_LISTING)):
+        raise WipRefused("the worktree has submodules")
     status = git(
-        "status", "--porcelain=v2", "-z", "--branch", "--untracked-files=all", step="status"
+        "status",
+        "--porcelain=v2",
+        "-z",
+        "--branch",
+        "--untracked-files=all",
+        "--ignore-submodules=all",
+        step="status",
+        cap=MAX_LISTING,
     )
     oid, head, paths = _parse(status)
     if head is None:
@@ -175,6 +209,7 @@ def commit_wip(path: Path, branch: str, message: str, timeout: float) -> WipComm
     listing = "".join(f"{p}\0" for p in sorted(paths))
     attrs = git("check-attr", "-z", "--stdin", "filter", stdin=listing, step="check-attr")
     _check_filters(attrs)
+    check_config()  # again, right before git may run a driver: sibling worktrees share it
     git("add", "-A", "--", ".", step="add")
     tree = git("write-tree", step="write-tree").strip()
     if not _OID.fullmatch(tree):
@@ -187,6 +222,7 @@ def commit_wip(path: Path, branch: str, message: str, timeout: float) -> WipComm
         raise WipFailed("commit-tree: no commit id")
     git(
         "update-ref",
+        "--no-deref",
         "-m",
         "kelpie: WIP commit",
         f"refs/heads/{branch}",
@@ -195,6 +231,11 @@ def commit_wip(path: Path, branch: str, message: str, timeout: float) -> WipComm
         step="update-ref",
     )
     return WipCommit(new[:ABBREV], branch, len(paths))
+
+
+def _has_gitlink(listing: str) -> bool:
+    """Whether ``ls-files -s -z`` lists a gitlink (mode 160000: a submodule)."""
+    return any(record.startswith("160000 ") for record in listing.split("\0"))
 
 
 def _check_config(listing: str) -> None:

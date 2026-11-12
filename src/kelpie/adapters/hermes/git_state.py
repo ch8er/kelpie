@@ -247,7 +247,12 @@ def _run(
 
 
 def _run_capped(
-    cmd: list[str], timeout: float, deadline: float | None, path: Path, max_bytes: int
+    cmd: list[str],
+    timeout: float,
+    deadline: float | None,
+    path: Path,
+    max_bytes: int,
+    env: dict[str, str] | None = None,
 ) -> tuple[int, str, str, bool]:
     """Like :func:`_run`, but stop reading after ``max_bytes`` characters of stdout and kill
     git:
@@ -265,7 +270,7 @@ def _run_capped(
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            env=git_env(path),
+            env=git_env(path) if env is None else env,
             encoding="utf-8",
             errors="replace",
             start_new_session=True,

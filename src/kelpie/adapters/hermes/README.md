@@ -676,25 +676,43 @@ held to more than the read side:
   with `--no-includes`); a changed file whose `filter` attribute is set (Git LFS: with its
   driver off, git would store the raw file); `HEAD` detached, on another branch than the
   one rule 5 checked, or without a commit yet; a merge, rebase, cherry-pick, revert,
-  sequencer or bisect in progress, or an `index.lock`; unmerged files; submodule changes;
-  an untracked nested repository; more than 1000 changed entries; a changed file over
-  25 MiB. A clean worktree is nothing to do.
+  sequencer or bisect in progress, or an `index.lock`; submodules (a `.gitmodules` or a
+  gitlink in the index, checked with `ls-files -s` before any `status`, since `status` would
+  run a child git in each submodule under the submodule's own, unchecked config); unmerged
+  files; an untracked nested repository; more than 1000 changed entries, or more than
+  8 Mi characters of `ls-files` or `status` output; a changed file over 25 MiB. A clean
+  worktree is nothing to do. The config is checked again right before `add`.
 - The commands: `config -z --no-includes --show-scope --list`, `rev-parse
-  --absolute-git-dir`, `status --porcelain=v2 -z --branch --untracked-files=all`,
+  --absolute-git-dir`, `ls-files -s -z`, `status --porcelain=v2 -z --branch
+  --untracked-files=all --ignore-submodules=all`,
   `check-attr -z --stdin filter` on the changed paths, `add -A` (the agent's own index, so
   it matches the commit afterwards), `write-tree`, `commit-tree --no-gpg-sign` with the
-  message on standard input, and `update-ref refs/heads/<branch> <new> <old>`, a
+  message on standard input, and `update-ref --no-deref refs/heads/<branch> <new> <old>`, a
   compare-and-swap: a branch that moved since the `status` is left alone and the attempt
   fails. `git commit` is not used (hooks, templates, editors and signing hang off it), and
   nothing contacts a remote.
 - The ledger keeps what was committed ("local commit `<id>` on `<branch>` (N changed
   entries)"), and the next snapshot reports it as the session's `last_commit`.
 
-Residual risk: git still parses the hostile repository, as on the read side, and a worker
-Hermes starts on the task between the run check and the commit races with it (`add` fails on
-its index lock, `update-ref` on a moved branch). Agents can later push the WIP commit like
-any other commit on their branch; the message carries `[skip ci]` with the default
-`wip_ci`.
+**Which user.** WIP commits need Kelpie to run as the user that owns the worktrees: another
+owner's worktree is refused, and with no global config no `safe.directory` entry applies.
+That is a trade-off against the read side's advice to run Kelpie as a separate user: agents
+running as Kelpie's user can read Kelpie's config, environment and keys (the park key, the
+traces token), so the git measures above only stop an agent from making Kelpie *run* a
+program through git (an escape from an agent sandbox that cannot run it itself), not from
+reading Kelpie's secrets. Where that matters, keep `checkpoints` out of `act` mode on Hermes
+and run Kelpie as its own user (WIP commits are then refused and become alerts).
+
+Residual risks: git still parses the hostile repository, as on the read side. Linked
+worktrees of one repository share its `config`: an agent running in a sibling worktree
+could add a filter driver between the last config check and `add` (a narrow race, as on
+the read side). A worker Hermes starts on the task between the run check and the commit
+races with it (`add` fails on its index lock, `update-ref` on a moved branch). `HOME` is
+passed on, so a `~` in the worktree's `core.excludesFile` and git's default
+`~/.config/git/ignore` are read from Kelpie's home: they decide which files are added,
+nothing runs. Agents can later push the WIP commit like any other commit on their branch;
+the message carries `[skip ci]` with the default `wip_ci`. A refusal's reason is in
+Kelpie's log; the alert says the WIP commit was not made.
 
 Operations:
 

@@ -156,12 +156,64 @@ def test_global_config_is_not_read(
     ended_task(board, repo)
     home = tmp_path / "home"
     home.mkdir()
-    marker = tmp_path / "ran"
-    (home / ".gitconfig").write_text(f"[core]\n\tsshCommand = touch {marker}\n[user]\n\tname = X\n")
+    (home / "ignore").write_text("new.txt\n")  # read as global config, new.txt is left out
+    (home / ".gitconfig").write_text(f"[core]\n\texcludesFile = {home / 'ignore'}\n")
     monkeypatch.setenv("HOME", str(home))
     assert wip.write_env(repo)["GIT_CONFIG_GLOBAL"] == "/dev/null"
     commit(board)
+    assert "new.txt" in git(repo, "ls-tree", "--name-only", "HEAD").split()
     assert git(repo, "log", "-1", "--format=%an").strip() == "Kelpie"
+
+
+def test_a_linked_worktree_is_committed(board: Board, repo: Path, tmp_path: Path) -> None:
+    git(repo, "stash", "-u", "-q")
+    git(repo, "branch", "feature/t-2")
+    linked = tmp_path / "linked"
+    git(repo, "worktree", "add", "-q", str(linked), "feature/t-2")
+    (linked / "a.txt").write_text("linked\n")
+    board.task("t_1", "ready", ago(days=1), assignee="dev")
+    board.update("t_1", workspace_kind="worktree", workspace_path=str(linked))
+    before = head(linked)
+    said = adapter(board).wip_commit("t_1", MESSAGE, branch="feature/t-2")
+    assert said.endswith("on feature/t-2 (1 changed entries)")
+    assert git(linked, "rev-parse", "HEAD^").strip() == before
+    assert git(repo, "rev-parse", "feature/t-2").strip() == head(linked)
+
+
+def test_worktree_scope_config_is_checked(board: Board, repo: Path, tmp_path: Path) -> None:
+    git(repo, "stash", "-u", "-q")
+    git(repo, "config", "extensions.worktreeConfig", "true")
+    git(repo, "branch", "feature/t-2")
+    linked = tmp_path / "linked"
+    git(repo, "worktree", "add", "-q", str(linked), "feature/t-2")
+    git(linked, "config", "--worktree", "filter.evil.clean", "touch /nonexistent")
+    (linked / "a.txt").write_text("linked\n")
+    board.task("t_1", "ready", ago(days=1), assignee="dev")
+    board.update("t_1", workspace_kind="worktree", workspace_path=str(linked))
+    before = head(linked)
+    with pytest.raises(UnsupportedAction, match="filter"):
+        adapter(board).wip_commit("t_1", MESSAGE, branch="feature/t-2")
+    assert head(linked) == before
+
+
+def test_a_symbolic_branch_ref_is_refused(board: Board, repo: Path) -> None:
+    git(repo, "symbolic-ref", "refs/heads/alias", "refs/heads/feature/t-1")
+    ended_task(board, repo)
+    before = head(repo)
+    with pytest.raises(UnsupportedAction, match="not on alias"):
+        adapter(board).wip_commit("t_1", MESSAGE, branch="alias")
+    assert head(repo) == before
+
+
+@pytest.mark.parametrize(
+    ("message", "expected"), [("   ", "WIP"), ("x" * (wip.MAX_MESSAGE + 50), "x" * wip.MAX_MESSAGE)]
+)
+def test_the_message_is_capped_and_never_empty(
+    board: Board, repo: Path, message: str, expected: str
+) -> None:
+    ended_task(board, repo)
+    adapter(board).wip_commit("t_1", message, branch="feature/t-1")
+    assert git(repo, "log", "-1", "--format=%B").strip() == expected
 
 
 def test_environment_is_fixed(repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -289,10 +341,10 @@ def test_a_detached_head_is_refused(board: Board, repo: Path) -> None:
     refused(board, repo, "detached")
 
 
-@pytest.mark.parametrize("name", ["MERGE_HEAD", "index.lock", "rebase-merge"])
+@pytest.mark.parametrize("name", wip.IN_PROGRESS)
 def test_an_operation_in_progress_is_refused(board: Board, repo: Path, name: str) -> None:
     target = repo / ".git" / name
-    if name == "rebase-merge":
+    if name in ("rebase-merge", "rebase-apply", "sequencer"):
         target.mkdir()
     else:
         target.write_text(head(repo) + "\n")
@@ -305,6 +357,48 @@ def test_an_untracked_nested_repository_is_refused(board: Board, repo: Path) -> 
     git(nested, "init", "-q")
     (nested / "x").write_text("x\n")
     refused(board, repo, "nested repository")
+
+
+def submodule_repo(tmp_path: Path, repo: Path, marker: Path) -> Path:
+    """``repo`` with a populated submodule ``sub`` whose own config names a filter driver
+    that leaves ``marker`` and applies to a file changed in it."""
+    upstream = tmp_path / "upstream"
+    upstream.mkdir()
+    git(upstream, "init", "-q", "-b", "main")
+    (upstream / ".gitattributes").write_text("f.txt filter=evil\n")
+    (upstream / "f.txt").write_text("f\n")
+    git(upstream, "add", "-A")
+    git(upstream, "-c", "user.name=U", "-c", "user.email=u@example.invalid", "commit", "-qm", "u")
+    git(repo, "-c", "protocol.file.allow=always", "submodule", "add", "-q", str(upstream), "sub")
+    git(repo, "commit", "-qm", "add sub")
+    git(repo / "sub", "config", "filter.evil.clean", f"sh -c 'touch {marker}; cat'")
+    (repo / "sub" / "f.txt").write_text("changed\n")
+    return repo
+
+
+def test_a_submodule_is_refused_before_anything_runs_in_it(
+    board: Board, repo: Path, tmp_path: Path
+) -> None:
+    marker = tmp_path / "PWNED"
+    submodule_repo(tmp_path, repo, marker)
+    refused(board, repo, "submodules")
+    assert not marker.exists()
+
+
+def test_a_gitlink_without_gitmodules_is_refused(board: Board, repo: Path, tmp_path: Path) -> None:
+    marker = tmp_path / "PWNED"
+    submodule_repo(tmp_path, repo, marker)
+    git(repo, "rm", "-q", "--cached", ".gitmodules")
+    (repo / ".gitmodules").unlink()
+    refused(board, repo, "submodules")
+    assert not marker.exists()
+
+
+def test_a_listing_over_the_cap_is_refused(
+    board: Board, repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(wip, "MAX_LISTING", 16)
+    refused(board, repo, "too large")
 
 
 def test_a_large_file_is_refused(board: Board, repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:

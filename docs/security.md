@@ -212,17 +212,24 @@ global config (`GIT_CONFIG_NOSYSTEM`, `GIT_CONFIG_GLOBAL=/dev/null`), only `PATH
 (`core.hooksPath=/dev/null`), no fsmonitor, no signing, no automatic gc, no transport
 (`GIT_ALLOW_PROTOCOL=none`, `protocol.allow=never`), and a fixed author. A worktree whose own
 config has includes or filter drivers, a changed file with a filter attribute (LFS), an
-operation in progress, unmerged or submodule changes, a nested repository, another branch
+operation in progress, submodules (checked before any `status`, which would run a child git
+under the submodule's own config), unmerged changes, a nested repository, another branch
 than the task's, or a file over 25 MiB is refused and a person is told. The commit is
 plumbing (`add -A`, `write-tree`, `commit-tree`) and lands with a compare-and-swap
 (`update-ref <branch> <new> <old>`). No push means no remote, credential helper or SSH
 command the worktree names is ever run. Details: the Hermes README, "Trust model" and "WIP
 commits".
 
-Residual risk: git itself parses the hostile repository, and a worker started between
-Kelpie's run check and the commit races with it (the lock and the compare-and-swap make
-that a failure, not a lost change). Run Kelpie as the user that owns the worktrees (it
-refuses another owner's) and keep its own secrets out of their reach.
+WIP commits need Kelpie to run as the user that owns the worktrees (it refuses another
+owner's). Agents running as that user can read Kelpie's config, environment and keys, so
+these measures stop an agent from making Kelpie run a program through git, not from reading
+Kelpie's secrets; where that matters, run Kelpie as its own user and leave `checkpoints`
+out of `act` on Hermes (WIP commits then become alerts), as the read side advises.
+
+Residual risks: git itself parses the hostile repository; a sibling worktree of the same
+repository shares its config and could add a filter driver between Kelpie's last check and
+`add` (a narrow race); a worker started between Kelpie's run check and the commit races with
+it (the index lock and the compare-and-swap make that a failure, not a lost change).
 
 ## Outbound connections
 
