@@ -169,6 +169,13 @@ PLANNED: tuple[PlannedRule, ...] = (
         incidents=(21,),
     ),
     PlannedRule(
+        "delegation",
+        None,
+        _P1,
+        "Hand a problem to the operator agent as a card; Kelpie verifies the fix",
+        effects=_fx(_K.DELEGATE),
+    ),
+    PlannedRule(
         "unanswered_asks",
         None,
         _P1,

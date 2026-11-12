@@ -255,6 +255,10 @@ def intent(action: Action) -> str:
             return f"make a WIP commit on {task}"
         case ActionKind.LIFT_HOLD:
             return f"lift hold {_target(action, 'hold', 'the hold')}"
+        case ActionKind.DELEGATE:
+            return (
+                f"hand the problem on {task} to {_target(action, 'operator', 'the operator agent')}"
+            )
         case ActionKind.ALERT | ActionKind.ESCALATE:
             return "send this alert"
         case _:
@@ -290,6 +294,9 @@ def _past(action: Action) -> str:
             return f"Made a WIP commit on {task}"
         case ActionKind.LIFT_HOLD:
             return f"Lifted hold {_target(action, 'hold', 'the hold')}"
+        case ActionKind.DELEGATE:
+            who = _target(action, "operator", "the operator agent")
+            return f"Handed the problem on {task} to {who}"
         case _:
             return f"Did {action.kind} {task}"
 

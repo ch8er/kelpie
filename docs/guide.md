@@ -167,6 +167,7 @@ P0 is the MVP; P1 and P2 rules are backlog.
 | 13 | "Needs you" inbox (P1) | Per person: human tasks with agent work behind them and agents waiting for their input or approval, sorted by cost of delay (agent-hours waited) → one escalation per person | 13 |
 | 14 | Compaction gate (P2) | Agent acts against the task's gate right after a context compaction | field |
 | – | Unanswered asks (P1) | An agent's `@question` to another agent in a task comment, unanswered while the recipient is idle → one reminder per escalation step (1h, 4h, 12h, 24h); snoozable; blocked and waiting tasks and questions to people stay with rules 4, 2 and 13 | field |
+| – | Delegation (P1) | A problem another rule keeps open whose class the farm lists as `agent` (board hygiene), at warning severity → a card on the operator agent's queue; Kelpie verifies the fix itself; off by default (#347, in progress) | 1, 8, 11 |
 | – | Instruction bloat (P1) | A skill or role instruction file that crosses a size, grows fast or is large and read into every session, and copies of sections and values across a role's files → alert recommending a short core plus topic references; Kelpie never edits the files | 21 |
 
 P1 also extends rule 1 ("done" requires evidence; reopened-after-done rate) and rule 3 (stop
@@ -176,7 +177,7 @@ evidence from other farms rather than one of the 13 incidents.
 Rule names in code: `exit_contract`, `wait_condition`, `orphan_status`, `stale_blocks`,
 `ping_pong`, `bottlenecks`, `resources`, `ci_economy`, `loop_breaker`, `no_progress`,
 `conflict_warning`, `dispatch_gate`, `needs_you`, `compaction_gate`, `return_causes`,
-`output_offenders`, `instruction_bloat`, `unanswered_asks`, `checkpoints`.
+`output_offenders`, `instruction_bloat`, `unanswered_asks`, `delegation`, `checkpoints`.
 
 Foundation work alongside the rules (no LLM): **traces** (OpenTelemetry GenAI spans over
 OTLP, stored locally, optionally forwarded to Langfuse, Phoenix or Datadog; adapters write
