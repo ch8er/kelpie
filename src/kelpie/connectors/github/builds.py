@@ -89,12 +89,13 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from kelpie.connectors.github import billing as usage
+from kelpie.connectors.github.ci_runs import parse_time as _time
 from kelpie.connectors.github.client import GitHubClient, GitHubError, valid_token
 from kelpie.connectors.github.connector import valid_repo
 from kelpie.connectors.github.proposals import Proposer
 from kelpie.core.actions import Action, ActionKind, ActionResult
 from kelpie.core.model import Build, BuildStatus, Job, Resource, ResourceKind, Snapshot
-from kelpie.core.serde import parse_datetime, parse_duration
+from kelpie.core.serde import parse_duration
 
 log = logging.getLogger(__name__)
 
@@ -976,15 +977,6 @@ def _mapping(value: Any) -> Mapping[str, Any]:
 
 def _list(value: Any) -> list[Mapping[str, Any]]:
     return [v for v in value if isinstance(v, Mapping)] if isinstance(value, list) else []
-
-
-def _time(value: Any) -> datetime | None:
-    if not isinstance(value, str):
-        return None
-    try:
-        return parse_datetime(value.replace("Z", "+00:00"))
-    except ValueError:
-        return None
 
 
 # --- configuration helpers --------------------------------------------------------------

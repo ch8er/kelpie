@@ -39,7 +39,7 @@ from kelpie.core.model import (
     LimitHit,
     Snapshot,
 )
-from kelpie.core.prices import DEFAULT_PRICES, Price, PriceTable
+from kelpie.core.prices import DEFAULT_PRICES, Price, PriceTable, is_glob
 from kelpie.core.serde import parse_duration
 from kelpie.core.spans import Attribution, TokenUsage
 
@@ -86,10 +86,6 @@ BUDGET_KEYS = frozenset(
     }
 )
 PRICE_KEYS = frozenset({"input", "output", "cached_input", "cache_write"})
-
-
-def _is_glob(pattern: str) -> bool:
-    return any(c in pattern for c in "*?[")
 
 
 class BudgetMode(StrEnum):
@@ -143,7 +139,7 @@ class Budget:
         if self.scope is BudgetScope.DAY:
             return (FARM,)
         if self.match is not None and (
-            self.scope is BudgetScope.PROJECT or not _is_glob(self.match)
+            self.scope is BudgetScope.PROJECT or not is_glob(self.match)
         ):
             return (self.match,)
         return ()
