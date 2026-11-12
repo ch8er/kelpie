@@ -410,6 +410,13 @@ board the report is unchanged.
   Comments are read as of the day's end (an answer after the day leaves the ask open within
   it); a task finished since counts as open until its finish. An ask answered within the day
   is not counted, so it is a lower bound.
+- **Delegation to operator agents** (#347, when the `delegation` rule did something within
+  the day, or agents worked on its cards): the cards handed to operator agents (and those it would have handed in suggest
+  mode), the alerts held back for them, the verdicts the person got by Kelpie's own check
+  (fixed and verified, still broken, given back, held then kept with the person), cards by
+  operator, and the tokens agents spent on Kelpie's cards (counted model calls whose task,
+  or whose session's task, is one of Kelpie's cards, also cards made before the day, within the days the report
+  reads).
 - **Instruction files** (with `[instructions]`, incident 21): the files each role loads that
   cost the most tokens a day, as measured when the report runs (the 24 hours before), with
   where the figure comes from (counted skill loads, or size times sessions: an *estimate*,
