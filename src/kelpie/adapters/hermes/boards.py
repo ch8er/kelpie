@@ -222,6 +222,10 @@ class HermesBoards:
         board, local = self._route(task_id)
         board.check_answer(local, expect)
 
+    def delegate(self, task_id: str, operator: str, title: str, body: str, key: str) -> str:
+        board, local = self._route(task_id)
+        return f"{board.board}:{board.delegate(local, operator, title, body, key)}"
+
     def wip_commit(
         self, task_id: str, message: str, *, branch: str | None = None, draft_pr: bool = False
     ) -> str:

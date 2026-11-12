@@ -426,6 +426,22 @@ def test_draft_pr_wip_commits_are_warned_about_on_hermes(
     assert "never pushes" not in caplog.text
 
 
+def test_delegation_is_refused_on_a_hub(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A hub's boards are the agents': delegation is not supported there yet (#347)."""
+    from kelpie.app import ConfigError
+
+    monkeypatch.setenv("GITHUB_TOKEN", TOKEN)
+    monkeypatch.setenv("KELPIE_TEST_AGENT_TOKEN", TOKEN)
+    hub = CONFIG + (
+        f'[hub]\nlisten = "127.0.0.1:{free_port()}"\nallow_plain_http = true\n'
+        '[[hub.agents]]\nname = "laptop"\ntoken_env = "KELPIE_TEST_AGENT_TOKEN"\n'
+        '[engine.rules.delegation]\nclasses = { orphan_status = "agent" }\n'
+        'delegate_to = { "laptop/hermes" = "ops-1" }\n'
+    )
+    with pytest.raises(ConfigError, match="delegation is not supported there yet"):
+        build_app(load_settings(write(tmp_path, hub)))
+
+
 def test_checkpoints_warning_on_a_hub(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:

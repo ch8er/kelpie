@@ -189,7 +189,7 @@ is accepted and ignored with a warning. Rules run in the order below.
 | – | `return_causes` | P1 | implemented | `alert`, `comment` | adapter `comment` |
 | – | `output_offenders` | P1 | implemented | `comment`, `alert` | adapter `comment` (Hermes: `hermes kanban comment`) |
 | – | `instruction_bloat` | P1 | implemented | `alert` | alert channel |
-| – | `delegation` | P1 | implemented | `delegate` | an adapter that creates cards (none yet) |
+| – | `delegation` | P1 | implemented | `delegate` | adapter with `SupportsDelegate` (Hermes: `hermes kanban create`); not with `[hub]` yet |
 | – | `unanswered_asks` | P1 | implemented | `alert` | alert channel |
 
 Several rules share these terms:
@@ -866,7 +866,10 @@ clears); Kelpie verifies the fix by that rule's own condition, not by the agent'
 **Off by default**: nothing is delegated until `classes` lists a rule as `agent` and
 `delegate_to` names an operator for the task's board. It needs a database (`[storage]
 path`, not `":memory:"`): the guards read back what the rule did from the ledger, and the
-problems from the alert states. If that read fails, nothing is delegated that tick.
+problems from the alert states. If that read fails, nothing is delegated that tick. Not with `[hub]` yet (refused at
+startup). On Hermes a card is `hermes kanban create <title> --body ... --assignee
+<operator> --idempotency-key ... --json` on the task's board; the operator must be an agent
+profile (not in `human_owners`, not Kelpie's `author`).
 
 What is delegated: a problem whose kind is listed as `agent`, with severity `warning`,
 reported within the last 15 minutes and announced in suggest or act mode, on a task whose

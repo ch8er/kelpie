@@ -344,6 +344,23 @@ Both were read from the Hermes sources (`hermes_cli/kanban.py` `_cmd_unblock` an
 `_cmd_assign`, `kanban_db.py` `unblock_task` and `assign_task`) and are tested against the
 simulated Hermes CLI (`kelpie.sim.hermes_cli`); neither has run on a live farm yet.
 
+## Delegation cards
+
+The `delegation` rule (#347, off by default; see `[engine.rules.delegation]` in
+[configuration.md](../../../../docs/configuration.md#delegation)) hands a problem to the
+board's operator agent as a card on its queue: `hermes kanban create <title> --body <text>
+--assignee <operator> --idempotency-key <key> --json`. The title names the rule and the task
+(the task's own title in quotes), and the body holds the facts, the rule's text quoted as
+data (`> ` lines), what counts as fixed, a fixed how-to-handle block and a
+`kelpie-delegation:` line with the key. The idempotency key is one per problem, opening and
+attempt, so a retried create returns the card made before. The operator must be an agent
+profile of the board: a profile name, not in `human_owners`, not Kelpie's own `author`
+(else `UnsupportedAction`: a person is told). The card's id is read from the `--json`
+output (`id` or `task_id`, also inside `task`); output without one is an error, and the
+action is retried with the same key. With several boards the card is created on the task's
+board and its id carries the board's prefix. Hermes' `--json` keys are not documented, so
+this is **unverified** on a live board: run it in `suggest` first.
+
 ## Hooks plugin
 
 `plugin.py` in this directory is a self-contained Hermes plugin (standard library only).

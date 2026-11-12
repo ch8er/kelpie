@@ -138,6 +138,7 @@ from kelpie.adapters.hermes.park import (
     DEFAULT_WAIT_KEY,
     assign_args,
     comment_args,
+    create_args,
     decode_wait,
     encode_wait,
     has_marker,
@@ -716,6 +717,7 @@ class HermesAdapter:
             ActionKind.UNBLOCK,
             ActionKind.REASSIGN,
             ActionKind.WIP_COMMIT,
+            ActionKind.DELEGATE,
         }
     )
     # spool lines naming a run their writer is not the worker of: the count last warned about
@@ -2131,6 +2133,40 @@ class HermesAdapter:
         log.info("hermes: %s for task %s", done.describe(), task_id)
         return done.describe()
 
+    def delegate(self, task_id: str, operator: str, title: str, body: str, key: str) -> str:
+        """Put a delegation card (#347) on this board with ``hermes kanban create``, assigned
+        to ``operator``, with ``key`` as Hermes' idempotency key (a retried create returns the
+        card made before). Returns the card's task id, read from ``--json`` output (``id``
+        or ``task_id``, also inside ``task``). ``UnsupportedAction`` when ``operator`` is not
+        a profile name, is a person (``human_owners``) or Kelpie itself; :class:`HermesError`
+        when ``task_id`` is not on this board or the output names no task."""
+        profile = operator.strip().casefold()
+        if not _PROFILE.match(profile) or profile in UNASSIGN_WORDS:
+            raise UnsupportedAction(f"{operator!r} is not a Hermes profile name")
+        if profile in self.human_owners or profile == self.author.casefold():
+            raise UnsupportedAction(f"{operator!r} is not an agent; no card made")
+        with self._connect() as conn:
+            if conn.execute("SELECT 1 FROM tasks WHERE id = ?", (task_id,)).fetchone() is None:
+                raise HermesError(f"unknown Hermes task: {task_id}")
+        try:
+            out = run_kanban(
+                self.cli,
+                self.db_path,
+                create_args(title, body, profile, key),
+                timeout=self.cli_timeout,
+                author=self.author,
+                environ=self.cli_environ,
+            )
+        except HermesCliError as exc:
+            raise HermesError(str(exc)) from exc
+        card = _created_id(out)
+        if card is None:
+            raise HermesError(
+                "hermes kanban create printed no task id",
+                public_reason="the card's id could not be read from Hermes",
+            )
+        return card
+
     def check_answer(self, task_id: str, expect: Expect) -> None:
         """Before an answer from the chat is written (#300): re-read the task from the board,
         never from a snapshot, and raise :class:`StaleAnswer` unless it is still blocked with
@@ -2149,6 +2185,30 @@ class HermesAdapter:
         task = next((t for t in tasks if t.id == task_id), None)
         if (why := stale(task, expect)) is not None:
             raise StaleAnswer(f"task {task_id}: {why}; nothing written")
+
+
+_TASK_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}")
+
+
+def _created_id(out: str) -> str | None:
+    """The task id ``hermes kanban create --json`` printed: ``id`` or ``task_id`` of the
+    object (or of its ``task``), from the last line that is a JSON object; None when there
+    is none (a warning may come first)."""
+    for line in reversed(out.strip().splitlines()):
+        try:
+            data = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(data, dict):
+            continue
+        for holder in (data, data.get("task")):
+            if isinstance(holder, dict):
+                for name in ("id", "task_id"):
+                    value = holder.get(name)
+                    if isinstance(value, str) and _TASK_ID.fullmatch(value):
+                        return value
+        return None
+    return None
 
 
 def _own_spans(conn: _Connection, spans: tuple[Span, ...]) -> tuple[Span, ...]:

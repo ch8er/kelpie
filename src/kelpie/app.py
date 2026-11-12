@@ -2080,6 +2080,11 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
         if isinstance(adapter, hermes.HermesAdapter | HermesBoards):
             adapter.clock = clock
     _refuse_unimplemented_actions(settings, loaded, adapters)
+    if settings.hub is not None and delegation_policy(loaded) is not None:
+        raise ConfigError(
+            "[engine.rules.delegation] needs the boards' adapters inside kelpie serve: with "
+            "[hub] the boards are the agents', and delegation is not supported there yet"
+        )
     hub = _build_hub(settings, adapters, clock)
     registry = condition_registry(settings, clock)
     enrich, connectors = connector_steps(settings, metrics, clock, registry=registry)
@@ -3057,11 +3062,12 @@ def _open_span_store(db_path: Path | None) -> SpanStore:
 
 
 # Rules whose effects on a platform are actions the Hermes adapter carries out: stop, wait
-# (park), wake of a parked task, comment, a local WIP commit (plus alerts). Update with the
-# adapter.
+# (park), wake of a parked task, comment, a local WIP commit, a delegation card (plus
+# alerts). Update with the adapter.
 HERMES_ACT_RULES = frozenset(
     {
         "checkpoints",
+        "delegation",
         "loop_breaker",
         "wait_condition",
         "conflict_warning",
