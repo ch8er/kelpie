@@ -29,8 +29,6 @@ class ActionKind(StrEnum):
     # says what it is (label, flag, pause) and ``params.lift_prs`` the pull requests that
     # carry a label hold. Carried out only by the executor the hold names as its owner.
     LIFT_HOLD = "lift_hold"
-    # Hand a problem to the operator agent as a card on its queue (#347, ``SupportsDelegate``);
-    # ``params.card`` holds the card's title, body and idempotency key.
     # Hand a problem to the operator agent as a card on its queue (#347; the adapters that
     # create cards come in a later part); ``params.card`` holds the card's title, body and
     # idempotency key.
