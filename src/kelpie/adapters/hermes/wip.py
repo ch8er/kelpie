@@ -82,7 +82,8 @@ AUTHOR = ("Kelpie", "kelpie@kelpie.invalid")  # author and committer of every WI
 MAX_ENTRIES = 1000  # changed entries of a worktree Kelpie still commits
 MAX_FILE_BYTES = 25 << 20  # a changed file larger than this is not committed
 MAX_MESSAGE = 4000  # characters of the commit message
-MAX_SUBJECT = 200  # characters of its first line (a ``[skip ci]`` at its end is kept)
+MAX_SUBJECT = 200  # characters of its first line (a ``[skip ci]`` is kept at its end)
+SKIP_CI = "[skip ci]"
 BUDGET_FACTOR = 4  # all git calls of one WIP commit end within this many git timeouts
 MAX_LISTING = 8 << 20  # characters of ls-files or status read; beyond: refused
 # Overrides on top of the read side's SAFE_CONFIG for every call of a WIP commit.
@@ -255,12 +256,13 @@ def commit_wip(path: Path, branch: str, message: str, timeout: float) -> WipComm
 
 def _message(message: str) -> str:
     """The commit message: never empty, at most :data:`MAX_MESSAGE` characters, its first
-    line at most :data:`MAX_SUBJECT` and keeping a ``[skip ci]`` it ends with."""
+    line at most :data:`MAX_SUBJECT`; a ``[skip ci]`` anywhere in it ends the first line."""
     subject, _, body = message.strip().partition("\n")
     subject = subject.strip() or "WIP"
-    if len(subject) > MAX_SUBJECT:
-        keep = " [skip ci]" if subject.endswith("[skip ci]") else ""
-        subject = subject[: MAX_SUBJECT - len(keep)].rstrip() + keep
+    keep = " [skip ci]" if SKIP_CI in message else ""
+    if keep and SKIP_CI in subject:
+        subject = subject.replace(SKIP_CI, "").rstrip()
+    subject = subject[: MAX_SUBJECT - len(keep)].rstrip() + keep
     return f"{subject}\n{body}".strip()[:MAX_MESSAGE]
 
 
@@ -276,6 +278,7 @@ def _check_links(common: Path, gitdir: Path, branch: str) -> None:
         common / "logs",
         common / "logs" / "refs",
         common / "packed-refs",
+        common / "reftable",
         common / "config",
         common / "info",
         common / "info" / "exclude",
@@ -336,7 +339,9 @@ def _check_config(listing: str) -> None:
     for scope, entry in zip(parts[::2], parts[1::2], strict=False):
         if scope == "command":
             continue  # the -c overrides of this call (global and system config are off)
-        key = entry.split("\n", 1)[0]
+        key, _, value = entry.partition("\n")
+        if key.casefold() == "extensions.refstorage" and value.strip().casefold() != "files":
+            raise WipRefused("the repository does not keep its refs in files")
         section = key.split(".", 1)[0].casefold()
         if section in _REFUSED_SECTIONS:
             raise WipRefused(f"the worktree's git config sets {section}.*")

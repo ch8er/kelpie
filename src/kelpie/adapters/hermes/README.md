@@ -723,7 +723,8 @@ passed on, so a `~` in the worktree's `core.excludesFile` and git's default
 `~/.config/git/ignore` are read from Kelpie's home: they decide which files are added,
 nothing runs. Agents can later push the WIP commit like any other commit on their branch;
 the message carries `[skip ci]` with the default `wip_ci` (its first line is cut to 200
-characters, keeping a `[skip ci]` at its end). A refusal's reason is in
+characters and always ends with the `[skip ci]` the message holds). A repository that keeps
+its refs in a reftable (`extensions.refStorage`) is refused. A refusal's reason is in
 Kelpie's log; the alert says the WIP commit was not made.
 
 Operations:

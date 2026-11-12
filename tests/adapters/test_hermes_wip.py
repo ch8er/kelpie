@@ -218,6 +218,14 @@ def test_the_message_is_capped_and_keeps_skip_ci() -> None:
     capped = wip._message("WIP: t [skip ci]\n\n" + "y" * 9000)
     assert len(capped) == wip.MAX_MESSAGE and capped.startswith("WIP: t [skip ci]\n\nyyy")
     assert wip._message("a" * 300).endswith("a") and len(wip._message("a" * 300)) == 200
+    multi = wip._message("WIP: " + "A" * 50 + "\n" + "B" * 5000 + " [skip ci]\n\nnote")
+    assert multi.split("\n", 1)[0] == "WIP: " + "A" * 50 + " [skip ci]"
+
+
+def test_reftable_is_refused() -> None:
+    with pytest.raises(wip.WipRefused, match="refs in files"):
+        wip._check_config("local\0extensions.refstorage\nreftable\0")
+    wip._check_config("local\0extensions.refstorage\nfiles\0command\0filter.x.clean\n\0")
 
 
 @pytest.mark.parametrize(
