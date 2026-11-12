@@ -614,7 +614,19 @@ class BudgetStatus:
     the forecast next provider limit from observed limit hits (None without enough of
     them). ``cost_unknown_tokens`` are tokens of models with no price (neither in
     ``[prices]`` nor in the default table): a ``usd`` budget leaves them out of ``spent``.
-    ``session_ids`` are the sessions that spent within the window."""
+    ``session_ids`` are the sessions that spent within the window.
+
+    ``sources`` says where ``spent`` came from (#205): ``traces`` (model calls priced from
+    spans), ``claude_code_metrics`` (Claude Code's own token metrics, for sessions with no
+    model call in traces) and ``bill`` (a provider's cost report). A farm-wide ``usd``
+    budget in ``api`` mode counts each provider's reconciled day that lies wholly in its
+    window at the bill instead of the traces' estimate: ``billed_usd`` is those bills,
+    ``billed_estimate_usd`` what traces showed for the same days and ``billed_days`` which
+    (``<provider> <YYYY-MM-DD>``). ``sources_disagree``: a day of those whose gap is past
+    the provider's warning thresholds (both figures are kept, never one silently).
+    ``bill_only_hard``: the bill takes ``spent`` past ``hard`` while traces alone do not;
+    the state is then held at ``soft`` (a stop acts on runs Kelpie sees, and the bill may
+    hold spend that is not the farm's)."""
 
     budget: str
     scope: BudgetScope
@@ -632,6 +644,12 @@ class BudgetStatus:
     cost_unknown_tokens: int = 0
     estimated: bool = False
     session_ids: tuple[str, ...] = ()
+    sources: tuple[str, ...] = ()
+    billed_usd: float | None = None
+    billed_estimate_usd: float | None = None
+    billed_days: tuple[str, ...] = ()
+    sources_disagree: bool = False
+    bill_only_hard: bool = False
 
 
 @dataclass(frozen=True, slots=True)

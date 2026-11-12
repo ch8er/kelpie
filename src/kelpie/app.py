@@ -76,7 +76,14 @@ from kelpie.connectors.human_tasks import (
 from kelpie.connectors.llm_quotas import LlmQuotaSettings, load_llm_quotas
 from kelpie.core.actions import ActionKind
 from kelpie.core.actlock import ActLock, HeldLocks, acquire
-from kelpie.core.budgets import BudgetConfig, BudgetStatus, BudgetUnit, evaluate, load_budgets
+from kelpie.core.budgets import (
+    BudgetConfig,
+    BudgetStatus,
+    BudgetUnit,
+    evaluate,
+    load_budgets,
+    with_bills,
+)
 from kelpie.core.conditions import (
     Contribution,
     carry_forward,
@@ -2932,7 +2939,30 @@ def cost_report_steps(
         store = SqliteCostReports(settings.db_path) if settings.db_path is not None else None
     except (OSError, sqlite3.Error, RuntimeError) as exc:
         raise ConfigError(f"cannot open the cost report store {settings.db_path}: {exc}") from exc
-    return [("cost_reports", CostReportStep(source, store, settings, metrics=metrics))]
+    steps: list[tuple[str, Callable[[Snapshot], Snapshot]]] = [
+        ("cost_reports", CostReportStep(source, store, settings, metrics=metrics))
+    ]
+    if settings.budgets.budgets:  # after the reconciliation: budgets read the bill (#205)
+        steps.append(("budget_bills", BudgetBills(settings.budgets, metrics)))
+    return steps
+
+
+@dataclass(slots=True)
+class BudgetBills:
+    """Puts the providers' reconciled bills into the budgets the snapshot already carries
+    (:func:`kelpie.core.budgets.with_bills`), after :class:`CostReportStep`, and the result
+    on ``/metrics``. Budgets that could not be read this tick are left as they are."""
+
+    config: BudgetConfig
+    metrics: Metrics | None = None
+
+    def __call__(self, snapshot: Snapshot) -> Snapshot:
+        if not snapshot.budgets or not snapshot.reconciliations:
+            return snapshot
+        statuses = with_bills(self.config, snapshot.budgets, snapshot.reconciliations, snapshot.now)
+        if self.metrics is not None and snapshot.budgets_ok:
+            self.metrics.set_budget_statuses(statuses)
+        return replace(snapshot, budgets=statuses)
 
 
 def _github_steps(
@@ -3521,11 +3551,29 @@ def read_budgets(
         )()
         if not snapshot.budgets_ok or metrics.span_store_errors:
             return "the span store cannot be read"
-        return snapshot.budgets
+        return _status_bills(settings, snapshot.budgets, snapshot.now)
     finally:
         close = getattr(store, "close", None)
         if callable(close):
             close()
+
+
+def _status_bills(
+    settings: Settings, statuses: tuple[BudgetStatus, ...], now: datetime
+) -> tuple[BudgetStatus, ...]:
+    """``kelpie status``: the stored bills in the budgets, as ``kelpie serve`` counts them
+    (#205). Bills that cannot be read leave the traces' figures (the line says its
+    sources)."""
+    windows = [b.window for b in settings.budgets.budgets]
+    if settings.cost_reports is None or not windows:
+        return statuses
+    until = now.astimezone(UTC).date()
+    since = (now - max(windows)).astimezone(UTC).date()
+    found = read_reconciliations(settings, since, until, now)
+    if isinstance(found, str):
+        log.warning("budgets: bills not read: %s", found)
+        return statuses
+    return with_bills(settings.budgets, statuses, found, now)
 
 
 UNPRICED_WINDOW = timedelta(days=7)  # how far back models without a price are looked for
@@ -3742,7 +3790,35 @@ def render_budgets(
                 f" remaining {_amount(s.remaining, s.unit)},"
                 f" {_amount(s.burn_rate, s.unit)}/h, runs out {when}"
             )
+            lines += [f"      {line}" for line in budget_sources(s)]
     return lines
+
+
+_SOURCE_NAMES = {
+    "traces": "traces",
+    "claude_code_metrics": "Claude Code's metrics",
+    "bill": "the provider's bill",
+}
+
+
+def budget_sources(s: BudgetStatus) -> list[str]:
+    """Where a budget's spend came from (#205), and both figures where the bill and the
+    traces disagree: never one of them silently."""
+    if not s.sources:
+        return []
+    names = ", ".join(_SOURCE_NAMES.get(x, x) for x in s.sources)
+    if s.billed_usd is None:
+        return [f"from {names}"]
+    days = ", ".join(s.billed_days)
+    out = [
+        f"from {names}: billed ${s.billed_usd:,.2f} for {days} in place of the traces' "
+        f"${s.billed_estimate_usd or 0.0:,.2f}"
+    ]
+    if s.sources_disagree:
+        out.append("the bill and the traces disagree past the warning thresholds (rule 10)")
+    if s.bill_only_hard:
+        out.append("only the bill passes the hard threshold: held at soft, nothing is stopped")
+    return out
 
 
 def _resources_status(resources: ResourceSettings) -> str:

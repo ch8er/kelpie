@@ -218,3 +218,17 @@ def test_load_inputs_reads_the_bills_of_that_day(tmp_path: Path) -> None:
 def test_configured_cost_reports_with_no_bill_yet_say_so() -> None:
     text = markdown(reconciliations=(), bill_day=date(2026, 3, 1))
     assert "**Bill check**: no cost report reconciled for 2026-03-01 (UTC) yet." in text
+
+
+def test_the_bill_check_says_which_budgets_count_the_bill() -> None:
+    """#205: the report names the budgets that count a billed day at the bill, and says
+    where a large gap leaves the two figures disagreeing."""
+    from kelpie.report.farm import FarmFacts
+
+    farm = FarmFacts(billed_budgets=("farm-usd",))
+    text = markdown(reconciliations=(bill(),), farm=farm)
+    assert "Budgets `farm-usd` count each of these days at the bill, not at the estimate" in text
+    assert "held at soft" not in text
+    large = markdown(reconciliations=(bill(large=True),), farm=farm)
+    assert "a hard threshold only the bill passes is held at soft" in large
+    assert "count each of these days at the bill" not in markdown(reconciliations=(bill(),))

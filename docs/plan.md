@@ -217,7 +217,7 @@ Three weeks, three steps: the core with traces and the first adapter, the full r
 - [x] Before the rules: span dedup by tool-call id, quickstart for Hermes and `kelpie doctor`, so the live run can start in parallel
 - [ ] Rules: ping-pong, role bottlenecks, environment resources, CI economy — all four act; open: rule 9's fail-fast cancel in the GitHub connector
 - [x] Rules: loop and budget breaker (10), activity without progress (11)
-- [ ] Budgets and spend: budget config, thresholds, burn-rate forecast, spend from traces, Claude Code metrics and provider cost APIs — all but one spend source: provider cost reports check the bill but do not feed budgets
+- [x] Budgets and spend: budget config, thresholds, burn-rate forecast, spend from traces, Claude Code metrics and provider cost APIs (farm-wide dollar budgets count settled days at the bill, #205)
 - [x] Resource reading via Prometheus and node_exporter for any machine: laptop, cloud VM, container — works; an unreachable Prometheus is alerted once per cause
 - [x] Condition connectors: GitHub and CI, LLM provider quotas, human tasks — all three work; `quota_reset` is evaluated from the provider probes (#424); limit hits are counted from spans per provider too
 - [ ] Run on our own farm and record every rule trigger — observe runs on the farm produced incidents 14–20 and their fixes; the recorded 24 h observe and 48 h act runs of the roadmap item were not done
