@@ -105,6 +105,7 @@ def run(
         delegations=tuple(events),
         resolved_problems=tuple(resolved),
         sessions=tuple(sessions),
+        delegation_read=True,
     )
     return list(Delegation(policy).evaluate(snap))
 
@@ -189,7 +190,8 @@ def test_a_judged_card_gets_no_second_verdict() -> None:
 
 def test_a_problem_the_rule_does_not_hand_over_is_said_to_be_the_persons() -> None:
     limited = replace(POLICY, max_per_hour=1)
-    actions = run([task(), task("T-2")], [problem(), problem("T-2")], policy=limited)
+    held = [replace(card(t), kind="held", attempt=0, outcome="delegated") for t in ("T-1", "T-2")]
+    actions = run([task(), task("T-2")], [problem(), problem("T-2")], held, policy=limited)
     kept = [a for a in actions if "kept" in a.params]
     assert [a.task_id for a in actions if a.kind is ActionKind.DELEGATE] == ["T-1"]
     assert [a.task_id for a in kept] == ["T-2"]
@@ -255,7 +257,9 @@ def tick(
         dry_run=dry_run, default_mode=Mode.ACT, modes={"delegation": mode, "stale_blocks": Mode.ACT}
     )
     engine = Engine([Emit(actions), Delegation(policy)], alerter=alerter, config=config)
-    snap = Snapshot(now=NOW, tasks=tuple(tasks or [task()]), delegations=tuple(events))
+    snap = Snapshot(
+        now=NOW, tasks=tuple(tasks or [task()]), delegations=tuple(events), delegation_read=True
+    )
     done = engine.tick(lambda: snap)
     return alerter, [d.outcome for d in done if d.action.rule == "stale_blocks"]
 
@@ -317,20 +321,23 @@ def test_the_resolved_notice_of_a_problem_with_a_card_is_held_back() -> None:
     config = EngineConfig(dry_run=False, default_mode=Mode.ACT)
     emit = Emit([alert()])
     engine = Engine([emit, Delegation(POLICY)], alerter=alerter, config=config)
-    engine.tick(lambda: Snapshot(now=NOW, tasks=(task(),)))
+    engine.tick(lambda: Snapshot(now=NOW, tasks=(task(),), delegation_read=True))
     emit.actions = []
     later = NOW + timedelta(hours=1)
     snap = Snapshot(
-        now=later, tasks=(task(),), delegations=(replace(card(), at=later - timedelta(minutes=30)),)
+        now=later,
+        tasks=(task(),),
+        delegations=(replace(card(), at=later - timedelta(minutes=30)),),
+        delegation_read=True,
     )
     done = engine.tick(lambda: snap)
     notices = [d for d in done if d.action.params.get("state") == "stale:T-1"]
     assert [d.outcome for d in notices] == [Outcome.DELEGATED] and alerter.events == []
     # without a card the person hears it resolved
     engine2 = Engine([Emit([alert()]), Delegation(POLICY)], alerter=FakeAlerter(), config=config)
-    engine2.tick(lambda: Snapshot(now=NOW, tasks=(task(),)))
+    engine2.tick(lambda: Snapshot(now=NOW, tasks=(task(),), delegation_read=True))
     engine2.rules[0].actions = []  # type: ignore[attr-defined]
-    done = engine2.tick(lambda: Snapshot(now=later, tasks=(task(),)))
+    done = engine2.tick(lambda: Snapshot(now=later, tasks=(task(),), delegation_read=True))
     assert [d.outcome for d in done if d.action.params.get("state") == "stale:T-1"] == [
         Outcome.ALERTED
     ]
@@ -340,3 +347,147 @@ def test_a_problem_kelpie_lost_track_of_is_never_verified() -> None:
     assert verdicts(run([task()], events=[card(ago=timedelta(hours=2))])) == []
     (said,) = run([task()], events=[card(ago=timedelta(hours=7))])
     assert said.params["verdict"] == "not_finished" and said.reason.startswith("Not verified")
+
+
+def test_nothing_is_held_back_without_the_history() -> None:
+    alerter = FakeAlerter()
+    config = EngineConfig(dry_run=False, default_mode=Mode.ACT)
+    engine = Engine([Emit([alert()]), Delegation(POLICY)], alerter=alerter, config=config)
+    done = engine.tick(lambda: Snapshot(now=NOW, tasks=(task(),)))  # delegation_read False
+    assert [d.outcome for d in done if d.action.rule == "stale_blocks"] == [Outcome.ALERTED]
+
+
+def test_a_problem_held_and_told_is_held_no_more() -> None:
+    kept = DelegationEvent(
+        "stale:T-1", "task:T-1", 0, "verdict", NOW - timedelta(minutes=5), "alerted", verdict="kept"
+    )
+    _, outcomes = tick([alert()], events=[kept])
+    assert outcomes == [Outcome.ALERTED]
+    held = replace(card(), kind="held", attempt=0, outcome="delegated")
+    assert run([task()], [problem()], [held, kept]) == []  # told once already
+
+
+# --- across ticks: every held alert ends in a message to the person ---------------------
+
+
+@dataclass
+class Board:
+    """A platform adapter that makes cards."""
+
+    name: str = "hermes"
+    made: int = 0
+    actions = frozenset({ActionKind.DELEGATE})
+
+    def delegate(self, task_id: str, operator: str, title: str, body: str, key: str) -> str:
+        self.made += 1
+        return f"C-{self.made}"
+
+    def list_tasks(self) -> list[Task]:
+        return []
+
+    def get_task(self, task_id: str) -> None:
+        return None
+
+    def requeue(self, task_id: str, reason: str) -> None: ...
+
+    def unblock(self, task_id: str, reason: str) -> None: ...
+
+    def comment(self, task_id: str, body: str) -> None: ...
+
+    def wip_commit(self, task_id: str, message: str, **kw: object) -> None: ...
+
+    def events(self, since: datetime) -> list[object]:
+        return []
+
+
+class Farm:
+    """An engine with the delegation rule, its history filled as kelpie serve fills it."""
+
+    def __init__(self) -> None:
+        from kelpie.core.ledger import MemoryLedgerStore
+        from kelpie.core.states import MemoryStateStore
+
+        self.emit = Emit([alert()])
+        self.board = Board()
+        self.alerter = FakeAlerter()
+        self.ledger = MemoryLedgerStore()
+        self.states = MemoryStateStore()
+        self.engine = Engine(
+            [self.emit, Delegation(POLICY)],
+            adapters=[self.board],  # type: ignore[list-item]
+            alerter=self.alerter,
+            config=EngineConfig(dry_run=False, default_mode=Mode.ACT),
+            ledger_store=self.ledger,
+            state_store=self.states,
+        )
+
+    def tick(self, at: datetime, tasks: list[Task]) -> None:
+        from kelpie.core.delegation import history
+
+        entries = [
+            e
+            for e in self.ledger.since(at - timedelta(days=30))
+            if e.rule == "delegation" or e.outcome is Outcome.DELEGATED
+        ]
+        problems, resolved, events = history(self.states.open_states(), self.states.closed, entries)
+        snap = Snapshot(
+            now=at,
+            tasks=tuple(tasks),
+            problems=problems,
+            resolved_problems=resolved,
+            delegations=events,
+            delegation_read=True,
+        )
+        self.engine.tick(lambda: snap)
+
+    @property
+    def told(self) -> list[str]:
+        return [e.reason for e in self.alerter.events]
+
+
+def test_hand_off_then_verified_two_messages() -> None:
+    farm = Farm()
+    farm.tick(NOW, [task()])
+    assert farm.told == []  # held for ops-1
+    farm.tick(NOW + timedelta(minutes=1), [task()])
+    assert farm.board.made == 1 and len(farm.told) == 1  # the hand-off
+    assert "ops-1" in farm.told[0]
+    farm.emit.actions = []  # the block is gone
+    done = cardtask("C-1", status=Status.DONE, since=timedelta(minutes=-5))
+    for minutes in (5, 20, 40, 60):
+        farm.tick(NOW + timedelta(minutes=minutes), [task(), done])
+    assert len(farm.told) == 2 and farm.told[1].startswith("Fixed, verified")
+
+
+def test_a_person_taking_the_task_gets_it_back_in_one_message() -> None:
+    from kelpie.core.model import Owner, OwnerKind
+
+    alice = Owner("alice", "ceo", OwnerKind.HUMAN)
+    taken = task(owner_id="alice")
+    farm2 = Farm()
+    farm2.tick(NOW, [task()])
+    from kelpie.core.delegation import history
+
+    entries = [e for e in farm2.ledger.since(NOW - timedelta(days=1))]
+    problems, _, events = history(farm2.states.open_states(), farm2.states.closed, entries)
+    snap = Snapshot(
+        now=NOW + timedelta(minutes=1),
+        tasks=(taken,),
+        owners=(alice,),
+        problems=problems,
+        delegations=events,
+        delegation_read=True,
+    )
+    farm2.engine.tick(lambda: snap)
+    assert farm2.board.made == 0
+    assert len(farm2.told) == 1 and farm2.told[0].startswith("Kelpie did not hand this to ops-1")
+
+
+def test_the_breaker_tells_the_person_about_each_held_problem() -> None:
+    failed = [verdict(f"T-{i}", what="still_broken", ago=timedelta(hours=i)) for i in range(2, 5)]
+    held = replace(card(), kind="held", attempt=0, outcome="delegated")
+    actions = run([task()], [problem()], [*failed, held])
+    kept = [a for a in actions if "kept" in a.params]
+    assert [a.params["kept"] for a in kept] == ["delegation is stopped by the circuit breaker"]
+    assert Delegation(POLICY).boards("delegation:breaker") is False
+    assert Delegation(POLICY).boards("stale:T-1") is True

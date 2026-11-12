@@ -691,6 +691,10 @@ class Engine:
             lines = [line for k in keys for line in self._lines.get(k, ())]
             if not lines and (operator := self._for_operator(action, snapshot)) is not None:
                 log.info("held back for the operator agent %s: %s", operator, action)
+                # the rule reads it back (``held``): a problem it holds is told about
+                self._detail = f"held for {operator}" + (
+                    f"; state {action.state}" if action.state is not None else ""
+                )
                 return Outcome.DELEGATED
             if any(not executed for k in keys for _, executed, _, _ in self._held.get(k, ())):
                 # It carries a failure: that needs a human, whatever the alert's severity.
@@ -728,7 +732,8 @@ class Engine:
             return None
         try:
             if action.state is not None:
-                kind = (action.key or "").split(":", 1)[0] or None
+                # the rule's own key, before the transition's suffix (``<key>|<opened>|...``)
+                kind = (action.key or "").split("|", 1)[0].split(":", 1)[0] or None
                 return held_for_operator(
                     policy,
                     action.rule,
@@ -739,7 +744,7 @@ class Engine:
                     snapshot,
                 )
             state = action.params.get("state")
-            if isinstance(state, str):
+            if isinstance(state, str) and (action.key or "").startswith("resolved:"):
                 return resolved_by_operator(state, action.task_id, snapshot)
         except Exception:  # never lose an alert to a bug here
             log.exception("could not tell whether the operator has %s", action)

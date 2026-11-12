@@ -906,7 +906,7 @@ delegate_to = { hermes = "ops-1" }   # board (a task's source) -> operator profi
 | `finish_within` | `"6h"` | duration, > 0 | A card not finished by then goes back to the person ("not fixed, yours now"). |
 | `max_per_hour` | `3` | integer >= 1 | New cards carried out per hour; the oldest problems go first. |
 | `max_per_day` | `10` | integer >= 1 | New cards carried out per day. |
-| `breaker_failures` | `3` | integer >= 1 | Failed verifications within a day that stop all delegation (the circuit breaker): one alert to the person while it lasts, and every problem goes to the person as before. |
+| `breaker_failures` | `3` | integer >= 1 | Failed verifications within a day that stop all delegation (the circuit breaker): one alert to the person while it lasts; nothing is held back or handed over, and each problem held for the operator is sent to the person. |
 
 **When the person hears.** While `delegation` is in `act` mode (and not under dry-run),
 the engine holds back the alerts of a problem the operator may have (its class, `warning`,
@@ -924,8 +924,15 @@ ops-1; card t_9a for ops-1."), one at the end, and nothing in between:
   `pickup_within`, or it was not finished within `finish_within`; from then on the
   problem's alerts reach the person again, and no new card is made within `cooldown`;
 - **Kelpie did not hand this to ops-1 (why); it is yours**: a problem the engine held back
-  that the rule does not hand over (the hourly or daily limit, the attempts used, a problem
-  about one of Kelpie's own cards, one older than the history).
+  (the ledger's `delegated` entries) that the rule does not hand over, whatever the reason:
+  the hourly or daily limit, the attempts used, the circuit breaker, a person who took the
+  task, the task given back, a problem about one of Kelpie's own cards, one older than the
+  history. From then on its alerts reach the person.
+
+If the server cannot read the delegation history in a tick, nothing is held back in it.
+Turning delegation off (or out of act mode) while cards are open leaves their problems'
+next escalations to reach the person, but no verdict is sent for those cards; switch back to
+act, or look at the operator's queue.
 
 A `critical` problem is never held back: the person hears it at once. In `suggest` mode
 nothing is held back; the person gets the problem's alerts and "Suggested: hand the problem
