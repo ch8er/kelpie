@@ -5,7 +5,7 @@ from kelpie.core.config import EngineConfig
 from kelpie.core.engine import Engine
 from kelpie.core.model import Snapshot, Status, StatusStep, Task
 from kelpie.core.serde import snapshot_from_dict
-from kelpie.core.transitions import MemoryTransitionStore, TransitionRecorder
+from kelpie.core.transitions import MemoryTransitionStore, StatusChange, TransitionRecorder
 from kelpie.rules._history import bounces, time_to_accept
 from tests.fakes import FakeAdapter, FakeAlerter
 
@@ -129,3 +129,47 @@ def test_fixtures_can_carry_a_history() -> None:
     assert time_to_accept(snap.history_of("T-1")) == H
     assert snap.history_of("T-2") == ()
     assert replace(snap, status_history=()).history_of("T-1") == ()
+
+
+def test_live_history_matches_a_restart_and_keeps_the_status_before_the_window() -> None:
+    """Ticks every 30 minutes: a task ready for longer than the window keeps its ready
+    step, live as after a restart (the slow pickups are the ones worth seeing)."""
+    window = timedelta(hours=2)
+    store = MemoryTransitionStore()
+    live = TransitionRecorder(store, window=window)
+    for half_hours in range(11):  # ready from 0h, picked up at 5h
+        at = T0 + half_hours * H / 2
+        status = S.READY if half_hours < 10 else S.IN_PROGRESS
+        live.record(Snapshot(now=at, tasks=(task(status, T0 if status is S.READY else at),)))
+    now = T0 + 5 * H
+    seen = live.steps(now)
+    assert [s.status for s in seen] == [S.READY, S.IN_PROGRESS]
+    assert time_to_accept(seen) == 5 * H
+    restarted = TransitionRecorder(store, window=window)
+    restarted.record(Snapshot(now=now + H / 2, tasks=(task(S.IN_PROGRESS, now),)))
+    assert restarted.steps(now + H / 2) == seen
+    # A first sighting older than the window: no history until something changes.
+    old = TransitionRecorder(MemoryTransitionStore(), window=window)
+    old.record(Snapshot(now=now, tasks=(task(S.READY, now - 10 * H),)))
+    assert old.steps(now) == ()
+    old.record(Snapshot(now=now + H, tasks=(task(S.IN_PROGRESS, now + H),)))
+    assert time_to_accept(old.steps(now + H)) == 11 * H
+
+
+def test_a_failed_first_read_is_tried_again() -> None:
+    class Flaky(MemoryTransitionStore):
+        fail = True
+
+        def transitions(self, start: datetime, end: datetime) -> list:  # type: ignore[override,type-arg]
+            if self.fail:
+                raise OSError("locked")
+            return super().transitions(start, end)
+
+    store = Flaky()
+    store.rows.append(StatusChange(T0, "T-1", S.READY, T0))
+    recorder = TransitionRecorder(store)
+    recorder.record(Snapshot(now=T0 + H, tasks=(task(S.READY, T0),)))
+    assert recorder.steps(T0 + H) == ()
+    store.fail = False
+    recorder.record(Snapshot(now=T0 + 2 * H, tasks=(task(S.IN_PROGRESS, T0 + 2 * H),)))
+    assert [s.status for s in recorder.steps(T0 + 2 * H)] == [S.READY, S.IN_PROGRESS]

@@ -200,6 +200,7 @@ class TransitionRecorder:
     max_steps: int = MAX_STEPS_PER_TASK
     _last: dict[str, StatusChange] | None = field(default=None, init=False)
     _recent: dict[str, list[StatusStep]] | None = field(default=None, init=False)
+    _trimmed_at: datetime | None = field(default=None, init=False)
     _watch_start: datetime | None = field(default=None, init=False)
     _seen: dict[str, datetime] = field(default_factory=dict, init=False)
     failures: int = field(default=0, init=False)
@@ -226,27 +227,36 @@ class TransitionRecorder:
         return changes
 
     def steps(self, now: datetime) -> tuple[StatusStep, ...]:
-        """The recent history for rules (``Snapshot.status_history``): per task, its changes
-        within ``window`` before ``now`` and the last one before that, oldest first, at most
-        ``max_steps``. A task with no change within the window has none."""
+        """The recent history for rules (``Snapshot.status_history``): per task with a
+        change within ``window`` before ``now``, those changes and the status the window
+        began in (the last change before it), oldest first, at most ``max_steps``. A task
+        with no change within the window has none."""
         if self._recent is None:
             return ()
-        self._trim(now)
-        return tuple(step for steps in self._recent.values() for step in steps)
+        start = now - self.window
+        return tuple(
+            step for steps in self._recent.values() if steps[-1].at >= start for step in steps
+        )
 
     def _remember(self, changes: Sequence[StatusChange], now: datetime) -> None:
         if self._recent is None:
+            earlier = self._earlier(now, changes)
+            if earlier is None:
+                return  # retried on the next tick, with that tick's changes
             self._recent = {}
-            read = getattr(self.store, "transitions", None)
-            if callable(read):  # what was recorded before this run, once
-                try:
-                    earlier = [c for c in read(now - self.window, now) if c not in changes]
-                except Exception:
-                    log.exception("reading recorded task status transitions failed")
-                    earlier = []
-                self._add(sorted(earlier, key=lambda c: c.at))
+            self._add(sorted(earlier, key=lambda c: c.at))
         self._add(changes)
-        self._trim(now)
+        self._trim(now, {c.task_id for c in changes})
+
+    def _earlier(self, now: datetime, changes: Sequence[StatusChange]) -> list[StatusChange] | None:
+        """What was recorded before this run within the window (and each task's last row
+        before it), read once; None when the store cannot be read now."""
+        try:
+            rows = self.store.transitions(now - self.window, now)
+        except Exception:
+            log.exception("reading recorded task status transitions failed")
+            return None
+        return [c for c in rows if c not in changes]
 
     def _add(self, changes: Iterable[StatusChange]) -> None:
         assert self._recent is not None
@@ -255,17 +265,18 @@ class TransitionRecorder:
                 StatusStep(c.task_id, changed_at(c), c.status, c.previous)
             )
 
-    def _trim(self, now: datetime) -> None:
+    def _trim(self, now: datetime, touched: set[str] | None = None) -> None:
+        """Per task, the steps within the window and the last one before it (the status the
+        window began in, kept however old), at most ``max_steps``. Only ``touched`` tasks
+        and, once a window, all of them."""
         assert self._recent is not None
         start = now - self.window
-        for task_id in list(self._recent):
+        if self._trimmed_at is None or now - self._trimmed_at >= self.window:
+            touched, self._trimmed_at = None, now
+        for task_id in self._recent if touched is None else touched & self._recent.keys():
             steps = self._recent[task_id]
-            inside = [i for i, s in enumerate(steps) if s.at >= start]
-            if not inside:
-                del self._recent[task_id]  # nothing happened to it within the window
-                continue
-            first = max(inside[0] - 1, 0)  # keep the status the window began in
-            self._recent[task_id] = steps[first:][-self.max_steps :]
+            first = next((i for i, s in enumerate(steps) if s.at >= start), len(steps))
+            self._recent[task_id] = steps[max(first - 1, 0) :][-self.max_steps :]
 
 
 def history(changes: Iterable[StatusChange]) -> dict[str, tuple[StatusChange, ...]]:
