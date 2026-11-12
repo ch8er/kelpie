@@ -211,7 +211,9 @@ global config (`GIT_CONFIG_NOSYSTEM`, `GIT_CONFIG_GLOBAL=/dev/null`), only `PATH
 `HOME` from Kelpie's environment (no tokens, no inherited `GIT_*`), no hooks
 (`core.hooksPath=/dev/null`), no fsmonitor, no signing, no automatic gc, no transport
 (`GIT_ALLOW_PROTOCOL=none`, `protocol.allow=never`), and a fixed author. A worktree whose own
-config has includes or filter drivers, a changed file with a filter attribute (LFS), an
+config has includes, config-defined hooks or filter drivers, a symbolic link in the git
+directory where the commit writes or git reads config (objects, refs, reflogs, index,
+config), a hard-linked ref or reflog, the branch checked out in another worktree, a changed file with a filter attribute (LFS), an
 operation in progress, submodules (checked before any `status`, which would run a child git
 under the submodule's own config), unmerged changes, a nested repository, another branch
 than the task's, or a file over 25 MiB is refused and a person is told. The commit is
@@ -227,8 +229,9 @@ Kelpie's secrets; where that matters, run Kelpie as its own user and leave `chec
 out of `act` on Hermes (WIP commits then become alerts), as the read side advises.
 
 Residual risks: git itself parses the hostile repository; a sibling worktree of the same
-repository shares its config and could add a filter driver between Kelpie's last check and
-`add` (a narrow race); a worker started between Kelpie's run check and the commit races with
+repository shares its config and could add a filter driver, or a symbolic link, after
+Kelpie's check and before the step it guards (a narrow race, rechecked right before `add`
+and `update-ref`); a worker started between Kelpie's run check and the commit races with
 it (the index lock and the compare-and-swap make that a failure, not a lost change).
 
 ## Outbound connections

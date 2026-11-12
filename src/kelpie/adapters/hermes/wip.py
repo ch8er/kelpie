@@ -13,15 +13,21 @@ than for reading:
   automatic gc or maintenance.
 - **Config that is refused, not overridden.** The worktree's own config (``local`` and
   ``worktree`` scope, listed with ``--no-includes``) may not hold ``include.*`` or
-  ``includeIf.*`` (git would read further files) nor any ``filter.*`` driver; a changed path
+  ``includeIf.*`` (git would read further files), ``hook.*`` (config-defined hooks, which
+  ``core.hooksPath`` does not turn off) nor any ``filter.*`` driver; a changed path
   with a ``filter`` attribute (Git LFS) is refused too: with the driver off, git would store
   the raw file instead of what the driver makes of it.
+- **No links in the git directory** where the commit writes or git reads config
+  (:func:`_check_links`): git would write through a symbolic link (a branch ref of another
+  repository, a reflog anywhere) or append to a hard-linked reflog. Checked before any
+  write and again right before ``add`` and ``update-ref``.
 - **Only a plain dirty worktree.** Refused (a person is told, the changes stay where they
   are): a worktree owned by another user, an untrusted ``.git`` layout
   (:func:`~kelpie.adapters.hermes.git_state.common_dir`), ``HEAD`` detached, on another
   branch than ``branch`` or without a commit yet, a merge, rebase, cherry-pick, revert or
-  bisect in progress, an ``index.lock``, unmerged entries, submodule changes, an untracked
-  nested repository, more than :data:`MAX_ENTRIES` changed entries or more output than
+  bisect in progress, an ``index.lock``, the branch checked out in another worktree,
+  unmerged entries, submodule changes, an untracked nested repository, more than
+  :data:`MAX_ENTRIES` changed entries or more output than
   :data:`MAX_LISTING`, or a changed file over :data:`MAX_FILE_BYTES`. Submodules are refused
   before any ``status`` (a ``.gitmodules`` or a gitlink in the index, from ``ls-files -s``,
   which does not recurse): ``status`` would run a child git in each submodule with the
@@ -35,10 +41,13 @@ than for reading:
 - **Never a push.** No remote is contacted: the commit stays in the task's branch for the next
   session in that worktree.
 
-The config is checked again right before ``add``. Residual risks: git still parses the
-hostile repository (config, index, objects), as on the read side; linked worktrees of one
-repository share its ``config``, so an agent running in a sibling worktree could add a filter
-driver between that last check and ``add`` (a narrow race, as on the read side); a worker
+The config is checked again right before ``add``; all calls end within
+:data:`BUDGET_FACTOR` git timeouts. Residual risks: git still parses the hostile repository
+(config, index, objects), as on the read side; linked worktrees of one repository share its
+``config``, so an agent running in a sibling worktree could add a filter driver after the
+first check (``status`` runs clean filters on stat-dirty files, ``add`` too) or a link after
+the last link check (narrow races, as on the read side); an absolute ``core.excludesFile``
+is read from wherever it points; a worker
 the dispatcher starts on the task between the checks and the commit races with it (the
 adapter checks for a run right before; ``update-ref`` refuses a branch that moved, an index
 lock held by the worker fails ``add``). ``HOME`` is passed on, so a ``~`` in the worktree's
@@ -51,6 +60,8 @@ global config).
 from __future__ import annotations
 
 import os
+import stat
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -71,6 +82,8 @@ AUTHOR = ("Kelpie", "kelpie@kelpie.invalid")  # author and committer of every WI
 MAX_ENTRIES = 1000  # changed entries of a worktree Kelpie still commits
 MAX_FILE_BYTES = 25 << 20  # a changed file larger than this is not committed
 MAX_MESSAGE = 4000  # characters of the commit message
+MAX_SUBJECT = 200  # characters of its first line (a ``[skip ci]`` at its end is kept)
+BUDGET_FACTOR = 4  # all git calls of one WIP commit end within this many git timeouts
 MAX_LISTING = 8 << 20  # characters of ls-files or status read; beyond: refused
 # Overrides on top of the read side's SAFE_CONFIG for every call of a WIP commit.
 WRITE_CONFIG = (
@@ -92,7 +105,8 @@ IN_PROGRESS = (
     "index.lock",
 )
 # Config sections of the worktree that are refused (lowercased, see _check_config).
-_REFUSED_SECTIONS = ("include", "includeif", "filter")
+# ``hook``: config-defined hooks (git 2.46+), which ``core.hooksPath`` does not turn off.
+_REFUSED_SECTIONS = ("include", "includeif", "filter", "hook")
 _UNSET = ("unspecified", "unset")
 
 
@@ -150,10 +164,12 @@ def commit_wip(path: Path, branch: str, message: str, timeout: float) -> WipComm
             raise WipRefused("the worktree belongs to another user")
     except OSError as exc:
         raise WipFailed("the worktree cannot be read") from exc
-    if common_dir(path) is None:
+    common = common_dir(path)
+    if common is None:
         raise WipRefused("untrusted .git layout")
     if probe_git(timeout) is not None:
         raise WipFailed("git cannot be run")
+    deadline = time.monotonic() + BUDGET_FACTOR * timeout
     env = write_env(path)
     config = [arg for c in (*SAFE_CONFIG, *WRITE_CONFIG) for arg in ("-c", c)]
 
@@ -161,9 +177,9 @@ def commit_wip(path: Path, branch: str, message: str, timeout: float) -> WipComm
         cmd = ["git", "-C", str(path), *config, *args]
         try:
             if cap is None:
-                code, out, _ = _run(cmd, timeout, None, path, env=env, stdin=stdin)
+                code, out, _ = _run(cmd, timeout, deadline, path, env=env, stdin=stdin)
             else:
-                code, out, _, cut = _run_capped(cmd, timeout, None, path, cap, env=env)
+                code, out, _, cut = _run_capped(cmd, timeout, deadline, path, cap, env=env)
                 if cut:
                     raise WipRefused(f"the worktree is too large to commit ({step})")
         except _Stop as stop:
@@ -177,6 +193,8 @@ def commit_wip(path: Path, branch: str, message: str, timeout: float) -> WipComm
 
     check_config()
     gitdir = Path(git("rev-parse", "--absolute-git-dir", step="rev-parse").strip())
+    _check_links(Path(common), gitdir, branch)
+    _check_elsewhere(git("worktree", "list", "--porcelain", "-z", step="worktree"), path, branch)
     for name in IN_PROGRESS:
         if os.path.lexists(gitdir / name):
             raise WipRefused(f"an operation is in progress in the worktree ({name})")
@@ -209,17 +227,19 @@ def commit_wip(path: Path, branch: str, message: str, timeout: float) -> WipComm
     listing = "".join(f"{p}\0" for p in sorted(paths))
     attrs = git("check-attr", "-z", "--stdin", "filter", stdin=listing, step="check-attr")
     _check_filters(attrs)
-    check_config()  # again, right before git may run a driver: sibling worktrees share it
+    check_config()  # again, right before add: sibling worktrees share the config
+    _check_links(Path(common), gitdir, branch)  # and right before the first write
     git("add", "-A", "--", ".", step="add")
     tree = git("write-tree", step="write-tree").strip()
     if not _OID.fullmatch(tree):
         raise WipFailed("write-tree: no tree id")
-    text = message.strip()[:MAX_MESSAGE] or "WIP"
+    text = _message(message)
     new = git(
         "commit-tree", "--no-gpg-sign", "-p", oid, "-F", "-", tree, stdin=text + "\n", step="commit"
     ).strip()
     if not _OID.fullmatch(new):
         raise WipFailed("commit-tree: no commit id")
+    _check_links(Path(common), gitdir, branch)  # the ref and its reflogs are written next
     git(
         "update-ref",
         "--no-deref",
@@ -233,6 +253,77 @@ def commit_wip(path: Path, branch: str, message: str, timeout: float) -> WipComm
     return WipCommit(new[:ABBREV], branch, len(paths))
 
 
+def _message(message: str) -> str:
+    """The commit message: never empty, at most :data:`MAX_MESSAGE` characters, its first
+    line at most :data:`MAX_SUBJECT` and keeping a ``[skip ci]`` it ends with."""
+    subject, _, body = message.strip().partition("\n")
+    subject = subject.strip() or "WIP"
+    if len(subject) > MAX_SUBJECT:
+        keep = " [skip ci]" if subject.endswith("[skip ci]") else ""
+        subject = subject[: MAX_SUBJECT - len(keep)].rstrip() + keep
+    return f"{subject}\n{body}".strip()[:MAX_MESSAGE]
+
+
+def _check_links(common: Path, gitdir: Path, branch: str) -> None:
+    """Refuse when a place the commit writes (objects, the branch ref, the reflogs, the
+    index) or a file git reads as config is a symbolic link, or a reflog or ref is a hard
+    link: git would write (or read) through it, outside the repository."""
+    places = [
+        common / "objects",
+        common / "objects" / "pack",
+        common / "objects" / "info",
+        common / "refs",
+        common / "logs",
+        common / "logs" / "refs",
+        common / "packed-refs",
+        common / "config",
+        common / "info",
+        common / "info" / "exclude",
+        common / "info" / "attributes",
+        gitdir / "HEAD",
+        gitdir / "index",
+        gitdir / "logs",
+        gitdir / "logs" / "HEAD",
+        gitdir / "config.worktree",
+    ]
+    for root in (common / "refs" / "heads", common / "logs" / "refs" / "heads"):
+        places.append(root)
+        for part in branch.split("/"):
+            root = root / part
+            places.append(root)
+    for place in places:
+        try:
+            info = place.lstat()
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            raise WipRefused(f"{place.name} in the git directory cannot be read") from exc
+        if stat.S_ISLNK(info.st_mode):
+            raise WipRefused(f"{place.name} in the git directory is a symbolic link")
+        if stat.S_ISREG(info.st_mode) and info.st_nlink > 1 and place.name != "index":
+            raise WipRefused(f"{place.name} in the git directory is a hard link")
+    try:
+        with os.scandir(common / "objects") as entries:
+            if any(e.is_symlink() for e in entries):
+                raise WipRefused("an objects directory is a symbolic link")
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        raise WipRefused("the objects directory cannot be read") from exc
+
+
+def _check_elsewhere(listing: str, path: Path, branch: str) -> None:
+    """Refuse when ``worktree list --porcelain -z`` shows ``branch`` checked out in another
+    worktree of the repository: moving it would move another worker's ``HEAD``."""
+    here = path.resolve()
+    where: Path | None = None
+    for record in listing.split("\0"):
+        if record.startswith("worktree "):
+            where = Path(record.removeprefix("worktree ")).resolve()
+        elif record == f"branch refs/heads/{branch}" and where is not None and where != here:
+            raise WipRefused(f"{branch} is checked out in another worktree too")
+
+
 def _has_gitlink(listing: str) -> bool:
     """Whether ``ls-files -s -z`` lists a gitlink (mode 160000: a submodule)."""
     return any(record.startswith("160000 ") for record in listing.split("\0"))
@@ -243,8 +334,8 @@ def _check_config(listing: str) -> None:
     records of ``config -z --show-scope --list``)."""
     parts = listing.split("\0")
     for scope, entry in zip(parts[::2], parts[1::2], strict=False):
-        if scope not in ("local", "worktree"):
-            continue  # the -c overrides of this call ("command")
+        if scope == "command":
+            continue  # the -c overrides of this call (global and system config are off)
         key = entry.split("\n", 1)[0]
         section = key.split(".", 1)[0].casefold()
         if section in _REFUSED_SECTIONS:

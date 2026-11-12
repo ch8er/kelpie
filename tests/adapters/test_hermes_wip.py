@@ -205,15 +205,75 @@ def test_a_symbolic_branch_ref_is_refused(board: Board, repo: Path) -> None:
     assert head(repo) == before
 
 
-@pytest.mark.parametrize(
-    ("message", "expected"), [("   ", "WIP"), ("x" * (wip.MAX_MESSAGE + 50), "x" * wip.MAX_MESSAGE)]
-)
-def test_the_message_is_capped_and_never_empty(
-    board: Board, repo: Path, message: str, expected: str
-) -> None:
+def test_the_message_is_never_empty(board: Board, repo: Path) -> None:
     ended_task(board, repo)
-    adapter(board).wip_commit("t_1", message, branch="feature/t-1")
-    assert git(repo, "log", "-1", "--format=%B").strip() == expected
+    adapter(board).wip_commit("t_1", "   ", branch="feature/t-1")
+    assert git(repo, "log", "-1", "--format=%B").strip() == "WIP"
+
+
+def test_the_message_is_capped_and_keeps_skip_ci() -> None:
+    long = "WIP: " + "x" * 5000 + " [skip ci]"
+    subject = wip._message(long)
+    assert len(subject) == wip.MAX_SUBJECT and subject.endswith("x [skip ci]")
+    capped = wip._message("WIP: t [skip ci]\n\n" + "y" * 9000)
+    assert len(capped) == wip.MAX_MESSAGE and capped.startswith("WIP: t [skip ci]\n\nyyy")
+    assert wip._message("a" * 300).endswith("a") and len(wip._message("a" * 300)) == 200
+
+
+@pytest.mark.parametrize(
+    "inside",
+    ["refs/heads", "refs/heads/feature", "logs", "logs/refs/heads", "objects/ab", "config"],
+)
+def test_a_symlink_in_the_git_directory_is_refused(
+    board: Board, repo: Path, tmp_path: Path, inside: str
+) -> None:
+    git(repo, "config", "core.logAllRefUpdates", "true")
+    git(repo, "commit", "-q", "--allow-empty", "-m", "log")  # creates the reflogs
+    outside = tmp_path / "outside"
+    target = repo / ".git" / inside
+    if target.exists():
+        shutil.move(str(target), str(outside))
+    else:
+        outside.mkdir()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.symlink_to(outside)
+    ended_task(board, repo)
+    with pytest.raises(UnsupportedAction, match="symbolic link"):
+        commit(board)
+
+
+def test_a_hard_linked_reflog_is_refused(board: Board, repo: Path, tmp_path: Path) -> None:
+    git(repo, "commit", "-q", "--allow-empty", "-m", "log")
+    other = tmp_path / "other-log"
+    other.write_text("")
+    log = repo / ".git" / "logs" / "refs" / "heads" / "feature" / "t-1"
+    log.unlink()
+    os.link(other, log)
+    refused(board, repo, "hard link")
+    assert other.read_text() == ""
+
+
+def test_a_branch_checked_out_in_another_worktree_is_refused(
+    board: Board, repo: Path, tmp_path: Path
+) -> None:
+    git(repo, "worktree", "add", "-q", "-f", str(tmp_path / "twin"), "feature/t-1")
+    refused(board, repo, "checked out in another worktree")
+
+
+def test_config_defined_hooks_are_refused(board: Board, repo: Path) -> None:
+    git(repo, "config", "hook.audit.command", "touch /nonexistent")
+    refused(board, repo, "hook")
+
+
+def test_several_boards_pass_the_commit_on(board: Board, repo: Path) -> None:
+    from kelpie.adapters.hermes.boards import HermesBoards
+
+    ended_task(board, repo)
+    boards = HermesBoards(
+        [HermesAdapter(db_path=board.path, spool=None, board=n) for n in ("alpha", "beta")]
+    )
+    said = boards.wip_commit("alpha:t_1", MESSAGE, branch="feature/t-1")
+    assert said is not None and said.startswith("local commit ")
 
 
 def test_environment_is_fixed(repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:

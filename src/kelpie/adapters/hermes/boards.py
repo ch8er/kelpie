@@ -224,9 +224,9 @@ class HermesBoards:
 
     def wip_commit(
         self, task_id: str, message: str, *, branch: str | None = None, draft_pr: bool = False
-    ) -> None:
+    ) -> str:
         board, local = self._route(task_id)
-        board.wip_commit(local, message, branch=branch, draft_pr=draft_pr)
+        return board.wip_commit(local, message, branch=branch, draft_pr=draft_pr)
 
 
 def _claimed_once(parts: Sequence[Snapshot]) -> tuple[Span, ...]:
