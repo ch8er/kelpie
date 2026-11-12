@@ -334,6 +334,7 @@ def test_work_routed_to_a_mapped_agent_counts_before_it_is_claimed() -> None:
         (timedelta(hours=1), True),
         (timedelta(hours=24), True),
         (timedelta(days=2), False),
+        (timedelta(0), True),
     ],
 )
 def test_rate_limit_events_count_only_over_the_rule_window(

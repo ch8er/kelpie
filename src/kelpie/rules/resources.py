@@ -553,9 +553,12 @@ class Resources:
 
     def _events(self, r: Resource) -> int:
         """A source's event count, when it covers no more than ``rate_limit_window``: a
-        count over a longer window says nothing about how many fell in this one."""
+        count over a longer window says nothing about how many fell in this one. A window
+        of zero or less makes no sense and is taken as unknown."""
         window = r.events_window
-        return r.events if window is None or window <= self.rate_limit_window else 0
+        if window is None or window <= timedelta(0):
+            return r.events
+        return r.events if window <= self.rate_limit_window else 0
 
     def _quotas(self, snapshot: Snapshot) -> dict[str, _Quota]:
         now = snapshot.now
