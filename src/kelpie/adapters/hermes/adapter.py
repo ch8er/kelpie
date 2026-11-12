@@ -16,8 +16,9 @@ a ready or running task in Hermes ``scheduled`` with its conditions), ``requeue`
 Kelpie parked) and ``comment``, see :mod:`kelpie.adapters.hermes.park`; ``unblock`` (clear a
 block the snapshot showed, never Kelpie's own stop) and ``reassign`` (``SupportsReassign``:
 hand a task that no run claims to another profile); ``wip_commit`` (a local commit in the
-task's worktree, never pushed, see :mod:`kelpie.adapters.hermes.wip`). Requeue of a task Kelpie did not park is not supported unless it is already in the queue (an
-action already in effect raises ``NothingToDo``: a ledger note, not an alert).
+task's worktree, never pushed, see :mod:`kelpie.adapters.hermes.wip`). Requeue of a task
+Kelpie did not park is not supported unless it is already in the queue (an action already
+in effect raises ``NothingToDo``: a ledger note, not an alert).
 
 Status mapping (task ``status`` -> :class:`~kelpie.core.model.Status`)::
 

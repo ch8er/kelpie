@@ -13,9 +13,8 @@ from typing import Any
 
 import pytest
 
-from kelpie.adapters.hermes import HermesAdapter
+from kelpie.adapters.hermes import HermesAdapter, wip
 from kelpie.adapters.hermes import git_state as gs
-from kelpie.adapters.hermes import wip
 from kelpie.adapters.hermes.adapter import HermesError
 from kelpie.core.actions import Action, ActionKind
 from kelpie.core.executors import PlatformExecutor
@@ -308,9 +307,7 @@ def test_an_untracked_nested_repository_is_refused(board: Board, repo: Path) -> 
     refused(board, repo, "nested repository")
 
 
-def test_a_large_file_is_refused(
-    board: Board, repo: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_a_large_file_is_refused(board: Board, repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(wip, "MAX_FILE_BYTES", 8)
     (repo / "build.log").write_text("x" * 64)
     refused(board, repo, "larger than")
@@ -404,7 +401,11 @@ def test_git_missing_is_a_failure(
 def test_the_executor_hands_the_commit_on_as_the_detail(board: Board, repo: Path) -> None:
     ended_task(board, repo)
     action = Action(
-        ActionKind.WIP_COMMIT, "checkpoints", MESSAGE, task_id="t_1", params={"branch": "feature/t-1"}
+        ActionKind.WIP_COMMIT,
+        "checkpoints",
+        MESSAGE,
+        task_id="t_1",
+        params={"branch": "feature/t-1"},
     )
     done = PlatformExecutor(adapter(board)).execute(action)
     assert isinstance(done, str) and done.startswith("local commit ")
