@@ -133,8 +133,10 @@ leave Claude Code's logs exporter off, as in
   agent completes its handshake can still crowd agents out; put the hub behind a firewall
   that admits only the agents' networks where that matters.
 - **Per agent:** one report, two polls and two OTLP exports (trace and metric exports
-  together, so one agent holds at most half of ingest's four decode slots) in flight; more
-  get 409 (an OTLP export gets 503 with `Retry-After`, which OTLP exporters retry). A
+  together: with the default `[traces] max_concurrent_requests = 4`, one agent holds at
+  most half of ingest's decode slots; keep it at 4 or more on a hub) in flight; more get
+  409 (an OTLP export gets 503 with `Retry-After`, which OTLP exporters retry, so a busy
+  host may see a span export retried when Claude Code's periodic metric export lands). A
   new poll (its body read) replaces a held one, whose connection may be dead; if that
   keeps happening, or reports come from two agent processes at once, the hub warns (two
   processes share a token, or a stolen one is in use). Poll bodies are capped at 2 MiB.

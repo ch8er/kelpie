@@ -57,7 +57,7 @@ PENDING_TTL = timedelta(hours=1)
 MAX_REPLY_BYTES = 512 * 1024  # of a poll reply (the agent reads at most 1 MiB)
 # Authenticated requests in flight per agent, by kind.
 # Trace and metric exports share one budget ("otlp"): together they stay at half of ingest's
-# decode slots (``max_concurrent``, 4 by default), so one agent never holds them all.
+# decode slots at the default ``max_concurrent`` (4), so one agent cannot hold them all.
 IN_FLIGHT = {"report": 1, "poll": 2, "otlp": 2}
 MAX_POLL_BYTES = 2 * 1024 * 1024  # a poll carries results only
 _LOG_EVERY = 60.0  # seconds between refusal warnings per peer
