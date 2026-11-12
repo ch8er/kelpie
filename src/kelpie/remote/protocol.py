@@ -15,6 +15,7 @@ import dataclasses
 import math
 import re
 import types
+import unicodedata
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -609,24 +610,37 @@ def wire_params(kind: ActionKind, params: Mapping[str, Any]) -> dict[str, Any]:
 
 def _card(raw: dict[str, Any]) -> dict[str, str]:
     """A delegation card's ``title``, ``body`` and ``key``, checked: no other keys, bounded
-    sizes, no control characters (the body keeps its line breaks), and the body's last line
-    is the key line, so the card the agent makes is the one it finds again by its key."""
+    sizes, no control, format, surrogate or line/paragraph-separator characters (the body
+    keeps its line breaks and tabs), and exactly one key line, the body's last, so the
+    card the agent makes is the one it finds again by its key, and no other key's."""
     if set(raw) != {"title", "body", "key"}:
         raise ProtocolError("delegate: card must have exactly title, body and key")
     title, body, key = raw["title"], raw["body"], raw["key"]
     if not isinstance(title, str) or not title.strip() or len(title) > MAX_CARD_TITLE:
         raise ProtocolError(f"delegate: card title must be 1 to {MAX_CARD_TITLE} characters")
-    if _ID_CONTROL.search(title):
+    if not _card_text(title):
         raise ProtocolError("delegate: card title must be printable")
-    if not isinstance(key, str) or not key or len(key) > MAX_CARD_KEY or _ID_CONTROL.search(key):
+    if not isinstance(key, str) or not key or len(key) > MAX_CARD_KEY or not _card_text(key):
         raise ProtocolError(f"delegate: card key must be 1 to {MAX_CARD_KEY} printable characters")
-    if not isinstance(body, str) or len(body) > MAX_CARD_BODY or _CONTROL.search(body):
+    if not isinstance(body, str) or len(body) > MAX_CARD_BODY or not _card_text(body, "\t\n"):
         raise ProtocolError(
             f"delegate: card body must be printable text of at most {MAX_CARD_BODY} characters"
         )
-    if body.rstrip("\n").rsplit("\n", 1)[-1] != f"{CARD_KEY_LINE}{key}":
+    lines = body.rstrip("\n").split("\n")
+    if lines[-1] != f"{CARD_KEY_LINE}{key}":
         raise ProtocolError("delegate: card body must end with its key line")
+    if any(line.startswith(CARD_KEY_LINE.rstrip()) for line in lines[:-1]):
+        raise ProtocolError("delegate: card body must hold one key line only")
     return {"title": title, "body": body, "key": key}
+
+
+# Unicode categories a card may not hold (as Hermes cleans its text): controls, format
+# characters (bidi, zero-width), surrogates, line and paragraph separators.
+_CARD_UNSAFE = frozenset({"Cc", "Cf", "Cs", "Zl", "Zp"})
+
+
+def _card_text(text: str, keep: str = "") -> bool:
+    return not any(c not in keep and unicodedata.category(c) in _CARD_UNSAFE for c in text)
 
 
 def encode_action(action: WireAction) -> dict[str, Any]:

@@ -2549,6 +2549,22 @@ def _check_hub_operators(settings: Settings, policy: Policy | None) -> None:
             f"<agent>/<adapter>, an agent of [[hub.agents]] ({', '.join(sorted(allowed))}) and "
             "an adapter the hub takes from it (its adapters, by default every Kelpie adapter)"
         )
+    # Hermes boards on agents: the profile checks _check_operators makes on a single host
+    # (the agent's own human_owners and author are its config; the merged board's people
+    # are refused by the rule itself, and the agent's adapter refuses the rest at act time).
+    from kelpie.adapters.hermes.adapter import _PROFILE as HERMES_PROFILE
+    from kelpie.adapters.hermes.adapter import CLI_USER, UNASSIGN_WORDS
+    from kelpie.adapters.hermes.stop import DEFAULT_AUTHOR
+
+    names = {o.strip().casefold() for b, o in policy.delegate_to.items() if b.endswith("/hermes")}
+    not_agents = {CLI_USER, DEFAULT_AUTHOR}
+    if bad := sorted(
+        n for n in names if not HERMES_PROFILE.match(n) or n in UNASSIGN_WORDS or n in not_agents
+    ):
+        raise ConfigError(
+            f"[engine.rules.delegation] delegate_to {bad}: an operator on a Hermes board is an "
+            "agent profile, not Kelpie or Hermes' default CLI author (user)"
+        )
     if bare := sorted(b for b in policy.delegate_to if "/" not in b and b in ADAPTER_NAMES):
         raise ConfigError(
             f"[engine.rules.delegation] delegate_to {bare}: with [hub] an adapter's board is "

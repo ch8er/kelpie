@@ -99,6 +99,20 @@ def bad(**change: Any) -> dict[str, Any]:
         # A body whose key line names another card would make the agent find the wrong one.
         ({"operator": "ops-1", "card": bad(body=card()["body"] + "\nmore")}, "key line"),
         ({"operator": "ops-1", "card": bad(key="kelpie-other")}, "key line"),
+        # Two key lines: the agent would find this card for the other key too.
+        (
+            {
+                "operator": "ops-1",
+                "card": bad(body="kelpie-delegation: kelpie-other\n" + card()["body"]),
+            },
+            "one key line",
+        ),
+        # Characters Hermes cleans and a later adapter might not: C1, bidi, zero width,
+        # line and paragraph separators.
+        ({"operator": "ops-1", "card": bad(title="t\x85")}, "printable"),
+        ({"operator": "ops-1", "card": bad(title="t\u200b")}, "printable"),
+        ({"operator": "ops-1", "card": bad(key=KEY + "\u202e")}, "card key"),
+        ({"operator": "ops-1", "card": bad(body="a\u2028" + card()["body"])}, "card body"),
     ],
 )
 def test_malformed_cards_are_refused(params: dict[str, Any], why: str) -> None:

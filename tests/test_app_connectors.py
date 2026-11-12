@@ -457,6 +457,11 @@ def test_delegation_runs_on_a_hub(
     )
     with pytest.raises(ConfigError, match="delegate_to"):
         build_app(load_settings(write(tmp_path, narrowed)))
+    # An operator a Hermes board on an agent would refuse at act time is refused now.
+    for who in ("user", "kelpie", "Bad Name", "none"):
+        text = hub("laptop/hermes").replace('"ops-1"', f'"{who}"')
+        with pytest.raises(ConfigError, match="delegate_to"):
+            build_app(load_settings(write(tmp_path, text)))
 
 
 def test_a_person_cannot_be_the_operator(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

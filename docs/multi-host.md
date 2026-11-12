@@ -190,8 +190,13 @@ the protocol.
   `card <id> for <operator>` and the hub puts the card's id in the agent's namespace
   (`laptop:t_9`), so delegation finds the card on the merged board and verifies the fix
   there. The loop guards, verdicts and messages run on the server, as on a single host;
-  the agent's adapter still refuses a person or Kelpie as operator. An agent that should
-  never make cards leaves `delegate` out of `[agent] actions`. A `delegate_to` key that is
+  the agent's adapter still refuses a person or Kelpie as operator (the hub refuses at
+  startup an operator on `<agent>/hermes` that is no Hermes profile name, `user` or
+  `kelpie`). An agent that should never make cards leaves `delegate` out of
+  `[agent] actions`; also remove its boards from `delegate_to`, or the hub still holds
+  their alerts back for an operator and the person then hears "the card could not be
+  made" a tick later instead of the plain alert. An agent older than this change offers no
+  `delegate` and behaves the same way: upgrade agents before adding their boards. A `delegate_to` key that is
   a named Hermes board (`ops`) applies to the board of that name on every agent, since
   board names are not namespaced; use `<agent>/<adapter>` for one host. One case a single
   host never has: a card the agent makes after the hub gave up waiting is recorded as

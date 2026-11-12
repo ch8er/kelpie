@@ -967,11 +967,11 @@ plan lists there (token optimization, throughput metrics, 10 conversations).
 ### actions: delegate a problem to the operator agent, verify the fix, tell the person
 labels: P1, area:core
 Design in docs/plan.md ("Delegation to an operator agent"). Built from 2026-11-12 on the
-owner's go (#347): Hermes first; GitHub issue and Claude Code cards and `[hub]` are left.
+owner's go (#347): Hermes first, also under `[hub]`; GitHub issue and Claude Code cards are left.
 
 **Acceptance criteria**
 - [x] Problem classes (agent may / human only / Kelpie itself) as config data, empty default; severity decides when the person hears (critical always at once; warning delegated only when its class allows; notice never delegated) (`[engine.rules.delegation] classes`, per rule or `<rule>.<kind>`; some rules fixed to human or Kelpie; #347 parts 1 and 3)
-- [ ] `delegate` action through the adapters: a card on the operator's queue (Hermes `kanban create --assignee`, GitHub issue, Claude Code task) with facts, quoted agent text as data, "done when", fingerprint and a fixed how-to-handle block; `delegate_to` per board (Hermes done, #347 part 2; GitHub issue and Claude Code task cards, and `[hub]`, not yet)
+- [ ] `delegate` action through the adapters: a card on the operator's queue (Hermes `kanban create --assignee`, GitHub issue, Claude Code task) with facts, quoted agent text as data, "done when", fingerprint and a fixed how-to-handle block; `delegate_to` per board (Hermes done, #347 part 2, also on a `kelpie agent` under `[hub]`; GitHub issue and Claude Code task cards not yet)
 - [x] Verification by Kelpie's own condition with a hold period; "fixed, verified", "agent says fixed, still broken" and "not fixed, yours now" messages; one message on hand-off (part 3: the engine holds the problem's alerts back while the operator has it)
 - [x] Loop guards: one open card per fingerprint, at most two attempts then the person and a cooldown, no delegation about delegation cards or the operator's own tasks, same-incident window after a fix, hourly and daily limits, circuit breaker on failed verifications, pick-up and finish deadlines (parts 1 and 3)
 - [x] Off by default; observe → suggest ("would delegate") → act; act-checklist gate; the operator's tokens on Kelpie cards in the report (part 4: the "Delegation to operator agents" section)
