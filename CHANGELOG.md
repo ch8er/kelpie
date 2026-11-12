@@ -29,8 +29,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
   rule's text quoted as data, what counts as fixed, a fixed how-to-handle block); no
   adapter carries it out yet, so it stays in observe or suggest. Off by default.
 - Delegation, second part (#347): Hermes carries out `delegate` with `hermes kanban create`
-  (assigned to the board's operator, with an idempotency key, the card's id read from
-  `--json`), and `delegation` may run in act mode on Hermes behind the act checklist. Not
+  (assigned to the board's operator; a card made before is found by its key line, so a
+  retried create makes no second card; the card's id read from `--json`), and `delegation` may run in act mode on Hermes behind the act checklist. Not
   with `[hub]` yet (refused at startup).
 - `POST /conditions`: an agent registers the condition its task waits for (task id, kind,
   params), off by default (`[conditions] enabled`). On the main listener (loopback by

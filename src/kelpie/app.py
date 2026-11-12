@@ -2080,6 +2080,7 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
         if isinstance(adapter, hermes.HermesAdapter | HermesBoards):
             adapter.clock = clock
     _refuse_unimplemented_actions(settings, loaded, adapters)
+    _check_operators(settings, delegation_policy(loaded))
     if settings.hub is not None and delegation_policy(loaded) is not None:
         raise ConfigError(
             "[engine.rules.delegation] needs the boards' adapters inside kelpie serve: with "
@@ -2497,6 +2498,21 @@ def delegation_policy(loaded: LoadedRules) -> Policy | None:
     rule = next((r for r in loaded.rules if r.name == DELEGATION), None)
     policy = getattr(rule, "policy", None)
     return policy if isinstance(policy, Policy) and policy.enabled else None
+
+
+def _check_operators(settings: Settings, policy: Policy | None) -> None:
+    """Refuse a ``delegate_to`` operator that is a person or Kelpie itself on Hermes (its
+    ``human_owners``, Kelpie's ``author``, Hermes' default CLI author ``user``): a card
+    could only be refused at act time, after paging someone."""
+    if policy is None or settings.hermes is None:
+        return
+    hermes = settings.hermes
+    people = {h.casefold() for h in hermes.human_owners} | {hermes.author.casefold(), "user"}
+    if bad := sorted({o for o in policy.delegate_to.values() if o.casefold() in people}):
+        raise ConfigError(
+            f"[engine.rules.delegation] delegate_to {bad}: an operator is an agent profile, "
+            "not a human owner, Kelpie or Hermes' default CLI author (user)"
+        )
 
 
 def _with_delegation(loop: ControlLoop, loaded: LoadedRules, store: LedgerStore) -> None:

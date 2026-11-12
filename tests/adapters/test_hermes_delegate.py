@@ -87,7 +87,7 @@ def test_a_retried_create_returns_the_same_card(board: Board, cli: tuple[str, Pa
     assert a.delegate("t1", "ops-1", "T", BODY, "k-2") != first
 
 
-@pytest.mark.parametrize("who", ["alice", "kelpie", "none", "Bad Name", ""])
+@pytest.mark.parametrize("who", ["alice", "kelpie", "user", "none", "Bad Name", ""])
 def test_not_an_agent_is_refused(board: Board, cli: tuple[str, Path], who: str) -> None:
     with pytest.raises(UnsupportedAction):
         make(board, cli[0]).delegate("t1", who, "T", BODY, "k-1")
@@ -178,3 +178,43 @@ def test_the_sim_cli_records_the_key(board: Board, cli: tuple[str, Path]) -> Non
         "SELECT payload FROM task_events WHERE kind = 'created'"
     ).fetchone()
     assert json.loads(payload)["idempotency_key"] == "k-7"
+
+
+def test_a_create_that_failed_after_writing_is_found_by_its_key(
+    board: Board, cli: tuple[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import kelpie.adapters.hermes.adapter as adapter_module
+    from kelpie.adapters.hermes.stop import HermesCliError
+
+    real = adapter_module.run_kanban
+
+    def timed_out(*args: object, **kw: object) -> str:
+        real(*args, **kw)  # type: ignore[arg-type]
+        raise HermesCliError("hermes kanban create timed out after 10s")
+
+    monkeypatch.setattr(adapter_module, "run_kanban", timed_out)
+    a = make(board, cli[0])
+    body = "Card\n\nkelpie-delegation: k-1"
+    first = a.delegate("t1", "ops-1", "T", body, "k-1")
+    monkeypatch.setattr(adapter_module, "run_kanban", real)
+    assert a.delegate("t1", "ops-1", "T", body, "k-1") == first
+    assert len(cards(board)) == 1
+
+
+def test_output_without_an_id_finds_the_card_by_its_key(
+    board: Board, cli: tuple[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import kelpie.adapters.hermes.adapter as adapter_module
+
+    real = adapter_module.run_kanban
+    monkeypatch.setattr(adapter_module, "run_kanban", lambda *a, **k: real(*a, **k) and "made it")
+    card = make(board, cli[0]).delegate("t1", "ops-1", "T", "x\nkelpie-delegation: k-3", "k-3")
+    ((cid, *_),) = cards(board)
+    assert card == cid
+
+
+def test_a_forged_or_quoted_marker_is_not_a_card(board: Board, cli: tuple[str, Path]) -> None:
+    board.task("t_f1", "ready", NOW, assignee="dev-2", body="kelpie-delegation: k-1")
+    board.task("t_f2", "ready", NOW, assignee="ops-1", body="> kelpie-delegation: k-1")
+    card = make(board, cli[0]).delegate("t1", "ops-1", "T", BODY, "k-1")
+    assert card not in ("t_f1", "t_f2")

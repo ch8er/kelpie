@@ -103,8 +103,11 @@ class Delegation:
             attempt = self._attempt(problem, events, carried, verdicts, now)
             if attempt is None:
                 continue
-            operator = policy.operator(task.source)
+            operator = policy.operator_for(task)
             assert operator is not None  # why_not checked it
+            known = snapshot.owner(operator)
+            if known is not None and known.kind is OwnerKind.HUMAN:
+                continue  # the configured operator is a person on this farm
             key = f"{problem.id}:{int(problem.opened_at.timestamp())}:{attempt}"
             card = card_for(problem, task, operator, attempt, f"kelpie-{key}")
             actions.append(_delegate(problem, task.id, operator, attempt, key, card.params()))

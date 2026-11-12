@@ -301,12 +301,16 @@ def _create(args: Sequence[str]) -> None:
             for row in conn.execute(
                 "SELECT task_id, payload FROM task_events WHERE kind = 'created'"
             ).fetchall():
-                if json.loads(row["payload"] or "{}").get("idempotency_key") == key:
+                payload = json.loads(row["payload"] or "{}")
+                if isinstance(payload, dict) and payload.get("idempotency_key") == key:
                     conn.execute("COMMIT")
                     print(json.dumps({"id": row["task_id"], "existing": True}))
                     return
         count = conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0]
         task_id = f"t_{count + 1:04x}"
+        while conn.execute("SELECT 1 FROM tasks WHERE id = ?", (task_id,)).fetchone():
+            count += 1
+            task_id = f"t_{count + 1:04x}"
         now = int(_now())
         conn.execute(
             "INSERT INTO tasks (id, title, body, assignee, status, created_at, created_by)"

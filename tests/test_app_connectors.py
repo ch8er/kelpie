@@ -442,6 +442,21 @@ def test_delegation_is_refused_on_a_hub(tmp_path: Path, monkeypatch: pytest.Monk
         build_app(load_settings(write(tmp_path, hub)))
 
 
+def test_a_person_cannot_be_the_operator(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from kelpie.app import ConfigError
+
+    monkeypatch.setenv("GITHUB_TOKEN", TOKEN)
+    for who in ("alice", "user", "kelpie"):
+        text = CONFIG + (
+            f'[adapters.hermes]\ndb_path = "{tmp_path / "kanban.db"}"\nspool = false\n'
+            'human_owners = ["alice"]\n'
+            '[engine.rules.delegation]\nclasses = { orphan_status = "agent" }\n'
+            f'delegate_to = {{ hermes = "{who}" }}\n'
+        )
+        with pytest.raises(ConfigError, match="an operator is an agent profile"):
+            build_app(load_settings(write(tmp_path, text)))
+
+
 def test_checkpoints_warning_on_a_hub(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:

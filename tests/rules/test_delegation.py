@@ -521,3 +521,24 @@ def test_the_server_fills_the_history_and_fails_closed(tmp_path: Path) -> None:
     untouched: Any = Loop()
     _with_delegation(untouched, LoadedRules([Delegation()], [], []), MemoryLedgerStore())
     assert untouched.snapshot_source().problems == ()
+
+
+def test_a_named_board_wins_over_its_adapter() -> None:
+    boards = replace(POLICY, delegate_to={"hermes": "ops-1", "infra": "ops-2"})
+    on_infra = replace(task(), board="infra")
+    (action,) = run([problem()], tasks=[on_infra], policy=boards)
+    assert action.params["operator"] == "ops-2"
+    (action,) = run([problem()], tasks=[replace(task(), board="other")], policy=boards)
+    assert action.params["operator"] == "ops-1"
+
+
+def test_an_operator_the_farm_knows_as_a_person_is_skipped() -> None:
+    from kelpie.core.model import Owner, OwnerKind
+
+    snap = Snapshot(
+        now=NOW,
+        tasks=(task(),),
+        owners=(Owner("ops-1", "ceo", OwnerKind.HUMAN),),
+        problems=(problem(),),
+    )
+    assert list(Delegation(POLICY).evaluate(snap)) == []

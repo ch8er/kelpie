@@ -2143,11 +2143,15 @@ class HermesAdapter:
         profile = operator.strip().casefold()
         if not _PROFILE.match(profile) or profile in UNASSIGN_WORDS:
             raise UnsupportedAction(f"{operator!r} is not a Hermes profile name")
-        if profile in self.human_owners or profile == self.author.casefold():
+        if profile in self.human_owners or profile in (self.author.casefold(), CLI_USER):
             raise UnsupportedAction(f"{operator!r} is not an agent; no card made")
         with self._connect() as conn:
             if conn.execute("SELECT 1 FROM tasks WHERE id = ?", (task_id,)).fetchone() is None:
                 raise HermesError(f"unknown Hermes task: {task_id}")
+        # Idempotent on Kelpie's side too: a card made before (a create that timed out after
+        # Hermes wrote it, or whose output named no id) carries the key on its last line.
+        if (made := self._card_with(key, profile)) is not None:
+            return made
         try:
             out = run_kanban(
                 self.cli,
@@ -2158,14 +2162,33 @@ class HermesAdapter:
                 environ=self.cli_environ,
             )
         except HermesCliError as exc:
+            if (made := self._card_with(key, profile)) is not None:
+                return made
             raise HermesError(str(exc)) from exc
-        card = _created_id(out)
+        card = _created_id(out) or self._card_with(key, profile)
         if card is None:
             raise HermesError(
                 "hermes kanban create printed no task id",
                 public_reason="the card's id could not be read from Hermes",
             )
         return card
+
+    def _card_with(self, key: str, profile: str) -> str | None:
+        """The card on this board made for ``key``: a task assigned to ``profile`` whose body
+        has the line ``kelpie-delegation: <key>`` (not quoted), the newest first."""
+        line = f"{CARD_MARKER}{key}"
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT id, body, assignee FROM tasks WHERE instr(body, ?) > 0"
+                " ORDER BY created_at DESC, id DESC",
+                (line,),
+            ).fetchall()
+        for row in rows:
+            assignee = str(row["assignee"] or "").strip().casefold()
+            lines = str(row["body"] or "").splitlines()
+            if assignee == profile and line in lines:
+                return str(row["id"])
+        return None
 
     def check_answer(self, task_id: str, expect: Expect) -> None:
         """Before an answer from the chat is written (#300): re-read the task from the board,
@@ -2188,12 +2211,14 @@ class HermesAdapter:
 
 
 _TASK_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}")
+CLI_USER = "user"  # Hermes' default CLI author: a person at the terminal, never an operator
+CARD_MARKER = "kelpie-delegation: "  # the last line of a card's body (core.delegation)
 
 
 def _created_id(out: str) -> str | None:
-    """The task id ``hermes kanban create --json`` printed: ``id`` or ``task_id`` of the
-    object (or of its ``task``), from the last line that is a JSON object; None when there
-    is none (a warning may come first)."""
+    """The task id ``hermes kanban create --json`` printed: ``id`` or ``task_id`` of an
+    object (or of its ``task``), from the last line that is a JSON object with one; None
+    when there is none (warnings may come around it)."""
     for line in reversed(out.strip().splitlines()):
         try:
             data = json.loads(line)
@@ -2207,7 +2232,6 @@ def _created_id(out: str) -> str | None:
                     value = holder.get(name)
                     if isinstance(value, str) and _TASK_ID.fullmatch(value):
                         return value
-        return None
     return None
 
 
