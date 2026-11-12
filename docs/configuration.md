@@ -1582,6 +1582,26 @@ commands = false`) group every command the role ran: the catch-all leaves them a
 
 Spend is priced from traces, so budgets need `[traces]` enabled.
 
+**Spend sources** (#205). A budget counts model calls from traces, priced with the table
+below, and Claude Code's own token metrics (`POST /v1/metrics`) for sessions with no model
+call in traces. A farm-wide budget (`scope = "day"`, `unit = "usd"`, `mode = "api"`) also
+reads the providers' cost reports ([[connectors.cost_reports]](#connectorscost_reports)):
+each reconciled provider day that lies wholly within its window (a full UTC day that
+settled, see "Reconciliation" there; among the provider's last `days`, the days Kelpie
+reads) counts at the bill instead of what the budget counted for it (the traces' estimate
+and Claude Code's metrics), since the bill is what the farm pays: a bill below the
+estimate, or a credit, lowers the spend and can lower the state too. A window shorter than about 30 hours never holds one,
+so a 24-hour budget keeps the traces' figure; a 7-day one counts its settled days at the
+bill. Other budgets keep the traces: a bill has no agents or tasks. `kelpie status` names
+each budget's sources and, for a billed day, both figures; `/metrics` has
+`kelpie_budget_billed_usd`, `kelpie_budget_billed_estimate_usd` and
+`kelpie_budget_sources_disagree`. Where a billed day's gap is past the provider's warning
+thresholds the two sources disagree: both are shown, never one silently, rule 10 warns
+about the gap, and a `hard` threshold that only the bill passes (traces alone stay below
+it) is held at `soft` (at the traces' state when the budget has no `soft`): the budget
+alerts, and nothing is stopped for spend Kelpie cannot see on the farm (other users of the
+key, the bill's non-token items); `kelpie status` says so.
+
 `[[budgets]]` entries:
 
 | Key | Default | Unit | Meaning |

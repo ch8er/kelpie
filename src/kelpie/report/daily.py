@@ -577,6 +577,7 @@ class DailyReport:
     reconciliations: tuple[Reconciliation, ...] = ()  # as in ReportInputs
     reconcile_error: str | None = None  # why the bills could not be read
     bill_day: date | None = None  # as in ReportInputs
+    billed_budgets: tuple[str, ...] = ()  # budgets that count the bill (FarmFacts)
     # several boards (#283): each board's day (kelpie.report.boards); () for one board
     boards: tuple[BoardLine, ...] = ()
 
@@ -710,6 +711,7 @@ def build_report(
             inputs.reconciliations if isinstance(inputs.reconciliations, str) else None
         ),
         bill_day=inputs.bill_day,
+        billed_budgets=inputs.farm.billed_budgets,
         act_blockers=inputs.act_blockers,
         boards=_boards(inputs, start, end, context.roles) if per_board else (),
         act_gaps=inputs.act_gaps,
@@ -2662,6 +2664,21 @@ def _bill_lines(report: DailyReport) -> list[str]:
     ]
     for r in report.reconciliations:
         out.append(_bill_line(r))
+    if report.billed_budgets:
+        names = ", ".join(md.code(n) for n in report.billed_budgets)
+        out += [
+            "",
+            f"Budgets {names} count each of these days at the bill, not at the estimate, "
+            "while the day lies wholly in their window (`kelpie status` and "
+            "`kelpie_budget_billed_usd` show both figures); every other budget counts "
+            "traces and Claude Code's own metrics."
+            + (
+                " Where a gap is large the two disagree: the budget shows both, and a hard "
+                "threshold only the bill passes is held at soft (nothing is stopped for it)."
+                if any(r.large for r in report.reconciliations)
+                else ""
+            ),
+        ]
     return out
 
 

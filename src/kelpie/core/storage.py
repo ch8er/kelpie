@@ -1208,6 +1208,12 @@ class SqliteSpanStore:
                 return []
             raise
 
+    def metered_usage_between(self, start: datetime, end: datetime) -> tuple[TokenUsage, ...]:
+        """Token usage from Claude Code's metrics within [start, end) (:meth:`_metered`),
+        shaped like :meth:`usage_between`'s rows: what budgets count of that range on top
+        of traces (#205, the bill in place of both)."""
+        return _metered_usage(self._metered(start, end))
+
     def metered_usage_since(
         self, now: datetime, windows: Sequence[timedelta]
     ) -> list[tuple[TokenUsage, ...]]:

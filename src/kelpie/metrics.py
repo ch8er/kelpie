@@ -1245,7 +1245,8 @@ class Metrics:
             "kelpie_budget_spent",
             "gauge",
             "Spend per budget and subject over the budget's rolling window (usd: priced from "
-            "traces with [prices]; an estimate in subscription mode).",
+            "traces with [prices], a farm-wide api budget's billed days at the bill; an "
+            "estimate in subscription mode).",
             [f"kelpie_budget_spent{lbl} {b.spent:.6f}" for b, lbl in rows],
         )
         metric(
@@ -1305,6 +1306,31 @@ class Metrics:
                 f"{_labels(budget=b.budget, subject=b.subject)} {b.cost_unknown_tokens}"
                 for b, _ in rows
             ],
+        )
+        billed = [(b, lbl) for b, lbl in rows if b.billed_usd is not None]
+        metric(
+            "kelpie_budget_billed_usd",
+            "gauge",
+            "Farm-wide usd budgets (api mode): the providers' bills counted in the spend for "
+            "reconciled days wholly in the window, in place of the traces' estimate (#205).",
+            [f"kelpie_budget_billed_usd{lbl} {b.billed_usd:.6f}" for b, lbl in billed],
+        )
+        metric(
+            "kelpie_budget_billed_estimate_usd",
+            "gauge",
+            "What traces and Claude Code's metrics priced for the same billed days, kept beside "
+            "the bill.",
+            [
+                f"kelpie_budget_billed_estimate_usd{lbl} {b.billed_estimate_usd or 0.0:.6f}"
+                for b, lbl in billed
+            ],
+        )
+        metric(
+            "kelpie_budget_sources_disagree",
+            "gauge",
+            "1 when a billed day in the budget's window has a gap between bill and traces past "
+            "the provider's warning thresholds; 0 otherwise.",
+            [f"kelpie_budget_sources_disagree{lbl} {int(b.sources_disagree)}" for b, lbl in billed],
         )
         metric(
             "kelpie_budget_unattributed_tokens",

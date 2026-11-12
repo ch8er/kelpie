@@ -25,6 +25,8 @@ class FarmFacts:
     block_conditions: bool | None = None  # [[block_conditions]] match block reasons
     budgets: bool | None = None  # [[budgets]] cap spend
     dry_run: bool | None = None  # [engine] dry_run: no rule acts, whatever its mode
+    # farm-wide usd budgets in api mode: they count a reconciled day at the bill (#205)
+    billed_budgets: tuple[str, ...] = ()
 
 
 UNKNOWN_FARM = FarmFacts()  # a report built without the farm's config

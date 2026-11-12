@@ -649,7 +649,7 @@ provider APIs where available and from trace errors otherwise.
 - [x] `quota_reset` conditions evaluated from the provider probes, or a reset time the condition carries (#424)
 - [x] Limit hits from spans counted per provider (from the status probes, #35; from LLM spans refused for a usage or rate limit, per provider, with the concurrency they suggest, `kelpie.core.limits`, #431; ticked in #449)
 - [x] Credential expiry exposed in the snapshot (`ProviderStatus.expires_at` from the status probe, not a `Resource`; alerted by rule 7; #35)
-- [ ] Provider usage and cost APIs fed to budgets as a spend source: the same criterion as "Spend sources" in "core: budgets and spend" and tracked there (the cost reports are read and reconciled, #204, #205)
+- [x] Provider usage and cost APIs fed to budgets as a spend source: the same criterion as "Spend sources" in "core: budgets and spend" and tracked there (the cost reports are read and reconciled, #204, #205; farm-wide dollar budgets count settled days at the bill)
 - [x] No provider SDK is required by core
 
 ### connectors: human tasks
@@ -683,7 +683,7 @@ are limits.
 - [x] Soft threshold → `alert`; hard threshold → `stop` through `SupportsStop` (act mode only, alert fallback otherwise); transition-based alerts like other lasting states
 - [x] Burn-rate forecast: "budget runs out at <time>"; in subscription mode, time to the next limit from observed limit hits
 - [x] Spend from traces: tokens × price table, cached tokens and cache writes priced separately (#29, #184, #196)
-- [ ] Spend sources: Claude Code's OpenTelemetry cost and token metrics via OTLP ingest (done: `POST /v1/metrics`, its tokens count for budgets for sessions without model calls in traces, #431); provider cost APIs as a budget source (open: today they only check the bill, #205)
+- [x] Spend sources: Claude Code's OpenTelemetry cost and token metrics via OTLP ingest (done: `POST /v1/metrics`, its tokens count for budgets for sessions without model calls in traces, #431); provider cost APIs as a budget source (done: a farm-wide `usd` budget in `api` mode counts each reconciled day wholly in its window at the bill; both figures shown, a large gap marked, a hard threshold only the bill passes held at soft; #205)
 - [x] Spend and remaining budget exported on `/metrics`; shown in `kelpie status`
 - [x] `loop_breaker` (rule 10) reads budgets from here instead of its own config
 - [x] No double counting of nested LLM spans in spend sums (see the double-count issue)
@@ -893,8 +893,8 @@ the rest was left until after the release on purpose (modules in active PRs, row
 change user-facing messages).
 
 **Acceptance criteria**
-- [ ] Profile a tick and the daily report on a large synthetic farm (e.g. 2,000 tasks, 1M spans, 6 months of ledger); publish the numbers in the PR; fix the top hotspots (rules on boards of 1k and 4k tasks profiled and the top hotspot fixed, #262; not the report, spans or ledger)
-- [ ] Per-tick time budget as a test (fails if a tick on the large farm exceeds it)
+- [ ] Profile a tick and the daily report on a large synthetic farm (e.g. 2,000 tasks, 1M spans, 6 months of ledger); publish the numbers in the PR; fix the top hotspots (rules on boards of 1k and 4k tasks profiled and the top hotspot fixed, #262; a whole tick with dispatch profiled on 2,000 tasks and the in-memory ledger's scans per action indexed, #457; not the report, the span store or 6 months of ledger)
+- [x] Per-tick time budget as a test (fails if a tick on the large farm exceeds it) (`tests/perf/test_tick_budget.py` on a synthetic 2,000-task farm, SQLite and in-memory ledgers, plus a busy tick of ~19,000 actions, #457)
 - [ ] Duplicate-code report (e.g. pylint duplicate-code or jscpd) before and after; shared helpers consolidated in core/ or the owning package (survey by AST pass; one helper consolidated, #263)
 - [x] No behaviour change: unit and e2e suites pass unchanged; one refactor per PR, each small enough to review (#262, #263)
 - [ ] Dead code and unused config keys removed; CLAUDE.md layout updated if modules move (found in the survey, X1–X4; not removed)

@@ -47,6 +47,8 @@ NOT_ON_DASHBOARD: dict[str, str] = {
     "kelpie_path_scan_seconds": "the path-sizes script's scan time, checked by kelpie doctor",
     # Audit M6: an agent's reports carrying names the hub refuses; alerted once per agent.
     "kelpie_hub_refused_total": "the hub's refusals of an agent's names, alerted when they start",
+    # #205: a 0/1 flag; rule 10 warns about the gap itself and kelpie status names it.
+    "kelpie_budget_sources_disagree": "a flag beside the billed budgets, warned by rule 10",
 }
 
 

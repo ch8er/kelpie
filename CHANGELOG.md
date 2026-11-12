@@ -14,6 +14,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
   rate-limit errors) covers, ending at the reading's time (#456). Rule 7 counts those
   events only when the window is unknown or no longer than `rate_limit_window`, so a
   week's count is not reported as "hit its limit N times in 24h".
+- Provider cost reports feed budgets (#205): a farm-wide `usd` budget in `api` mode counts
+  each reconciled provider day wholly within its window at the bill instead of the traces'
+  estimate. Every budget says where its spend came from (`traces`, Claude Code's metrics,
+  the bill) in `kelpie status`; billed days keep both figures (`kelpie_budget_billed_usd`,
+  `kelpie_budget_billed_estimate_usd`), a gap past the warning thresholds is marked
+  (`kelpie_budget_sources_disagree`), and a hard threshold only the bill passes is held at
+  soft (nothing is stopped for it). The daily report's bill check names the budgets that
+  count the bill.
 - Rules see each task's recent observed status history (#462): `Snapshot.status_history`,
   the status changes `kelpie serve` records (#157) over the last 7 days per task (at most
   32, with the status the window began in), read back from the database at start.
@@ -285,6 +293,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ### Fixed
 
+- The in-memory ledger (`[storage] path = ":memory:"`, and `kelpie demo`) looked up every
+  action by scanning all the entries it keeps (up to 100,000), so a tick slowed down as the
+  ledger filled. It now keeps an index by fingerprint and subject (#457). A tick with about
+  19,000 actions on a synthetic 2,000-task farm went from 16 s to about 1 s. A per-tick
+  time budget test on that farm (`tests/perf/`) guards it.
 - While host resources cannot be read (Prometheus down, unreachable or refusing the
   token), rule 7's disk, memory, load, process and heavy-task alerts that are already open
   stay open instead of resolving as "no recent reading any more" next to the "host checks

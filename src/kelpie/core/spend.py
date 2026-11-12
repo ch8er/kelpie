@@ -312,6 +312,9 @@ class Estimate:
     usd: float = 0.0
     unpriced_tokens: int = 0
     unknown_tokens: int = 0
+    # Claude Code's metrics of the day priced the way budgets price them: not part of
+    # ``usd`` (the bill check compares traces), taken out of a budget with the estimate.
+    metered_usd: float = 0.0
 
 
 def reconcile(
@@ -353,6 +356,7 @@ def reconcile(
                 unpriced_tokens=found.unpriced_tokens,
                 unknown_tokens=found.unknown_tokens,
                 bill_scope=(scopes or {}).get(provider, "tokens"),
+                metered_usd=round(found.metered_usd, 6),
             )
         )
     return tuple(sorted(out, key=lambda r: (-r.day.timestamp(), r.provider)))

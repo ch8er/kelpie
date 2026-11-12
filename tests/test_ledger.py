@@ -494,3 +494,60 @@ def test_repeats_read_the_same_from_sqlite(tmp_path: Path) -> None:
         held = Dispatched(a, Mode.ACT, Outcome.SUPPRESSED, Suppression.COOLDOWN)
         ledger.record(held, T0 + timedelta(minutes=minute))
     assert ledger.repeats(a, Mode.ACT, T0 + timedelta(minutes=72)) == (4, T0)
+
+
+def test_the_memory_store_index_answers_like_a_scan() -> None:
+    """Random appends, bumps, trims and prunes: the indexed lookups give what a scan of
+    the kept entries gives."""
+    import random
+
+    from kelpie.core.ledger import LedgerEntry, MemoryLedgerStore
+
+    rng = random.Random(3)
+    store = MemoryLedgerStore(max_entries=60)
+    t0 = datetime(2026, 3, 2, tzinfo=UTC)
+    for step in range(600):
+        at = t0 + timedelta(minutes=step)
+        fp, subject = f"fp-{rng.randint(0, 9)}", f"T-{rng.randint(0, 5)}"
+        roll = rng.random()
+        if roll < 0.7:
+            store.append(
+                LedgerEntry(
+                    at=at,
+                    fingerprint=fp,
+                    subject=subject,
+                    rule="r",
+                    kind=ActionKind.ALERT,
+                    mode=rng.choice((Mode.SUGGEST, Mode.OBSERVE)),
+                    outcome=Outcome.ALERTED,
+                    reason="x",
+                )
+            )
+        elif roll < 0.85:
+            mode = rng.choice((Mode.SUGGEST, Mode.OBSERVE))
+            after = at - timedelta(minutes=rng.randint(1, 120))
+            expected = next(
+                (
+                    i
+                    for i in range(len(store.entries) - 1, -1, -1)
+                    if store.entries[i].fingerprint == fp
+                    and store.entries[i].mode is mode
+                    and store.entries[i].at > after
+                ),
+                None,
+            )
+            before = [e.suppressed for e in store.entries]
+            assert store.bump_suppressed(fp, mode, after) is (expected is not None)
+            if expected is not None:
+                before[expected] += 1
+            assert [e.suppressed for e in store.entries] == before
+        elif roll < 0.9:
+            store.prune(at - timedelta(minutes=rng.randint(10, 200)))
+        after = at - timedelta(minutes=rng.randint(0, 300))
+        assert list(store.by_fingerprint(fp, after)) == [
+            e for e in store.entries if e.fingerprint == fp and e.at > after
+        ]
+        assert list(store.by_subject(subject, after)) == [
+            e for e in store.entries if e.subject == subject and e.at > after
+        ]
+    assert len(store.entries) <= 60
