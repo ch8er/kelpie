@@ -25,6 +25,16 @@ Rows of features you have not configured stay empty. The variables at the top fi
 **Board** (with `[[adapters.hermes.boards]]`), **Agent host** (multi-host) and **Node**
 (node_exporter targets, for the textfile metrics); All matches farms without those labels.
 
+**Traces in Langfuse.** When `[[traces.forward]]` sends spans to Langfuse, set the
+**Langfuse traces URL** variable to your project's traces page (for example
+`https://langfuse.example/project/<id>/traces`). The dashboard's "Traces in Langfuse"
+link and the trace panels' links (spans received, spans in the snapshot, forwarding,
+unattributed tokens) then open it in a new tab. The variable is empty by default, so the
+dashboard assumes no Langfuse host. Set it for one view in the variable bar, keep it in a
+bookmark with `&var-langfuse=<url>`, or make it the default by editing the variable's
+`query` and `current` in `deploy/grafana/dashboards/kelpie.json`. The provisioned
+dashboard cannot be saved from the UI.
+
 ## Without docker compose
 
 Four things differ from the compose setup: Prometheus scrapes Kelpie at `127.0.0.1:9464`
