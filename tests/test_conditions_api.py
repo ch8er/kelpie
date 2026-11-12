@@ -16,6 +16,8 @@ import pytest
 
 from kelpie.conditions_api import (
     MAX_BODY,
+    SHARED,
+    Answer,
     ConditionRegistry,
     ConditionSettings,
     load_conditions,
@@ -80,8 +82,8 @@ def test_headers_decide_before_the_body(
     registry: ConditionRegistry, h: Headers, status: int
 ) -> None:
     answer = registry.precheck(h)
-    assert answer is not None and answer.status == status
-    assert registry.precheck(headers()) is None
+    assert isinstance(answer, Answer) and answer.status == status
+    assert registry.precheck(headers()) == SHARED
 
 
 def test_a_registration_is_stored_once_and_attached_to_its_task(
@@ -197,11 +199,11 @@ def test_off_by_default_and_a_token_is_required(tmp_path: Path) -> None:
         path.read_text() + '[conditions]\nenabled = true\ntoken_env = "KELPIE_TEST_COND"\n'
     )
     settings = load_settings(path)
-    with pytest.raises(ConfigError, match=r"needs \$KELPIE_TEST_COND set"):
+    with pytest.raises(ConfigError, match=r"\$KELPIE_TEST_COND is not set"):
         condition_registry(settings, lambda: NOW)
     weak = {"KELPIE_TEST_COND": "short"}
     with pytest.raises(ValueError, match="KELPIE_TEST_COND") as exc:
-        settings.conditions.token(weak)
+        settings.conditions.shared_token(weak)
     assert "short" not in str(exc.value)
     memory = replace(settings, db_path=None)
     with pytest.raises(ConfigError, match="needs a database"):
@@ -283,7 +285,7 @@ def test_a_row_it_cannot_read_is_skipped(registry: ConditionRegistry, tmp_path: 
     with sqlite3.connect(tmp_path / "k.db") as db:
         db.execute(
             "INSERT INTO registered_conditions VALUES ('registered:x', 'T-1', 'pr_merged',"
-            " '{broken', ?, NULL)",
+            " '{broken', ?, NULL, NULL)",
             (NOW.isoformat(),),
         )
     task = Task("T-1", "t", Status.WAITING, NOW)

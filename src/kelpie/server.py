@@ -95,23 +95,30 @@ class Handler(GuardedHandler):
     def _register(self, registry: ConditionRegistry) -> None:
         """``POST /conditions``: the token and the headers first, the body only once they
         pass (the connection keeps its pending slot until then)."""
-        answer = registry.precheck(self.headers)
-        if answer is None:
+        checked = registry.precheck(self.headers)
+        if isinstance(checked, Answer):
+            answer = checked
+        else:
             self.admit()
             length = int(self.headers.get("Content-Length") or 0)
             try:
                 body = self.read_body(length)
             except OSError as exc:  # the client stalled past the timeout or went away
                 log.info("condition registration from %s aborted: %s", self.peer(), exc)
+                self.server.metrics.conditions_request(408)
                 return
             if len(body) < length:
+                self.server.metrics.conditions_request(408)
                 return  # the client went away
             try:
-                answer = registry.register(body)
+                answer = registry.register(body, checked)
             except Exception:  # a bug or a broken database must not kill Kelpie
                 log.exception("condition registration failed")
                 answer = Answer(503, {"error": "registrations unavailable, retry later"})
-        headers = {"WWW-Authenticate": "Bearer"} if answer.status == 401 else None
+        self.server.metrics.conditions_request(answer.status)
+        headers = dict(answer.headers)
+        if answer.status == 401:
+            headers["WWW-Authenticate"] = "Bearer"
         self._send(answer.status, answer.encoded(), "application/json", headers)
 
     def _read_body(self, length: int) -> bytes:

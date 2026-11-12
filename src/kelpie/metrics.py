@@ -147,6 +147,9 @@ class Metrics:
         self.traces_enabled = False
         self.traces_requests: Counter[str] = Counter()
         self.traces_grace_requests = 0  # authenticated by a rotated-out token
+        self.conditions_enabled = False  # POST /conditions ([conditions] enabled)
+        self.conditions_requests: Counter[str] = Counter()
+        self.conditions_refused_total: Counter[str] = Counter()
         # [traces] token_file in use: (its last read worked, previous tokens accepted)
         self.token_file: Callable[[], tuple[bool, int]] | None = None
         self.spans_received_total: Counter[str] = Counter()
@@ -243,6 +246,22 @@ class Metrics:
             self.traces_enabled = enabled
             for kind in kinds:  # expose 0 so rate() sees the first span
                 self.spans_received_total.setdefault(kind, 0)
+
+    # --- POST /conditions (kelpie.conditions_api) ------------------------------------------
+
+    def set_conditions(self, enabled: bool, reasons: Iterable[str] = ()) -> None:
+        with self._lock:
+            self.conditions_enabled = enabled
+            for reason in reasons:  # expose 0 so rate() sees the first refusal
+                self.conditions_refused_total.setdefault(reason, 0)
+
+    def conditions_request(self, code: int) -> None:
+        with self._lock:
+            self.conditions_requests[str(code)] += 1
+
+    def conditions_refused(self, reason: str) -> None:
+        with self._lock:
+            self.conditions_refused_total[reason] += 1
 
     def traces_request(self, code: int) -> None:
         with self._lock:
@@ -914,6 +933,8 @@ class Metrics:
                 self._render_github(metric)
             if self.traces_enabled:
                 self._render_traces(metric)
+            if self.conditions_enabled:
+                self._render_conditions(metric)
             if self.forward:
                 self._render_forward(metric)
             if self.budgets_enabled:
@@ -1417,6 +1438,28 @@ class Metrics:
             return self.span_rows() if self.span_rows is not None else 0
         except Exception:
             return 0
+
+    def _render_conditions(self, metric: Callable[[str, str, str, Iterable[str]], None]) -> None:
+        metric(
+            "kelpie_conditions_requests_total",
+            "counter",
+            "POST /conditions requests, by HTTP status code (408: the body never came).",
+            [
+                f"kelpie_conditions_requests_total{_labels(code=c)} {n}"
+                for c, n in sorted(self.conditions_requests.items())
+            ],
+        )
+        metric(
+            "kelpie_conditions_refused_total",
+            "counter",
+            "POST /conditions requests of per-agent tokens refused: out_of_scope (not one of "
+            "the token's tasks, or not on the board; 403), rate_limited (429), token_cap "
+            "(the token's max_per_token live registrations; 507).",
+            [
+                f"kelpie_conditions_refused_total{_labels(reason=r)} {n}"
+                for r, n in sorted(self.conditions_refused_total.items())
+            ],
+        )
 
     def _render_traces(self, metric: Callable[[str, str, str, Iterable[str]], None]) -> None:
         metric(

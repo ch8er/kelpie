@@ -141,6 +141,7 @@ class ScopeIndex:
         self._local: dict[str, str | None] = {}  # id on its board -> task id; None: ambiguous
         self._alias: dict[str, str] = {}  # task id -> its id on its board
         self._task_sessions: dict[str, list[Place]] = {}  # task id -> places of its sessions
+        self._task_session_ids: dict[str, list[str]] = {}  # task id -> ids of its sessions
         self._roles: dict[str, str] = {}
         self._remembered = Attribution()
 
@@ -159,6 +160,7 @@ class ScopeIndex:
                 alias[t.id] = key
         sessions: dict[str, _Seen] = {}
         of_task: dict[str, list[Place]] = {}
+        ids_of_task: dict[str, list[str]] = {}
         for s in snapshot.sessions:
             task = tasks.get(s.task_id)
             role = roles.get(s.owner_id) or (task.place.role if task is not None else None)
@@ -166,6 +168,7 @@ class ScopeIndex:
             place = Place(s.owner_id, role, board)
             sessions[s.id] = _Seen(place, s.task_id, now)
             of_task.setdefault(s.task_id, []).append(place)
+            ids_of_task.setdefault(s.task_id, []).append(s.id)
         with self._lock:
             self._roles = roles
             if remembered is not None:
@@ -183,6 +186,7 @@ class ScopeIndex:
             while len(self._alias) > MAX_INDEX:
                 del self._alias[next(iter(self._alias))]
             self._task_sessions = of_task
+            self._task_session_ids = ids_of_task
 
     def session(self, session_id: str) -> tuple[Place, str | None] | None:
         """Where the board puts the session, and its task; None when it does not."""
@@ -216,6 +220,30 @@ class ScopeIndex:
     def task_sessions(self, task_id: str) -> list[Place]:
         with self._lock:
             return list(self._task_sessions.get(task_id, ()))
+
+    def task_session_ids(self, task_id: str) -> list[str]:
+        """The ids of the sessions the last snapshot showed on the task."""
+        with self._lock:
+            return list(self._task_session_ids.get(task_id, ()))
+
+
+def own_task(index: ScopeIndex, scope: TokenScope, task_id: str) -> str | None:
+    """The board's id of ``task_id`` when it is one of ``scope``'s own tasks, else None
+    (``POST /conditions`` with a per-agent token, #442). Only what the board places counts,
+    by the same scoping as spans: the task's owner, its role or its board are in scope, or
+    one of the task's sessions is (its owner, role or board, or its id matches one of the
+    ``sessions`` patterns). A task the board does not place is no one's: unlike a span's,
+    it is never bound to the first token that names it. ``task_id`` may be the task's id
+    on its board, as for spans."""
+    found = index.task(task_id)
+    if found is None:
+        return None
+    place, full = found
+    if scope.covers(place) or any(scope.covers(p) for p in index.task_sessions(full)):
+        return full
+    if any(scope.session_matches(s) for s in index.task_session_ids(full)):
+        return full
+    return None
 
 
 @dataclass(slots=True)
