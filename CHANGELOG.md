@@ -30,6 +30,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
   adapter carries it out yet, so it stays in observe or suggest. Off by default.
 - Delegation, second part (#347): Hermes carries out `delegate` with `hermes kanban create`
   (assigned to the board's operator; a card made before is found by its key line, so a
+  retried create makes no second card; the card's id read from `--json`), and
+  `delegation` may run in act mode on Hermes behind the act checklist. Not with `[hub]`
+  yet (refused at startup). An operator that is a person or Kelpie is refused.
   retried create makes no second card; the card's id read from `--json`), and `delegation` may run in act mode on Hermes behind the act checklist. Not
   with `[hub]` yet (refused at startup).
 - `POST /conditions`: an agent registers the condition its task waits for (task id, kind,
