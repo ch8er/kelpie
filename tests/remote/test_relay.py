@@ -178,7 +178,7 @@ def test_a_short_body_is_not_forwarded(hub_server: HubServer, sink: Sink) -> Non
 def test_trace_exports_over_the_cap_are_told_to_retry(hub_server: HubServer) -> None:
     hub = hub_server.hub
     for _ in range(2):
-        hub.enter("laptop", "traces")
+        hub.enter("laptop", "otlp")
     conn = http.client.HTTPConnection("127.0.0.1", hub_server.server_address[1], timeout=5)
     conn.request("POST", "/v1/traces", body=b"spans", headers={"Authorization": f"Bearer {TOKEN}"})
     response = conn.getresponse()
@@ -244,25 +244,87 @@ def test_the_relay_guards_metrics_like_spans(relay: Relay, sink: Sink) -> None:
     assert sink.metric_calls == [] and sink.calls == []
 
 
-def test_metric_exports_over_the_cap_are_told_to_retry(hub_server: HubServer, sink: Sink) -> None:
-    """A flood of metric exports from one agent: two in flight, the rest get 503 with
-    Retry-After (OTLP exporters retry), and trace exports keep their own slots."""
+def post_raw(port: int, path: str, token: str) -> tuple[int, str | None]:
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+    conn.request("POST", path, body=b"x", headers={"Authorization": f"Bearer {token}"})
+    response = conn.getresponse()
+    found = (response.status, response.getheader("Retry-After"))
+    conn.close()
+    return found
+
+
+def test_one_agent_cannot_hold_more_than_its_share_of_otlp_exports(
+    hub_server: HubServer, sink: Sink
+) -> None:
+    """A flood from one agent (or a stolen token): trace and metric exports share one
+    budget of two in flight, half of ingest's four decode slots, so the agent can never
+    hold every slot; its further exports of either kind get 503 with Retry-After (OTLP
+    exporters retry) while another agent's go through."""
+    from kelpie.remote.hub import IN_FLIGHT
+    from kelpie.traces.ingest import DEFAULT_MAX_CONCURRENT
+
+    assert IN_FLIGHT["otlp"] * 2 <= DEFAULT_MAX_CONCURRENT
     hub = hub_server.hub
-    for _ in range(2):
-        hub.enter("laptop", "metrics")
+    for _ in range(IN_FLIGHT["otlp"]):
+        hub.enter("laptop", "otlp")
     try:
         port = hub_server.server_address[1]
-        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
-        conn.request("POST", METRICS, body=b"points", headers={"Authorization": f"Bearer {TOKEN}"})
-        response = conn.getresponse()
-        assert (response.status, response.getheader("Retry-After")) == (503, "1")
-        conn.close()
-        assert sink.metric_calls == []
-        assert send(port, b"spans", token=TOKEN) == (200, b"ok")  # spans are not starved
-        assert send(port, b"points", token=OTHER, path=METRICS)[0] == 200  # nor other agents
+        assert post_raw(port, METRICS, TOKEN) == (503, "1")
+        assert post_raw(port, "/v1/traces", TOKEN) == (503, "1")
+        assert sink.metric_calls == [] and sink.calls == []
+        assert send(port, b"points", token=OTHER, path=METRICS)[0] == 200
+        assert send(port, b"spans", token=OTHER)[0] == 200
     finally:
-        for _ in range(2):
-            hub.leave("laptop", "metrics")
+        for _ in range(IN_FLIGHT["otlp"]):
+            hub.leave("laptop", "otlp")
+    assert send(hub_server.server_address[1], b"points", token=TOKEN, path=METRICS)[0] == 200
+
+
+def test_slow_exports_of_one_agent_leave_ingest_slots_for_others(tmp_path: Any) -> None:
+    """End to end with real ingest slots: one agent opens as many slow exports as it may
+    (headers sent, body withheld) and a further one; another agent's export still lands."""
+    import socket
+    import time
+
+    from kelpie.core.spans import MemorySpanStore
+    from kelpie.remote.hub import IN_FLIGHT
+    from kelpie.traces.ingest import TraceIngest
+
+    ingest = TraceIngest(store=MemorySpanStore(), clock=lambda: NOW)
+    hub = Hub(hub_settings(), {"laptop": TOKEN, "vm-1": OTHER}, Clock())
+    server = HubServer(hub, ingest)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    port = server.server_address[1]
+    held: list[socket.socket] = []
+    try:
+
+        def slow(path: str) -> socket.socket:
+            s = socket.create_connection(("127.0.0.1", port), timeout=5)
+            s.sendall(
+                f"POST {path} HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+                f"Authorization: Bearer {TOKEN}\r\nContent-Type: application/json\r\n"
+                "Content-Length: 1000\r\n\r\n{".encode()
+            )
+            held.append(s)
+            return s
+
+        for i in range(IN_FLIGHT["otlp"]):
+            slow(METRICS if i % 2 else "/v1/traces")
+        deadline = time.monotonic() + 5
+        while hub._agents["laptop"].in_flight["otlp"] < IN_FLIGHT["otlp"]:
+            assert time.monotonic() < deadline
+            time.sleep(0.02)
+        slow(METRICS)
+        assert held[-1].recv(100).startswith(b"HTTP/1.0 503")
+        status, _ = send(
+            port, b"{}", token=OTHER, path=METRICS, **{"Content-Type": "application/json"}
+        )
+        assert status == 200
+    finally:
+        for s in held:
+            s.close()
+        server.shutdown()
+        server.server_close()
 
 
 def test_relayed_metrics_are_stored_in_the_agents_namespace(tmp_path: Any) -> None:

@@ -13,8 +13,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 - Multi-host: `kelpie agent`'s OTLP relay forwards Claude Code's cost and token metrics
   (`/v1/metrics`) to the hub under the agent's token, as it does spans; the hub ingests
   them with `/v1/metrics`' checks and puts every point's session and task in the agent's
-  namespace. At most two metric exports per agent in flight (more get 503 with
-  `Retry-After`). `POST /conditions` stays single-host.
+  namespace. Trace and metric exports share one budget of two in flight per agent (more
+  get 503 with `Retry-After`), so one agent never holds all of ingest's slots. `POST /conditions` stays single-host.
 
 - Hermes makes WIP commits (#399, option 1): `checkpoints` in `act` mode commits a dirty
   worktree locally on the task branch after its session ended, and never pushes. Git runs
@@ -78,7 +78,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
   `claude_code.cost.usage` delta points with a `session.id` are kept (session, task, model,
   token type, value); other metrics are ignored and never stored. Their tokens count for
   budgets for sessions with no model call in traces in the window, so a session exported
-  both ways counts once. Single host only for now (`kelpie agent` does not relay it). New
+  both ways counts once. On a multi-host farm `kelpie agent` relays it to the hub. New
   metrics `kelpie_metrics_requests_total`, `kelpie_metric_points_total` and
   `kelpie_metric_points_rejected_total`.
 - Limit hits counted from traces per provider (a model call refused with HTTP 429 or a
