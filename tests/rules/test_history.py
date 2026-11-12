@@ -173,3 +173,21 @@ def test_a_failed_first_read_is_tried_again() -> None:
     store.fail = False
     recorder.record(Snapshot(now=T0 + 2 * H, tasks=(task(S.IN_PROGRESS, T0 + 2 * H),)))
     assert [s.status for s in recorder.steps(T0 + 2 * H)] == [S.READY, S.IN_PROGRESS]
+
+
+def test_live_and_restarted_history_agree_after_a_busy_spell() -> None:
+    """A task that changed several times and then stayed put, read later inside the
+    window: live gives what a restart reads from the store."""
+    window = timedelta(hours=10)
+    store = MemoryTransitionStore()
+    live = TransitionRecorder(store, window=window)
+    for hour in range(14):
+        at = T0 + hour * H
+        status = (S.IN_PROGRESS, S.REVIEW)[min(hour, 4) % 2]
+        live.record(Snapshot(now=at, tasks=(task(status, at),)))
+    now = T0 + 13 * H
+    restarted = TransitionRecorder(store, window=window)
+    restarted.record(Snapshot(now=now, tasks=(task(S.IN_PROGRESS, T0 + 4 * H),)))
+    assert live.steps(now) == restarted.steps(now)
+    assert [s.at for s in live.steps(now)] == [T0 + 2 * H, T0 + 3 * H, T0 + 4 * H]
+    assert bounces(live.steps(now)) == 2

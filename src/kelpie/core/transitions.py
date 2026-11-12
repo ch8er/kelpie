@@ -230,12 +230,16 @@ class TransitionRecorder:
         """The recent history for rules (``Snapshot.status_history``): per task with a
         change within ``window`` before ``now``, those changes and the status the window
         began in (the last change before it), oldest first, at most ``max_steps``. A task
-        with no change within the window has none."""
+        with no change within the window has none. The same whether the recorder ran all
+        along or started now and read the store back."""
         if self._recent is None:
             return ()
         start = now - self.window
         return tuple(
-            step for steps in self._recent.values() if steps[-1].at >= start for step in steps
+            step
+            for steps in self._recent.values()
+            if steps[-1].at >= start
+            for step in _window(steps, start, self.max_steps)
         )
 
     def _remember(self, changes: Sequence[StatusChange], now: datetime) -> None:
@@ -265,18 +269,26 @@ class TransitionRecorder:
                 StatusStep(c.task_id, changed_at(c), c.status, c.previous)
             )
 
-    def _trim(self, now: datetime, touched: set[str] | None = None) -> None:
-        """Per task, the steps within the window and the last one before it (the status the
-        window began in, kept however old), at most ``max_steps``. Only ``touched`` tasks
-        and, once a window, all of them."""
+    def _trim(self, now: datetime, touched: set[str]) -> None:
+        """Bound what is kept: the tasks that changed now to their window, and once a
+        window every task, dropping those neither changed nor seen within it."""
         assert self._recent is not None
         start = now - self.window
-        if self._trimmed_at is None or now - self._trimmed_at >= self.window:
-            touched, self._trimmed_at = None, now
-        for task_id in self._recent if touched is None else touched & self._recent.keys():
-            steps = self._recent[task_id]
-            first = next((i for i, s in enumerate(steps) if s.at >= start), len(steps))
-            self._recent[task_id] = steps[max(first - 1, 0) :][-self.max_steps :]
+        full = self._trimmed_at is None or now - self._trimmed_at >= self.window
+        if full:
+            self._trimmed_at = now
+            for task_id in list(self._recent):
+                steps = self._recent[task_id]
+                if steps[-1].at < start and self._seen.get(task_id, steps[-1].at) < start:
+                    del self._recent[task_id]  # gone from the boards: nothing to read
+        for task_id in self._recent if full else touched & self._recent.keys():
+            self._recent[task_id] = _window(self._recent[task_id], start, self.max_steps)
+
+
+def _window(steps: Sequence[StatusStep], start: datetime, cap: int) -> list[StatusStep]:
+    """The steps from ``start`` on and the last one before it, at most ``cap``."""
+    first = next((i for i, s in enumerate(steps) if s.at >= start), len(steps))
+    return list(steps[max(first - 1, 0) :][-cap:])
 
 
 def history(changes: Iterable[StatusChange]) -> dict[str, tuple[StatusChange, ...]]:
