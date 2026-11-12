@@ -173,6 +173,7 @@ OUT_OF_SCOPE = "out_of_scope"
 RATE_LIMITED = "rate_limited"
 TOKEN_CAP = "token_cap"
 FOREIGN = "this token may not register conditions for that task"
+TOKEN_FULL = "too many registered conditions for this token"
 
 
 @dataclass(frozen=True, slots=True)
@@ -353,6 +354,7 @@ class ConditionRegistry:
         default_factory=dict, init=False, repr=False
     )
     _read_board: bool = field(default=False, init=False, repr=False)  # a tick ran
+    _audit_failed: datetime | None = field(default=None, init=False, repr=False)  # logged
 
     def __post_init__(self) -> None:
         if not self.token and not self.scoped and not self.readonly:
@@ -493,25 +495,25 @@ class ConditionRegistry:
                 if db.execute(
                     "SELECT 1 FROM registered_conditions WHERE id = ?", (ident,)
                 ).fetchone():
-                    # The same again, for this wait: it counts from now, bound to no wait yet,
-                    # and is the latest sender's.
+                    # The same again, for this wait: it counts from now, bound to no wait yet.
+                    # A per-agent token's repeat makes it that token's (within its share);
+                    # the shared token's leaves whose it is.
+                    (owner,) = db.execute(
+                        "SELECT token FROM registered_conditions WHERE id = ?", (ident,)
+                    ).fetchone()
+                    token = owner if caller.token is None else caller.token
+                    if token != owner and self._full(db, caller.token, oldest):
+                        self._refused(TOKEN_CAP)
+                        return Answer(507, {"error": TOKEN_FULL})
                     db.execute(
                         "UPDATE registered_conditions SET registered_at = ?, bound_to = NULL,"
                         " token = ? WHERE id = ?",
-                        (_ts(now), caller.token, ident),
+                        (_ts(now), token, ident),
                     )
                     return Answer(200, {"id": ident, "duplicate": True})
-                if caller.token is not None:
-                    mine = db.execute(
-                        "SELECT COUNT(*) FROM registered_conditions"
-                        " WHERE token = ? AND registered_at >= ?",
-                        (caller.token, oldest),
-                    ).fetchone()[0]
-                    if mine >= self.settings.max_per_token:
-                        self._refused(TOKEN_CAP)
-                        return Answer(
-                            507, {"error": "too many registered conditions for this token"}
-                        )
+                if self._full(db, caller.token, oldest):
+                    self._refused(TOKEN_CAP)
+                    return Answer(507, {"error": TOKEN_FULL})
                 live = db.execute(
                     "SELECT COUNT(*) FROM registered_conditions WHERE registered_at >= ?",
                     (oldest,),
@@ -532,6 +534,16 @@ class ConditionRegistry:
                 )
         log.info("condition %s registered for task %s (%s)", ident, task[:MAX_TEXT], kind)
         return Answer(201, {"id": ident, "duplicate": False})
+
+    def _full(self, db: sqlite3.Connection, token: str | None, oldest: str) -> bool:
+        """Whether a per-agent token holds its ``max_per_token`` live registrations."""
+        if token is None:
+            return False
+        mine = db.execute(
+            "SELECT COUNT(*) FROM registered_conditions WHERE token = ? AND registered_at >= ?",
+            (token, oldest),
+        ).fetchone()[0]
+        return bool(mine >= self.settings.max_per_token)
 
     def _refuse_foreign(self, name: str, task: str, kind: ConditionKind, now: datetime) -> None:
         """Count a registration refused for a task that is not the token's own, and write
@@ -585,7 +597,16 @@ class ConditionRegistry:
             ):
                 self.audit.append(entry)
         except Exception as exc:  # the refusal stands; the ledger line is best effort
-            log.error("conditions: cannot write the ledger line of a refused registration: %s", exc)
+            with self._rate_lock:
+                due = self._audit_failed is None or not (
+                    timedelta(0) <= now - self._audit_failed < timedelta(minutes=1)
+                )
+                if due:
+                    self._audit_failed = now
+            if due:  # at most once a minute, however many requests are refused
+                log.error(
+                    "conditions: cannot write the ledger line of a refused registration: %s", exc
+                )
 
     # --- the snapshot step ------------------------------------------------------------
 

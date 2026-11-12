@@ -2759,8 +2759,9 @@ owners = ["agent-dev-1"]
   stays unknown and holds back the task's wake: register only what this farm evaluates.
 - **Idempotent:** the same task, kind and params again answer `200` with `"duplicate":
   true` and the same `id`, and count from now (a later wait on the same thing); a new one
-  answers `201` with its `id`; a repeat by another token (the task's new owner) makes it
-  that token's. Beyond `max_per_token` live registrations of one per-agent token, or
+  answers `201` with its `id`; a per-agent token's repeat of another token's registration
+  makes it that token's (within its `max_per_token`); the shared token's repeat leaves it
+  whose it was. Beyond `max_per_token` live registrations of one per-agent token, or
   `max_registered` in all: `507`, nothing stored. Each token has its own rate and its own
   share, so a flood from one token does not hold back another's registrations (the shared
   token counts only toward `max_registered`). A registration goes

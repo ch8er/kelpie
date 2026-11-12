@@ -1433,6 +1433,7 @@ def _scoped_tokens(
     *,
     shared_label: str = "the shared [traces] token",
     strong: bool = False,
+    warn_loose: bool = True,
 ) -> list[ScopedToken]:
     """The ``[[traces.tokens]]`` tokens ingest checks (#302), and ``POST /conditions``
     (#442, also with ``[traces]`` off): from their env vars, or their token files (trusted
@@ -1470,7 +1471,7 @@ def _scoped_tokens(
                 "[conditions] takes only strong tokens"
             )
         seen[value] = f"[[traces.tokens]] {entry.name}"
-        if entry.token_file is not None and loose_mode(entry.token_file):
+        if warn_loose and entry.token_file is not None and loose_mode(entry.token_file):
             log.warning(
                 "[[traces.tokens]] %s: token_file %s can be read by others than its owner: "
                 "chmod 600 it",
@@ -2774,6 +2775,7 @@ def condition_registry(
         clock,
         shared_label=f"the shared [conditions] token (${conditions.token_env})",
         strong=True,
+        warn_loose=not traces.enabled,  # ingest warns about a loose token file already
     )
     if shared is None and not scoped:
         raise ConfigError(
@@ -2823,16 +2825,10 @@ def connector_steps(
     db = settings.db_path
     if registry is None and settings.conditions.enabled and db is not None and db.exists():
         scopes = {t.name: t.scope for t in settings.traces.tokens}
-        # as serve attaches them: the shared token's rows only while a shared token is set
-        # (its variable in this environment, or named in the config, or no per-agent ones)
-        conditions = settings.conditions
-        shared = (
-            conditions.token_env_explicit
-            or bool(os.environ.get(conditions.token_env, "").strip())
-            or not scopes
-        )
+        # serve deletes the shared token's rows (token NULL) once it has no shared token,
+        # so the ones still stored are rows it attaches
         registry = ConditionRegistry(
-            conditions, db, clock, readonly=True, scopes=scopes, shared_rows=shared
+            settings.conditions, db, clock, readonly=True, scopes=scopes, shared_rows=True
         )
     if registry is not None:
         steps.insert(0, ("registered_conditions", registry))

@@ -466,3 +466,43 @@ def test_per_agent_tokens_on_the_main_listener(registry: ConditionRegistry) -> N
     assert 'kelpie_conditions_requests_total{code="201"} 2' in text
     assert 'kelpie_conditions_requests_total{code="403"} 2' in text
     assert TOKEN_A not in text
+
+
+def test_why_reads_the_shared_tokens_rows_serve_kept(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from kelpie.app import connector_steps, load_settings
+
+    monkeypatch.delenv("KELPIE_CONDITIONS_TOKEN", raising=False)  # set only for serve
+    CLOCK[:] = [NOW]
+    writer = make(tmp_path, shared=SHARED_TOKEN)
+    writer(BOARD)
+    assert writer.register(body("T-B"), SHARED).status == 201
+    writer.close()
+    settings = load_settings(config(tmp_path))
+    steps, _ = connector_steps(settings, Metrics(), lambda: NOW, network=False)
+    reader = dict(steps)["registered_conditions"]
+    assert isinstance(reader, ConditionRegistry) and reader.readonly
+    try:
+        assert attached(reader) == ["T-B"]  # as serve, which still holds the shared token
+    finally:
+        reader.close()
+
+
+def test_a_repeat_keeps_or_moves_its_owner(tmp_path: Path) -> None:
+    CLOCK[:] = [NOW]
+    settings = load_conditions({"enabled": True, "max_per_token": 1})
+    registry = make(tmp_path, settings, shared=SHARED_TOKEN)
+    try:
+        registry(BOARD)
+        assert registry.register(body("T-A"), A).status == 201
+        assert registry.register(body("T-A"), SHARED).status == 200  # stays agent-a's
+        with sqlite3.connect(tmp_path / "k.db") as db:
+            assert db.execute("SELECT token FROM registered_conditions").fetchall() == [
+                ("agent-a",)
+            ]
+        assert registry.register(body("T-B"), SHARED).status == 201
+        assert registry.register(body("T-B", pr=13), B).status == 201  # agent-b's one
+        assert registry.register(body("T-B"), B).status == 507  # taking more: over its share
+    finally:
+        registry.close()
