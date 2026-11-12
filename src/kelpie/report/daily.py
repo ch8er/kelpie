@@ -230,6 +230,7 @@ type StuckCheck = Callable[[Task, Snapshot], list[str] | None]
 
 # Rule 6's forgotten holds: a cause of their own, counted in idle agent-hours.
 HOLDS = "bottlenecks:hold"
+BOTTLENECK_RULE = "bottlenecks"  # rule 6, whose problem a bottleneck's relief reduces
 HOLD_STATE = HOLDS + ":"
 # Rule 13's inboxes: agent-hours spent waiting on people.
 PEOPLE = "needs_you"
@@ -1029,17 +1030,23 @@ def _fix_events(inputs: ReportInputs, end: datetime) -> _FixEvents:
 
 
 def accepts(key: FixKey, event: FixEvent) -> bool:
-    """Whether ``event`` records the fix a recommendation keyed ``key`` asked for: it names
-    the key's rule, else its command, else its role, and no other role than the key's. A
+    """Whether ``event`` records the fix a recommendation keyed ``key`` asked for.
+
+    A key with a rule is accepted by a fix naming that rule (or one of its causes:
+    ``bottlenecks:hold``) and, when the key has a role, no other role; a rule's mode change
+    only when the key asks for that mode (``Let X act``: a switch to act, never away from
+    it). A key with a command (and no rule) by a fix or an output filter naming that
+    command, for no other role. A key with only a role by a fix noted with only that
+    ``--role``: a fix aimed at a rule or a command is not one for the role as a whole. A
     config change names nothing, so it accepts nothing."""
-    if event.kind == MODE and key.mode is not None and not event.note.endswith(f"-> {key.mode}"):
-        return False  # "Let X act" is accepted by a switch to act, not away from it
+    if event.kind == MODE and (key.mode is None or not event.note.endswith(f"-> {key.mode}")):
+        return False
     if key.rule is not None:  # a fix may name a rule's cause: bottlenecks:hold
         named = event.rule is not None and event.rule.split(":", 1)[0] == key.rule
     elif key.command is not None:
         named = event.command == key.command
     elif key.role is not None:
-        named = event.role == key.role
+        named = event.role == key.role and event.rule is None and event.command is None
     else:
         return False
     return named and (key.role is None or event.role is None or event.role == key.role)
@@ -1864,7 +1871,14 @@ def _recommendations(
     wait: BiggestWait | None = None,
     filters_in_use: frozenset[tuple[str, str | None]] = frozenset(),
 ) -> tuple[Advice, ...]:
-    candidates: list[Advice] = list(extra)
+    # The bottleneck's own advice gives way to rule 6's line of the cost of chaos: the same
+    # congestion must not take two of the three places.
+    rule6 = any(c.rule.split(":", 1)[0] == "bottlenecks" and c.hours > 0 for c in chaos)
+    candidates: list[Advice] = [
+        a
+        for a in extra
+        if not (rule6 and a.accept is not None and a.accept.rule == BOTTLENECK_RULE)
+    ]
     outage_line = any(c.rule == OUTAGE and c.hours > 0 for c in chaos)
     if (
         wait is not None
@@ -2211,10 +2225,19 @@ def _acceptance(advice: Advice, fix: FixEvent | None, tz: tzinfo) -> str:
         full = f'kelpie fix {how} "<what changed>"'
         if not how:
             cmd = "`kelpie fix`"
-        elif len(full) <= md.MAX_NAME:
+        elif len(full) <= md.MAX_NAME and md.flat(full) == full:
             cmd = md.code(full)  # names from the board and traces: a span it cannot close
-        else:  # too long to show whole: a cut command would record the wrong key
-            cmd = "`kelpie fix` with the command above"
+        else:  # shown cut or with its spaces changed, it would record another key
+            named = ", ".join(
+                f"`{flag}`"
+                for flag, v in (
+                    ("--rule", advice.accept.rule if advice.accept else None),
+                    ("--command", advice.accept.command if advice.accept else None),
+                    ("--role", advice.accept.role if advice.accept else None),
+                )
+                if v is not None
+            )
+            cmd = f"`kelpie fix` and {named} exactly as the recommendation names them"
         return f"*Proposed*: not accepted yet (note it with {cmd})."
     by = {MODE: "its mode change", FILTER: "the filter seen in traces"}.get(
         fix.kind, "`kelpie fix`"

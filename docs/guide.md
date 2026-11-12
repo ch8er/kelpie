@@ -373,13 +373,16 @@ board the report is unchanged.
   already in act mode is never told to act; an output filter the farm's traces show in use
   is advised as "route it through", not "install"; merge automation is never advised,
   since the report cannot see whether PRs already merge automatically. The day's
-  bottleneck competes too when it is a queue or review stage ("Relieve the developer
-  bottleneck in queue", worth the task-hours waited there; waiting and ownerless stages are
-  covered by the biggest wait and orphan_status' line). Each of the three says whether it
-  is only *proposed* or *accepted*: accepted means a fix was noted for it in the days the
-  report reads, with `kelpie fix` and the options the line shows (`--rule`, `--command`,
-  `--role`), or by an equivalent the report already reads (the rule's mode changed to act
-  for "Let X act", an output filter appeared in traces). An accepted recommendation's fix
+  bottleneck competes too when it is a queue or review stage of a known role ("Relieve the
+  developer bottleneck in queue"), worth the task-hours waited there beyond the next role
+  and stage; it gives way when rule 6 has its own line in the cost of chaos, and waiting
+  and ownerless stages are covered by the biggest wait and orphan_status' line. Each of the
+  three says whether it is only *proposed* or *accepted*: accepted means a fix was noted
+  for it in the days the report reads, with `kelpie fix` and the options the line shows
+  (`--rule`, `--command`, `--role`), or by an equivalent the report already reads (for
+  "Let X act", the rule's mode changed to act; for an output filter, the filter appeared
+  in traces). A fix noted with only `--role` accepts every recommendation keyed to that
+  role alone; a fix aimed at a rule or a command does not. An accepted recommendation's fix
   is verified under "Before/after of recent fixes" even when it is older than the day
   before. There is no other way to accept one.
 - **Token optimization** (from traces, `kelpie.traces.tokens`): prompt-cache hit rate per

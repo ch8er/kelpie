@@ -152,21 +152,30 @@ _RELIEF = {
 
 
 def bottleneck_advice(found: Bottleneck | None) -> Advice | None:
-    """The day's bottleneck as a candidate for the top 3 recommendations, worth the
-    task-hours waited there; None without one, or when its stage is waiting for
-    conditions or ownerless (other advice covers those: :data:`_RELIEF`)."""
-    if found is None or found.stage not in _RELIEF:
+    """The day's bottleneck as a candidate for the top 3 recommendations; None without
+    one, for tasks of no known role, or when its stage is waiting for conditions or
+    ownerless (other advice covers those: :data:`_RELIEF`). It is worth the task-hours
+    waited there beyond the next role and stage (all of them without one): ordinary
+    queueing is not lost time, the constraint's excess is. Keyed to rule 6
+    (``bottlenecks``) and the role, which a fix noted for it names; the report drops it
+    when rule 6 has a line in the cost of chaos (:func:`kelpie.report.daily`)."""
+    if found is None or found.stage not in _RELIEF or found.role == UNKNOWN_ROLE:
+        return None
+    nxt = found.runner_up[2] if found.runner_up is not None else 0.0
+    excess = found.hours - nxt
+    if excess <= 0:
         return None
     stage = STAGE_NAMES[found.stage].lower()
+    beyond = f", {excess:.1f} more than the next role and stage" if found.runner_up else ""
     return Advice(
         title=f"Relieve the {md.short_text(found.role)} bottleneck in {stage}",
         detail=(
-            f"tasks of the role waited {found.hours:.1f} task-hours in {stage}, "
-            f"{found.share:.0%} of all task-hours waited in any role and stage; "
+            f"tasks of the role waited {found.hours:.1f} task-hours in {stage}{beyond} "
+            f"({found.share:.0%} of all task-hours waited in any role and stage); "
             f"{_RELIEF[found.stage]}"
         ),
-        hours=found.hours,
-        accept=FixKey(role=found.role),
+        hours=excess,
+        accept=FixKey(rule="bottlenecks", role=found.role),
     )
 
 
