@@ -476,7 +476,7 @@ set `[resources.prometheus.queries] processes_max` to a real ceiling.
 | `path_max_age` | `"3h"` | duration | Directory sizes older than this are not named; the alert asks whether the script still runs. The script runs hourly: keep this above `[resources.prometheus] path_interval` plus a missed run. |
 | `quota_warning` | `0.1` | ratio or `false` | Warn when `remaining / limit` of a provider quota is at or below this. |
 | `rate_limit_events_warning` | `20` | count or `false` | Warn at this many limit hits per provider... |
-| `rate_limit_window` | `"24h"` | duration, > 0 | ...within this window. |
+| `rate_limit_window` | `"24h"` | duration, > 0 | ...within this window. A source's count of rate-limit errors (`Resource.events`) counts only when the period it covers (`events_window`) is unknown or no longer than this. |
 | `ignore_resets_within` | `"10m"` | duration, > 0 | Quota windows that refill this soon are not reported as low or exhausted. |
 | `auth_expiry_warning` | `"72h"` | duration, > 0 | Warn this long before a credential expires. Expired or rejected keys are critical. |
 | `provider_roles` | `{}` | table: provider -> roles | Which roles use which provider. |

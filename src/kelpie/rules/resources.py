@@ -27,8 +27,9 @@ per provider covers its quota: little left (``remaining / limit`` at or below
 tasks that use the provider are ready or running (``blocked_tasks``); which tasks use which
 provider is config data (``provider_roles``, ``provider_owners``). Without a mapping for a
 provider Kelpie does not guess: the alert stays a warning and lists no tasks. Rate-limit
-errors (``events`` of a resource) and limits seen reached (``LimitHit`` records, e.g. from
-probes) are counted together and worded apart. Quota windows that refill within
+errors (``events`` of a resource, when its ``events_window`` is unknown or no longer than
+``rate_limit_window``) and limits seen reached (``LimitHit`` records, e.g. from probes)
+are counted together and worded apart. Quota windows that refill within
 ``ignore_resets_within`` (per-minute limits) are not reported as low or exhausted: they
 recover on their own. One alert per credential: rejected by the provider (401/403) or
 expired is critical, expiring within ``auth_expiry_warning`` is a warning. A probe that
@@ -550,6 +551,12 @@ class Resources:
                 actions.append(alert)
         return actions
 
+    def _events(self, r: Resource) -> int:
+        """A source's event count, when it covers no more than ``rate_limit_window``: a
+        count over a longer window says nothing about how many fell in this one."""
+        window = r.events_window
+        return r.events if window is None or window <= self.rate_limit_window else 0
+
     def _quotas(self, snapshot: Snapshot) -> dict[str, _Quota]:
         now = snapshot.now
         quotas: dict[str, _Quota] = {}
@@ -562,7 +569,7 @@ class Resources:
             held = quotas.get(r.name)
             if held is None or (r.at or now) >= (held.at or now):
                 quotas[r.name] = _Quota(
-                    r.name, remaining, r.limit, r.unit, r.resets_at, r.events, r.at
+                    r.name, remaining, r.limit, r.unit, r.resets_at, self._events(r), r.at
                 )
         for p in snapshot.providers:
             if not p.ok or not self._is_fresh(p.checked_at, now):
