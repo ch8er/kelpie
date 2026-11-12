@@ -454,8 +454,8 @@ def event_of(entry: LedgerEntry) -> DelegationEvent | None:
             card_id=found[1] if found else None,
         )
     verdict = params.get("verdict")
-    if entry.outcome not in (Outcome.ALERTED, Outcome.SUGGESTED):
-        return None  # a verdict nobody was told (observe, dry-run, failed): said again
+    if entry.outcome not in (Outcome.ALERTED, Outcome.SUGGESTED, Outcome.FAILED):
+        return None  # a verdict nobody was told (observe, dry-run, dropped): said again
     if entry.kind in (ActionKind.ALERT, ActionKind.ESCALATE) and isinstance(verdict, str):
         return DelegationEvent(
             problem,
@@ -501,7 +501,12 @@ DAY = timedelta(days=1)
 def breaker_open(policy: Policy, events: Sequence[DelegationEvent], now: datetime) -> bool:
     """Whether ``breaker_failures`` verifications failed within a day: all delegation stops."""
     failed = sum(
-        1 for e in events if e.kind == "verdict" and e.verdict in FAILED and e.at > now - DAY
+        1
+        for e in events
+        if e.kind == "verdict"
+        and e.outcome != "failed"
+        and e.verdict in FAILED
+        and e.at > now - DAY
     )
     return failed >= policy.breaker_failures
 

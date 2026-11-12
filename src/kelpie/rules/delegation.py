@@ -71,6 +71,7 @@ from kelpie.rules._params import human
 
 NAME = RULE
 DAY = timedelta(days=1)
+UNMADE_AFTER = 3  # failed creates after which a card counts as one that cannot be made
 HOUR = timedelta(hours=1)
 # Card statuses that mean the operator picked it up (or finished with it).
 _PICKED = frozenset({Status.IN_PROGRESS, Status.REVIEW, Status.ACCEPTED, Status.BLOCKED})
@@ -88,11 +89,21 @@ class Delegation:
         now = snapshot.now
         events = [e for e in snapshot.delegations if e.at > now - policy.history]
         carried = [e for e in events if e.kind == "card" and e.outcome == EXECUTED]
-        verdicts = {(e.problem, e.attempt): e for e in events if e.kind == "verdict"}
+        # Verdicts the person got; one whose send failed is sent again (an hourly key), while
+        # the engine already holds the problem no more (``given_back`` counts it).
+        verdicts = {
+            (e.problem, e.attempt): e
+            for e in events
+            if e.kind == "verdict" and e.outcome != "failed"
+        }
         actions: list[Action] = list(self._verdicts(snapshot, events, carried, verdicts))
         stopped = breaker_open(policy, events, now)
         if stopped:
-            failed = [e.at for e in events if e.kind == "verdict" and e.verdict in FAILED]
+            failed = [
+                e.at
+                for e in events
+                if e.kind == "verdict" and e.outcome != "failed" and e.verdict in FAILED
+            ]
             actions.append(_breaker(policy, min(at for at in failed if at > now - DAY)))
         # Problems the engine held back for the operator: each ends in a message to the person
         # (a hand-off, a verdict, or "it is yours" below), whatever happened since.
@@ -101,6 +112,7 @@ class Delegation:
             e
             for e in events
             if e.kind == "verdict"
+            and e.outcome != "failed"
             and (e.verdict in GAVE_UP or e.verdict == KEPT)
             and e.at > now - policy.cooldown
         ]
@@ -148,14 +160,14 @@ class Delegation:
             if any(e.problem == problem.id and e.at >= problem.opened_at for e in held) and not any(
                 e.problem == problem.id and e.at >= problem.opened_at for e in told
             ):
-                actions.append(_kept(problem, operator, why))
+                actions.append(_kept(problem, operator, why, now))
         return actions
 
     def _unmade(
         self, problem: Problem, attempt: int, events: Sequence[DelegationEvent], now: datetime
     ) -> bool:
         """Whether this attempt's card cannot be made: no executor would carry it out, or
-        creating it kept failing for ``pickup_within``."""
+        creating it failed :data:`UNMADE_AFTER` times or kept failing for ``pickup_within``."""
         tries = [
             e
             for e in events
@@ -164,7 +176,10 @@ class Delegation:
         if any(e.outcome == "not_executed" for e in tries):
             return True
         failed = [e.at for e in tries if e.outcome == "failed"]
-        return bool(failed) and now >= min(failed) + self.policy.pickup_within
+        # the ledger retries a card a few times (``once_attempts``, 3 by default)
+        return len(failed) >= UNMADE_AFTER or (
+            bool(failed) and now >= min(failed) + self.policy.pickup_within
+        )
 
     def boards(self, state: str) -> bool:
         """The circuit breaker is no board's state: an unread board does not keep it open."""
@@ -195,21 +210,21 @@ class Delegation:
             if problem is None:
                 clear = cleared.get(card.problem)
                 if clear is not None and now >= max(clear, card.at) + policy.hold:
-                    found.append(_verdict(card, VERIFIED, _said_verified(card, policy)))
+                    found.append(_verdict(card, VERIFIED, _said_verified(card, policy), now))
                 elif clear is None and now >= card.at + policy.finish_within:
                     # neither open nor closed in Kelpie's records: it cannot verify a fix
                     said = (
                         f"Not verified, yours now: Kelpie no longer sees {card.problem} but "
                         f"has no record of it clearing; check {card.task_id or 'the task'}."
                     )
-                    found.append(_verdict(card, "not_finished", said))
+                    found.append(_verdict(card, "not_finished", said, now))
                 continue
             if ctask is not None and ctask.status is Status.BLOCKED:
                 reason = ctask.block.reason if ctask.block is not None else ""
                 why = f"{card.operator} blocked {_card(card)}" + (
                     f":\n{quote(reason, 300)}" if reason else ""
                 )
-                found.append(_verdict(card, "not_fixed", _yours(card, problem, why)))
+                found.append(_verdict(card, "not_fixed", _yours(card, problem, why), now))
             elif ctask is not None and ctask.status.is_terminal:
                 if now < ctask.status_since + policy.hold:
                     continue  # let Kelpie's own check catch up with the fix
@@ -220,18 +235,18 @@ class Delegation:
                     f"{problem.task_id or problem.id}."
                 )
                 if used is None:
-                    found.append(_verdict(card, "not_fixed", _yours(card, problem, said)))
+                    found.append(_verdict(card, "not_fixed", _yours(card, problem, said), now))
                 else:
                     more = f"{said} Kelpie hands it over once more (attempt {used})."
-                    found.append(_verdict(card, "still_broken", more))
+                    found.append(_verdict(card, "still_broken", more, now))
             elif now >= card.at + policy.finish_within:
                 why = f"{_card(card)} was not finished within {human(policy.finish_within)}"
-                found.append(_verdict(card, "not_finished", _yours(card, problem, why)))
+                found.append(_verdict(card, "not_finished", _yours(card, problem, why), now))
             elif card.card_id is None:
                 continue  # Kelpie cannot see the card: only the finish deadline applies
             elif now >= card.at + policy.pickup_within and not _picked(ctask, snapshot):
                 why = f"nobody picked up {_card(card)} within {human(policy.pickup_within)}"
-                found.append(_verdict(card, "not_picked_up", _yours(card, problem, why)))
+                found.append(_verdict(card, "not_picked_up", _yours(card, problem, why), now))
         return found
 
     def _attempt(
@@ -350,14 +365,20 @@ _HEADLINES = {
 }
 
 
-def _verdict(card: DelegationEvent, verdict: str, reason: str) -> Action:
+def _hour(now: datetime) -> int:
+    """The hour in a message's key: a send that failed every retry goes again next hour."""
+    return int(now.timestamp()) // 3600
+
+
+def _verdict(card: DelegationEvent, verdict: str, reason: str, now: datetime) -> Action:
     where = card.task_id or card.problem
+    hour = _hour(now)
     return Action(
         ActionKind.ALERT,
         NAME,
         reason,
         task_id=card.task_id,
-        key=f"verdict:{card.problem}:{card.attempt}:{int(card.at.timestamp())}",
+        key=f"verdict:{card.problem}:{card.attempt}:{int(card.at.timestamp())}:{hour}",
         severity=Severity.WARNING,
         once=True,
         once_per_key=True,
@@ -373,7 +394,7 @@ def _verdict(card: DelegationEvent, verdict: str, reason: str) -> Action:
     )
 
 
-def _kept(problem: Problem, operator: str | None, why: str) -> Action:
+def _kept(problem: Problem, operator: str | None, why: str, now: datetime) -> Action:
     """The person's message about a problem the engine held back for the operator that the
     rule does not hand over: it is theirs (and the engine holds it back no more)."""
     who = operator or "the operator agent"
@@ -383,7 +404,7 @@ def _kept(problem: Problem, operator: str | None, why: str) -> Action:
         NAME,
         f"Kelpie did not hand this to {who} ({why}); it is yours: {headline}",
         task_id=problem.task_id,
-        key=f"kept:{problem.id}:{int(problem.opened_at.timestamp())}",
+        key=f"kept:{problem.id}:{int(problem.opened_at.timestamp())}:{_hour(now)}",
         severity=Severity.WARNING,
         once=True,
         once_per_key=True,

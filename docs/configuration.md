@@ -931,7 +931,11 @@ ops-1; card t_9a for ops-1."), one at the end, and nothing in between:
   history, a card that could not be made. From then on its alerts reach the person, and no
   card is made for that task within `cooldown`.
 
-If the server cannot read the delegation history in a tick, nothing is held back in it.
+A verdict or "it is yours" whose sending fails every retry is sent again the next hour, and
+the engine stops holding that problem's alerts at once. A card whose creation failed three
+times (or kept failing for `pickup_within`), or that no adapter carries out, counts as one
+that could not be made. If the server cannot read the delegation history in a tick,
+nothing is held back in it.
 Turning delegation off (or out of act mode) while cards are open leaves their problems'
 next escalations to reach the person, but no verdict is sent for those cards; switch back to
 act, or look at the operator's queue.

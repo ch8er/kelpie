@@ -505,9 +505,11 @@ def test_a_verdict_nobody_got_is_said_again() -> None:
             NOW, "f", "s", "delegation", ActionKind.ALERT, M.ACT, outcome, "r", params=params
         )
 
-    for outcome in (Outcome.FAILED, Outcome.DROPPED, Outcome.OBSERVED, Outcome.DRY_RUN):
+    for outcome in (Outcome.DROPPED, Outcome.OBSERVED, Outcome.DRY_RUN, Outcome.SUPPRESSED):
         assert event_of(entry(outcome)) is None
     assert event_of(entry(Outcome.ALERTED)) is not None
+    failed = event_of(entry(Outcome.FAILED))  # kept: the hold ends, the rule sends it again
+    assert failed is not None and failed.outcome == "failed"
 
 
 def test_a_card_that_cannot_be_made_gives_the_held_problem_back() -> None:
@@ -546,3 +548,42 @@ def test_a_card_kelpie_cannot_see_waits_for_the_finish_deadline() -> None:
     late = replace(unseen, at=NOW - timedelta(hours=7))
     (said,) = [a for a in run([task()], [problem()], [late]) if "verdict" in a.params]
     assert said.params["verdict"] == "not_finished" and "its id was not read" in said.reason
+
+
+def test_a_verdict_lost_to_an_alerter_outage_is_sent_later_and_the_hold_ends() -> None:
+    from kelpie.core.delegation import given_back
+
+    failed = replace(verdict(what="not_fixed"), outcome="failed")
+    # the person did not get it: sent again (another hour, another key) ...
+    blocked = cardtask(status=Status.BLOCKED, block=Block("no access", NOW))
+    again = [
+        a for a in run([task(), blocked], [problem()], [card(), failed]) if "verdict" in a.params
+    ]
+    assert [a.params["verdict"] for a in again] == ["not_fixed"]
+    later = [
+        a
+        for a in Delegation(POLICY).evaluate(
+            Snapshot(
+                now=NOW + timedelta(hours=1),
+                tasks=(task(), blocked),
+                problems=(problem(),),
+                delegations=(card(), failed),
+                delegation_read=True,
+            )
+        )
+        if "verdict" in a.params
+    ]
+    assert later[0].key != again[0].key
+    # ... while the engine already holds the problem no more
+    assert given_back(POLICY, "task:T-1", [failed], NOW)
+    _, outcomes = tick([alert()], events=[card(), failed])
+    assert outcomes == [Outcome.ALERTED]
+
+
+def test_a_card_failing_three_times_is_one_that_cannot_be_made() -> None:
+    held = replace(card(), kind="held", attempt=0, outcome="delegated", at=NOW - timedelta(hours=3))
+    fails = [
+        replace(card(ago=timedelta(minutes=m)), outcome="failed", card_id=None) for m in (5, 10, 15)
+    ]
+    actions = run([task()], [problem()], [held, *fails])
+    assert [a.params.get("kept") for a in actions] == ["the card could not be made"]
