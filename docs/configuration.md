@@ -2544,21 +2544,31 @@ curl -s -X POST http://127.0.0.1:9464/conditions \
   -d '{"task_id": "T-1", "kind": "pr_merged", "params": {"repo": "owner/name", "pr": 12}}'
 ```
 
-- **Attach-only.** A registered condition attaches to its task inside Kelpie (every snapshot
-  carries it with `task_id` set); the connectors evaluate it like any other (`pr_merged` and
+- **Attach-only.** A registered condition attaches to its task inside Kelpie while the task
+  is on the board and ready, in progress or waiting (never a blocked task: rule 4 would read
+  it as the end of the block); the connectors evaluate it like any other (`pr_merged` and
   `ci_status` by `[connectors.github]`, `task_status` from the board, `quota_reset` by
-  `[connectors.llm_quotas]`, ...) and the rules read it in their own modes. Registering
-  never parks the task or changes anything on the board: the agent sets its own status.
+  `[connectors.llm_quotas]`, `human_task`) and rule 2 wakes the task once it holds, in its
+  own mode. Registering never parks the task or changes anything on the board: the agent
+  sets its own status. Register, then set the waiting status and exit: a registration made
+  up to 15 minutes before the task's current status counts for it; an older one is left
+  over from an earlier wait.
+- **Trust.** One token for every agent: whoever holds it may register for any task. Give it
+  only to the farm's agents; off loopback, put the listener behind TLS (the token is a
+  bearer token).
 - **Before the body is read:** the bearer token (constant-time compare; 401), no `Origin`
   header (403: a web page), `Content-Length` present and at most 16 KiB (411/413),
   `Content-Type: application/json` (415).
 - **The body:** `task_id` (1 to 200 characters), `kind` (`ci_status`, `pr_merged`,
-  `quota_reset`, `human_task`, `task_status`, `time`, `custom`) and `params` (at most 20
-  numbers, booleans or strings of at most 200 characters); 400 otherwise.
+  `quota_reset`, `human_task`, `task_status`: the kinds something evaluates) and `params`
+  (at most 20 numbers within 2^53, booleans or strings of at most 200 characters; never
+  `terminal`, `terminal_ok`, `error`, `satisfied`, `source` or `observed_*`, which the
+  evaluators write); 400 otherwise.
 - **Idempotent:** the same task, kind and params again answer `200` with `"duplicate":
   true` and keep the first registration's time; a new one answers `201` with its `id`.
   Beyond `max_registered` live registrations: `507`, nothing stored. A registration goes
-  once its task is done or cancelled on the board, or `max_age` after it was made.
+  once its task finishes on the board (done, failed, cancelled), or `max_age` after it was
+  made. `kelpie why` and the daily report read the registrations without changing them.
 - Single-host `kelpie serve` only for now: not with `[hub]` or `[agent]` (startup refuses).
 
 | Key | Default | Meaning |

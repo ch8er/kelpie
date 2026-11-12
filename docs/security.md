@@ -24,6 +24,9 @@ a CONNECT tunnel.
 ## Listeners
 
 `kelpie serve` listens on the main port (`/v1/traces`, `/metrics`, `/healthz`, and with
+`[conditions] enabled` `POST /conditions`, whose one token lets any agent holding it register
+a condition for any task, attached to ready, in-progress and waiting tasks only, never to a
+blocked one; loopback by default) and, with `[hub]`, on the hub port. Both go through one set of connection guards
 `[conditions] enabled` `POST /conditions`; loopback by default) and, with `[hub]`, on the hub port. Both go through one set of connection guards
 `kelpie serve` listens on the main port (`/v1/traces`, `/v1/metrics`, `/metrics`, `/healthz`;
 loopback by default) and, with `[hub]`, on the hub port. Both go through one set of connection guards

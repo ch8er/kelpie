@@ -70,6 +70,8 @@ def body(data: dict[str, Any]) -> bytes:
         (headers(Origin="https://example.invalid"), 403),
         (Headers({"Authorization": f"Bearer {TOKEN}", "Content-Type": "application/json"}), 411),
         (headers(Content_Length="-1"), 400),
+        (headers(Content_Length="+10"), 400),
+        (headers(Content_Length="1_0"), 400),
         (headers(Content_Length=str(MAX_BODY + 1)), 413),
         (headers(Content_Type="text/plain"), 415),
     ],
@@ -90,7 +92,7 @@ def test_a_registration_is_stored_once_and_attached_to_its_task(
     CLOCK[0] = NOW + timedelta(hours=1)
     again = registry.register(body({**PR, "params": {"pr": 12, "repo": "example/repo"}}))
     assert again.status == 200 and again.body == {"id": first.body["id"], "duplicate": True}
-    task = Task("T-1", "t", Status.IN_PROGRESS, NOW)
+    task = Task("T-1", "t", Status.IN_PROGRESS, NOW - timedelta(hours=1))
     snapshot = Snapshot(now=NOW + timedelta(hours=1), tasks=(task,))
     out = registry(snapshot)
     [condition] = out.conditions
@@ -107,9 +109,13 @@ def test_registrations_go_with_a_finished_task_or_their_age(
     registry.register(body(PR))
     registry.register(body({**PR, "task_id": "T-2"}))
     done = Task("T-1", "t", Status.DONE, NOW)
-    out = registry(Snapshot(now=NOW, tasks=(done,)))
+    other = Task("T-2", "t", Status.WAITING, NOW)
+    out = registry(Snapshot(now=NOW, tasks=(done, other)))
     assert [c.task_id for c in out.conditions] == ["T-2"]
-    later = registry(Snapshot(now=NOW + timedelta(days=8)))
+    reopened = replace(done, status=Status.IN_PROGRESS)
+    again = registry(Snapshot(now=NOW, tasks=(reopened, other)))
+    assert [c.task_id for c in again.conditions] == ["T-2"]  # T-1's went when it finished
+    later = registry(Snapshot(now=NOW + timedelta(days=8), tasks=(other,)))
     assert later.conditions == ()
 
 
@@ -134,10 +140,16 @@ def test_at_most_max_registered_are_kept(tmp_path: Path) -> None:
         {"task_id": "T\n1", "kind": "pr_merged"},
         {"task_id": "T" * 201, "kind": "pr_merged"},
         {"task_id": "T-1", "kind": "launch_rockets"},
-        {"task_id": "T-1", "kind": "time", "params": {"at": {"nested": 1}}},
-        {"task_id": "T-1", "kind": "time", "params": {"x": "y" * 201}},
-        {"task_id": "T-1", "kind": "time", "params": {f"k{n}": n for n in range(21)}},
-        {"task_id": "T-1", "kind": "time", "params": [1]},
+        {"task_id": "T-1", "kind": "time", "params": {"at": "2026-03-03"}},  # nothing evaluates
+        {"task_id": "T-1", "kind": "custom"},
+        {"task_id": "T-1", "kind": "pr_merged", "params": {"terminal_ok": True}},
+        {"task_id": "T-1", "kind": "pr_merged", "params": {"error": "forged"}},
+        {"task_id": "T-1", "kind": "task_status", "params": {"observed_status": "done"}},
+        {"task_id": "T-1", "kind": "pr_merged", "params": {"pr": 2**60}},
+        {"task_id": "T-1", "kind": "pr_merged", "params": {"at": {"nested": 1}}},
+        {"task_id": "T-1", "kind": "pr_merged", "params": {"x": "y" * 201}},
+        {"task_id": "T-1", "kind": "pr_merged", "params": {f"k{n}": n for n in range(21)}},
+        {"task_id": "T-1", "kind": "pr_merged", "params": [1]},
     ],
 )
 def test_malformed_registrations_are_400(registry: ConditionRegistry, data: Any) -> None:
@@ -232,3 +244,78 @@ def test_without_conditions_the_path_is_not_found() -> None:
     server = make_server("127.0.0.1", 0, Metrics())
     for running in started(server):
         assert _post(running, body(PR))[0] == 404
+
+
+def test_a_blocked_task_gets_no_registered_condition(registry: ConditionRegistry) -> None:
+    # Rule 4 would read it as the end of the block: a token holder could clear any block.
+    registry.register(body(PR))
+    blocked = Task("T-1", "t", Status.BLOCKED, NOW)
+    assert registry(Snapshot(now=NOW, tasks=(blocked,))).conditions == ()
+    assert registry(Snapshot(now=NOW)).conditions == ()  # not on the board: nothing
+
+
+def test_registered_then_waiting_wakes_through_rule_2(registry: ConditionRegistry) -> None:
+    from kelpie.core.actions import ActionKind
+    from kelpie.core.conditions import check_task_status
+    from kelpie.rules import REGISTRY
+
+    wait = {"task_id": "T-1", "kind": "task_status", "params": {"task": "T-0"}}
+    assert registry.register(body(wait)).status == 201  # at NOW, before the status
+    waiting = Task("T-1", "t", Status.WAITING, NOW + timedelta(minutes=2))
+    dep = Task("T-0", "dep", Status.DONE, NOW + timedelta(hours=1))
+    now = NOW + timedelta(hours=2)
+    snapshot = check_task_status(registry(Snapshot(now=now, tasks=(waiting, dep))))
+    [condition] = snapshot.conditions
+    assert condition.satisfied is True
+    assert condition.registered_at == waiting.status_since  # made for this wait
+    actions = REGISTRY["wait_condition"]({}).evaluate(snapshot)
+    assert [(a.kind, a.task_id) for a in actions] == [(ActionKind.WAKE, "T-1")]
+    # Registered long before the wait began: left over from an earlier one, not counted.
+    stale = replace(waiting, status_since=NOW + timedelta(minutes=30))
+    old = check_task_status(registry(Snapshot(now=now, tasks=(stale, dep))))
+    assert old.conditions[0].registered_at == NOW
+
+
+def test_a_row_it_cannot_read_is_skipped(registry: ConditionRegistry, tmp_path: Path) -> None:
+    import sqlite3
+
+    registry.register(body(PR))
+    with sqlite3.connect(tmp_path / "k.db") as db:
+        db.execute(
+            "INSERT INTO registered_conditions VALUES ('registered:x', 'T-1', 'pr_merged',"
+            " '{broken', ?)",
+            (NOW.isoformat(),),
+        )
+    task = Task("T-1", "t", Status.WAITING, NOW)
+    assert len(registry(Snapshot(now=NOW, tasks=(task,))).conditions) == 1
+
+
+def test_why_and_the_report_read_registrations_without_changing_them(tmp_path: Path) -> None:
+    from kelpie.app import connector_steps, load_settings
+
+    path = tmp_path / "kelpie.toml"
+    path.write_text(f'[storage]\npath = "{tmp_path / "k.db"}"\n[conditions]\nenabled = true\n')
+    settings = load_settings(path)
+    steps, _ = connector_steps(settings, Metrics(), lambda: NOW, network=False)
+    assert "registered_conditions" not in dict(steps)  # no database yet
+    writer = ConditionRegistry(settings.conditions, tmp_path / "k.db", lambda: NOW, TOKEN)
+    writer.register(body(PR))
+    writer.close()
+    steps, _ = connector_steps(settings, Metrics(), lambda: NOW, network=False)
+    reader = dict(steps)["registered_conditions"]
+    assert isinstance(reader, ConditionRegistry) and reader.readonly
+    assert reader.register(body(PR)).status == 503
+    done = Task("T-1", "t", Status.DONE, NOW)
+    reader(Snapshot(now=NOW, tasks=(done,)))  # would prune: it must not
+    reader.close()
+    again = ConditionRegistry(settings.conditions, tmp_path / "k.db", lambda: NOW, TOKEN)
+    try:
+        assert again.register(body(PR)).status == 200  # still there
+    finally:
+        again.close()
+
+
+def test_a_closed_registry_does_not_reopen(registry: ConditionRegistry) -> None:
+    registry.close()
+    task = Task("T-1", "t", Status.WAITING, NOW)
+    assert registry(Snapshot(now=NOW, tasks=(task,))).conditions == ()

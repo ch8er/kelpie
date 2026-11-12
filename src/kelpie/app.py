@@ -393,6 +393,7 @@ def load_settings(path: Path | None) -> Settings:
         "snooze",
         "server",
         "view",
+        "doctor",
         "conditions",
     }
     if unknown:
@@ -2070,10 +2071,8 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
             adapter.clock = clock
     _refuse_unimplemented_actions(settings, loaded, adapters)
     hub = _build_hub(settings, adapters, clock)
-    enrich, connectors = connector_steps(settings, metrics, clock)
     registry = condition_registry(settings, clock)
-    if registry is not None:  # first: the connectors evaluate what agents registered
-        enrich = [("registered_conditions", registry), *enrich]
+    enrich, connectors = connector_steps(settings, metrics, clock, registry=registry)
     costs_source = cost_report_source(settings)  # kelpie serve only: reads with the admin key
     tokens = None
     if traces.enabled and traces.token_file is not None and settings.hub is None:
@@ -2571,6 +2570,7 @@ def connector_steps(
     metrics: Metrics,
     clock: Callable[[], datetime],
     network: bool = True,
+    registry: ConditionRegistry | None = None,
 ) -> tuple[list[tuple[str, Callable[[Snapshot], Snapshot]]], list[ActionConnector]]:
     """Connector steps (human tasks; GitHub PR/CI conditions and block conditions; with
     ``[connectors.github.ci]`` recent builds and the CI quota) and the connectors that can
@@ -2578,6 +2578,13 @@ def connector_steps(
     (task_status, human tasks) are returned."""
     # task_status conditions need nothing but the board (dispatch gate, rule 12).
     steps: list[tuple[str, Callable[[Snapshot], Snapshot]]] = [("task_status", check_task_status)]
+    # First: the connectors evaluate what agents registered (POST /conditions). kelpie why
+    # and the report read the registrations kelpie serve keeps, never changing them.
+    db = settings.db_path
+    if registry is None and settings.conditions.enabled and db is not None and db.exists():
+        registry = ConditionRegistry(settings.conditions, db, clock, readonly=True)
+    if registry is not None:
+        steps.insert(0, ("registered_conditions", registry))
     if settings.human_tasks is not None and settings.human_tasks.enabled:
         steps.append(("human_tasks", HumanTaskConnector(settings.human_tasks.block_patterns)))
     if not network:
