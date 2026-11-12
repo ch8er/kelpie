@@ -10,12 +10,25 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ### Added
 
+- The Grafana dashboard links to traces in Langfuse (#455). Set the new **Langfuse traces
+  URL** variable to your project's traces page, and the "Traces in Langfuse" dashboard
+  link and the trace panels' links open it. The variable is empty by default; see
+  docs/dashboard.md.
 - Multi-host: `kelpie agent`'s OTLP relay forwards Claude Code's cost and token metrics
   (`/v1/metrics`) to the hub under the agent's token, as it does spans; the hub ingests
   them with `/v1/metrics`' checks and puts every point's session and task in the agent's
   namespace. Trace and metric exports share one budget of two in flight per agent (more
   get 503 with `Retry-After`), half of ingest's default decode slots.
   `POST /conditions` stays single-host.
+- Delegation under `[hub]` (#347): a `delegate` action crosses the wire to the
+  `kelpie agent` whose board holds the task, and the agent's adapter makes the card
+  (Hermes: `hermes kanban create`). The card is checked on the wire (an operator profile
+  name; exactly a title, body and key within size limits, the body ending with its key
+  line), names the task in the agent's own ids, and its id comes back in the agent's
+  namespace so delegation verifies the fix on the merged board. The startup refusal of
+  delegation with `[hub]` is gone; a `delegate_to` board naming an agent the hub does not
+  know, or a bare adapter name, is refused instead. `[agent] actions` without `delegate`
+  turns cards off on that host.
 - Hermes makes WIP commits (#399, option 1): `checkpoints` in `act` mode commits a dirty
   worktree locally on the task branch after its session ended, and never pushes. Git runs
   with a fixed environment (no global or system config, no hooks, no signing, a fixed
@@ -251,6 +264,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
   ledger filled. It now keeps an index by fingerprint and subject (#457). A tick with about
   19,000 actions on a synthetic 2,000-task farm went from 16 s to about 1 s. A per-tick
   time budget test on that farm (`tests/perf/`) guards it.
+- While host resources cannot be read (Prometheus down, unreachable or refusing the
+  token), rule 7's disk, memory, load, process and heavy-task alerts that are already open
+  stay open instead of resolving as "no recent reading any more" next to the "host checks
+  are blind" warning. Once readings are back, each resolves or carries on as its reading
+  says (#454). Rules may define `holds(state_id, snapshot)` to keep a state they cannot
+  see open.
 - Docs: the Hermes quickstart names the rules that can act on Hermes (it said only `stop`
   existed), the OpenClaw quickstart's doctor legend includes WARN, the multi-host
   check says when `kelpie_agent_up` turns 1, and the Hermes README's `human_decisions`

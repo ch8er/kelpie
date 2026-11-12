@@ -608,7 +608,7 @@ them into `Resource` readings per host. Works the same for a laptop, a cloud VM 
 - [x] Disk, memory, load and process count per host
 - [x] PromQL queries configurable
 - [x] Prometheus unavailability degrades gracefully (rule sees no data, alert once): a warning is logged once per cause, `kelpie_resource_read_failures_total` counts it, and rule 7 alerts once per cause that the host checks are blind (#371; fixture `03-resources-unreadable.yaml`)
-- [ ] While host resources cannot be read (`Snapshot.resources_failure`), open disk, memory and load states stay open instead of resolving as "no recent reading any more" next to the blind warning
+- [x] While host resources cannot be read (`Snapshot.resources_failure`), open disk, memory and load states stay open instead of resolving as "no recent reading any more" next to the blind warning (rule hook `holds`, #454)
 
 ### connectors: GitHub PR and CI
 labels: P0, week-2, area:connectors
@@ -668,7 +668,7 @@ open in Langfuse.
 - [x] `/metrics`: idle time per role: `kelpie_role_idle_seconds_total` (agent-seconds idle, tick to tick, gaps over 10 minutes or 3 intervals not counted), with a dashboard panel (#381)
 - [x] `/metrics`: idle agents per role (count)
 - [x] Grafana dashboard JSON provisioned by docker compose
-- [ ] Dashboard links to traces in Langfuse when configured (not started)
+- [x] Dashboard links to traces in Langfuse when configured (a "Langfuse traces URL" variable, empty by default; the dashboard link and the trace panels' links open it, #455)
 
 ### core: budgets and spend — thresholds, burn-rate forecast, spend sources
 labels: P0, week-2, area:core
@@ -967,11 +967,11 @@ plan lists there (token optimization, throughput metrics, 10 conversations).
 ### actions: delegate a problem to the operator agent, verify the fix, tell the person
 labels: P1, area:core
 Design in docs/plan.md ("Delegation to an operator agent"). Built from 2026-11-12 on the
-owner's go (#347): Hermes first; GitHub issue and Claude Code cards and `[hub]` are left.
+owner's go (#347): Hermes first, also under `[hub]`; GitHub issue and Claude Code cards are left.
 
 **Acceptance criteria**
 - [x] Problem classes (agent may / human only / Kelpie itself) as config data, empty default; severity decides when the person hears (critical always at once; warning delegated only when its class allows; notice never delegated) (`[engine.rules.delegation] classes`, per rule or `<rule>.<kind>`; some rules fixed to human or Kelpie; #347 parts 1 and 3)
-- [ ] `delegate` action through the adapters: a card on the operator's queue (Hermes `kanban create --assignee`, GitHub issue, Claude Code task) with facts, quoted agent text as data, "done when", fingerprint and a fixed how-to-handle block; `delegate_to` per board (Hermes done, #347 part 2; GitHub issue and Claude Code task cards, and `[hub]`, not yet)
+- [ ] `delegate` action through the adapters: a card on the operator's queue (Hermes `kanban create --assignee`, GitHub issue, Claude Code task) with facts, quoted agent text as data, "done when", fingerprint and a fixed how-to-handle block; `delegate_to` per board (Hermes done, #347 part 2, also on a `kelpie agent` under `[hub]`; GitHub issue and Claude Code task cards not yet)
 - [x] Verification by Kelpie's own condition with a hold period; "fixed, verified", "agent says fixed, still broken" and "not fixed, yours now" messages; one message on hand-off (part 3: the engine holds the problem's alerts back while the operator has it)
 - [x] Loop guards: one open card per fingerprint, at most two attempts then the person and a cooldown, no delegation about delegation cards or the operator's own tasks, same-incident window after a fix, hourly and daily limits, circuit breaker on failed verifications, pick-up and finish deadlines (parts 1 and 3)
 - [x] Off by default; observe → suggest ("would delegate") → act; act-checklist gate; the operator's tokens on Kelpie cards in the report (part 4: the "Delegation to operator agents" section)

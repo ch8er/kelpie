@@ -1255,7 +1255,14 @@
           "unit": "short"
         },
         "overrides": []
-      }
+      },
+      "links": [
+        {
+          "title": "Traces in Langfuse",
+          "url": "${langfuse}",
+          "targetBlank": true
+        }
+      ]
     },
     {
       "id": 32,
@@ -1368,7 +1375,14 @@
           "unit": "short"
         },
         "overrides": []
-      }
+      },
+      "links": [
+        {
+          "title": "Traces in Langfuse",
+          "url": "${langfuse}",
+          "targetBlank": true
+        }
+      ]
     },
     {
       "id": 35,
@@ -1451,7 +1465,14 @@
         },
         "overrides": []
       },
-      "description": "Trailing-hour increase; a series appears with its first event."
+      "description": "Trailing-hour increase; a series appears with its first event.",
+      "links": [
+        {
+          "title": "Traces in Langfuse",
+          "url": "${langfuse}",
+          "targetBlank": true
+        }
+      ]
     },
     {
       "id": 37,
@@ -1501,7 +1522,14 @@
           "unit": "short"
         },
         "overrides": []
-      }
+      },
+      "links": [
+        {
+          "title": "Traces in Langfuse",
+          "url": "${langfuse}",
+          "targetBlank": true
+        }
+      ]
     },
     {
       "id": 38,
@@ -2917,9 +2945,35 @@
         },
         "sort": 1,
         "description": "node_exporter targets, for the textfile metrics (directory sizes, toolchain, processes)."
+      },
+      {
+        "name": "langfuse",
+        "label": "Langfuse traces URL",
+        "type": "textbox",
+        "query": "",
+        "current": {
+          "text": "",
+          "value": ""
+        },
+        "hide": 0,
+        "description": "Your Langfuse project's traces page (e.g. https://langfuse.example/project/<id>/traces), when [[traces.forward]] sends spans there. Until it is set, the Langfuse links open this dashboard again. Set it here for this view, with &var-langfuse=<url> in the dashboard URL, or as this variable's default in deploy/grafana/dashboards/kelpie.json."
       }
     ]
   },
+  "links": [
+    {
+      "title": "Traces in Langfuse",
+      "type": "link",
+      "url": "${langfuse}",
+      "targetBlank": true,
+      "icon": "external link",
+      "tooltip": "Open the traces Kelpie forwards to Langfuse (set the Langfuse traces URL variable first)",
+      "asDropdown": false,
+      "includeVars": false,
+      "keepTime": false,
+      "tags": []
+    }
+  ],
   "annotations": {
     "list": []
   }

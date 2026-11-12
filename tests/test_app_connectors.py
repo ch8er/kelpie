@@ -426,20 +426,42 @@ def test_draft_pr_wip_commits_are_warned_about_on_hermes(
     assert "never pushes" not in caplog.text
 
 
-def test_delegation_is_refused_on_a_hub(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A hub's boards are the agents': delegation is not supported there yet (#347)."""
+def test_delegation_runs_on_a_hub(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, tmp_db: Path
+) -> None:
+    """With [hub] a board is an agent's, ``<agent>/<adapter>`` (#347): delegation starts,
+    and a board naming an agent the hub does not know, an adapter Kelpie has not, or an
+    adapter without its agent is refused (it could never delegate)."""
     from kelpie.app import ConfigError
 
     monkeypatch.setenv("GITHUB_TOKEN", TOKEN)
     monkeypatch.setenv("KELPIE_TEST_AGENT_TOKEN", TOKEN)
-    hub = CONFIG + (
-        f'[hub]\nlisten = "127.0.0.1:{free_port()}"\nallow_plain_http = true\n'
-        '[[hub.agents]]\nname = "laptop"\ntoken_env = "KELPIE_TEST_AGENT_TOKEN"\n'
-        '[engine.rules.delegation]\nclasses = { orphan_status = "agent" }\n'
-        'delegate_to = { "laptop/hermes" = "ops-1" }\n'
+
+    def hub(board: str) -> str:
+        return CONFIG + (
+            f'[hub]\nlisten = "127.0.0.1:{free_port()}"\nallow_plain_http = true\n'
+            '[[hub.agents]]\nname = "laptop"\ntoken_env = "KELPIE_TEST_AGENT_TOKEN"\n'
+            '[engine.rules.delegation]\nclasses = { orphan_status = "agent" }\n'
+            f'delegate_to = {{ "{board}" = "ops-1" }}\n'
+        )
+
+    build_app(load_settings(write(tmp_path, hub("laptop/hermes")))).close()
+    build_app(load_settings(write(tmp_path, hub("ops-board")))).close()  # a named board
+    for board in ("vm-9/hermes", "laptop/nope", "hermes"):
+        with pytest.raises(ConfigError, match="delegate_to"):
+            build_app(load_settings(write(tmp_path, hub(board))))
+    # An adapter the hub does not take from that agent could never delegate either.
+    narrowed = hub("laptop/hermes").replace(
+        'token_env = "KELPIE_TEST_AGENT_TOKEN"\n',
+        'token_env = "KELPIE_TEST_AGENT_TOKEN"\nadapters = ["claude-code"]\n',
     )
-    with pytest.raises(ConfigError, match="delegation is not supported there yet"):
-        build_app(load_settings(write(tmp_path, hub)))
+    with pytest.raises(ConfigError, match="delegate_to"):
+        build_app(load_settings(write(tmp_path, narrowed)))
+    # An operator a Hermes board on an agent would refuse at act time is refused now.
+    for who in ("user", "kelpie", "Bad Name", "none"):
+        text = hub("laptop/hermes").replace('"ops-1"', f'"{who}"')
+        with pytest.raises(ConfigError, match="delegate_to"):
+            build_app(load_settings(write(tmp_path, text)))
 
 
 def test_a_person_cannot_be_the_operator(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -59,6 +59,10 @@ not a second alert.
 (``Snapshot.resources_failure``: Prometheus down, unreachable, refusing the token), one
 ``warning`` says that every host check is blind, with the cause: a lasting state announced
 once per cause (a new cause is a "changed" notice), resolved when readings come back.
+Meanwhile the host states already open (disk, memory, load, processes, heavy tasks) stay
+open (``holds``): unseen is not resolved, so no "no recent reading any more" notice goes
+out next to the blind warning. Once readings are back, each resolves or carries on as its
+reading says. Provider quota and credential states are read elsewhere and are not held.
 
 Every alert is about a lasting state: a stable ``state`` and ``key`` per resource, so the
 engine alerts when it opens, when it gets worse and when it ends, not on every tick.
@@ -116,6 +120,9 @@ DEFAULT_THRESHOLDS: Mapping[ResourceKind, Thresholds] = {
     ResourceKind.CPU: Thresholds(None, None),  # off: load covers overload
     ResourceKind.PROCESSES: Thresholds(0.80, 0.95),
 }
+# Kinds read from the hosts (Prometheus): blind together while host resources cannot be read.
+HOST_KINDS = frozenset(DEFAULT_THRESHOLDS)
+_PROVIDER_KINDS = frozenset({ResourceKind.LLM_QUOTA, ResourceKind.AUTH, ResourceKind.CI_MINUTES})
 # Kinds where a heavy task adds to the pressure.
 PRESSURE_KINDS = frozenset({ResourceKind.MEMORY, ResourceKind.LOAD, ResourceKind.CPU})
 _RANK = {Severity.INFO: 0, Severity.WARNING: 1, Severity.CRITICAL: 2}
@@ -315,6 +322,30 @@ class Resources:
                 **alert_params(f"Disk {r.name} fills up in about {_hours(c.hours)}"),
             },
         )
+
+    def holds(self, state_id: str, snapshot: Snapshot) -> bool:
+        """While host resources cannot be read, an open host state stays open: the rule
+        cannot tell whether it cleared. That includes a host's heavy-task state, on purpose:
+        it needs the host's pressure, which cannot be seen. The blind warning itself and
+        provider states are not held. A held state is not refreshed, so once readings are
+        back it resolves on its first reading under the threshold."""
+        if snapshot.resources_failure is None or state_id == SOURCE_STATE:
+            return False
+        rule, _, rest = state_id.partition(":")
+        if rule != NAME:
+            return False
+        head, _, tail = rest.partition(":")
+        if head in _PROVIDER_KINDS:
+            # A quota or credential, even one named "heavy" (a host named after a provider
+            # kind is ambiguous: its heavy state resolves as before, unheld).
+            return False
+        if tail == "heavy" or rest == "heavy:unplaced":
+            return True
+        try:
+            kind = ResourceKind(head)
+        except ValueError:
+            return False
+        return kind in HOST_KINDS
 
     def resolved(self, state_id: str, snapshot: Snapshot) -> str | None:
         """What a host resource reads now that its alert resolves (the engine's notice):
