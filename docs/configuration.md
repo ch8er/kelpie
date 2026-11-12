@@ -1054,8 +1054,13 @@ while Kelpie watched and up to the last tick that saw it (a gap of up to 5 minut
 the next change counts as one tick), and infers the rest as before, so a downtime is
 never filled with the last status seen. A board not read for some ticks that comes back
 unchanged counts as unchanged. On a multi-host farm the hub records the merged boards.
-Rules never read these rows; the daily report's stages do ([report](#report)). Task ids
-are assumed unique across adapters, as everywhere in Kelpie.
+The daily report's stages read them ([report](#report)). Rules see the recent part as
+`Snapshot.status_history`: per task, the changes of the last 7 days and the status the
+window began in, at most 32, kept in memory by `kelpie serve` and read back from the
+database at start (helpers in `kelpie.rules._history`: time-to-accept, bounces back from
+review or done). The history starts when Kelpie started watching, so a reading over it is
+a lower bound; `kelpie why` and `kelpie run-once` carry none. Task ids are assumed unique
+across adapters, as everywhere in Kelpie.
 
 ## [snooze]
 

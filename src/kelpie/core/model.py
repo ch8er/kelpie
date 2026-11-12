@@ -1083,6 +1083,19 @@ def slept(
 
 
 @dataclass(frozen=True, slots=True)
+class StatusStep:
+    """A task's status as Kelpie observed it change (#157), for rules: ``status`` from
+    ``at`` on (when the change most likely happened, see
+    :func:`kelpie.core.transitions.changed_at`), after ``previous`` (None: the first
+    sighting, at the board's own ``status_since``)."""
+
+    task_id: str
+    at: datetime
+    status: Status
+    previous: Status | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class Snapshot:
     """Everything a rule may look at, captured at ``now``."""
 
@@ -1152,6 +1165,12 @@ class Snapshot:
     # opens it on, so a reading near the threshold does not flap (hysteresis). Observe-mode
     # states count too: observe shadows what act would do.
     open_states: tuple[str, ...] = ()
+    # Recent status changes Kelpie observed per task, oldest first (the engine sets this
+    # from its transition recorder when one is configured; a fixture may carry its own):
+    # time-to-accept, bounce counts (``kelpie.rules._history``). Boards keep no history, so
+    # it starts when Kelpie started watching; empty without a recorder (``kelpie why``,
+    # ``run-once``).
+    status_history: tuple[StatusStep, ...] = ()
     # Snoozes by task id, filled when the snapshot is assembled on the server (never from an
     # agent's board): the stored ones (``kelpie snooze``, chat) and ``until:`` markers in
     # block reasons, a stored one winning over a marker. Active ones and those that expired
@@ -1208,6 +1227,10 @@ class Snapshot:
     def sessions_for(self, task_id: str) -> tuple[Session, ...]:
         return self._lookups().sessions.get(task_id, ())
 
+    def history_of(self, task_id: str) -> tuple[StatusStep, ...]:
+        """The task's recorded status changes, oldest first (``status_history``)."""
+        return self._lookups().history.get(task_id, ())
+
     def spans_for_session(self, session_id: str) -> tuple[Span, ...]:
         index = self._spans_by_session
         if index is None:
@@ -1238,6 +1261,7 @@ class _Index:
     builds: dict[str, Build]
     dependents: dict[str, tuple[Task, ...]]  # by the id they depend on, in task order
     sessions: dict[str, tuple[Session, ...]]  # by task id, in session order
+    history: dict[str, tuple[StatusStep, ...]]  # by task id, oldest first
 
     @classmethod
     def of(cls, snapshot: Snapshot) -> _Index:
@@ -1251,7 +1275,11 @@ class _Index:
         sessions: dict[str, list[Session]] = {}
         for s in snapshot.sessions:
             sessions.setdefault(s.task_id, []).append(s)
+        history: dict[str, list[StatusStep]] = {}
+        for step in snapshot.status_history:
+            history.setdefault(step.task_id, []).append(step)
         return cls(
+            history={k: tuple(sorted(v, key=lambda s: s.at)) for k, v in history.items()},
             tasks=_first_by_id(snapshot.tasks),
             owners=_first_by_id(snapshot.owners),
             conditions=_first_by_id(snapshot.conditions),

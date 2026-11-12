@@ -14,6 +14,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
   rate-limit errors) covers, ending at the reading's time (#456). Rule 7 counts those
   events only when the window is unknown or no longer than `rate_limit_window`, so a
   week's count is not reported as "hit its limit N times in 24h".
+- Rules see each task's recent observed status history (#462): `Snapshot.status_history`,
+  the status changes `kelpie serve` records (#157) over the last 7 days per task (at most
+  32, with the status the window began in), read back from the database at start.
+  `kelpie.rules._history` reads time-to-accept and bounces back from review or done from
+  it. No rule uses it yet; fixtures may carry their own `status_history`.
 - The GitHub CI connector carries out rule 9's fail-fast `cancel_build` (#450): a queued
   or running `push` or `pull_request` run on a PR commit whose cheap required check
   already failed is cancelled, under the same `[connectors.github.ci]` cancel policy as
