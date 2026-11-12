@@ -185,6 +185,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ### Changed
 
+- Internal, no behaviour change (#248 D8, D13): one copy of GitHub's time parsing in the
+  CI connector (`ci_runs.parse_time`) and of the glob test of budgets and prices
+  (`core.prices.is_glob`).
 - `kelpie doctor` "PR blocks have conditions" warns only about blocks that read as waiting
   on the PR they name (its merge, review or CI), not about every mention (#417): a PR named
   only as context, or a block whose wording says it waits on a person, a decision or a

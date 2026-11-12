@@ -192,7 +192,7 @@ def canonical_model(model: str) -> str:
     return _VERSION.sub("", model_id(model))
 
 
-def _is_glob(pattern: str) -> bool:
+def is_glob(pattern: str) -> bool:
     return any(c in pattern for c in "*?[")
 
 
@@ -220,8 +220,8 @@ class PriceTable:
     _rows: Mapping[str, tuple[DefaultPrice, ...]] = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
-        exact = [(p, v) for p, v in self.entries if not _is_glob(p)]
-        globs = tuple((p, v) for p, v in self.entries if _is_glob(p))
+        exact = [(p, v) for p, v in self.entries if not is_glob(p)]
+        globs = tuple((p, v) for p, v in self.entries if is_glob(p))
         rows: dict[str, list[DefaultPrice]] = {}
         for r in self.defaults:
             for name in (r.model, *r.aliases):
@@ -269,7 +269,7 @@ class PriceTable:
     def named_price(self, model: str | None, on: date | None = None) -> Price | None:
         """Like :meth:`price_for` without ``[prices]`` globs: a price set for this very
         model or its family, in ``[prices]`` or the default table."""
-        if not model or _is_glob(model):
+        if not model or is_glob(model):
             return None
         found = self.configured_price(model, globs=False)
         if found is None and (row := self.default_for(model, on)) is not None:
