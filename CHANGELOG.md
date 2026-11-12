@@ -10,6 +10,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ### Added
 
+- Delegation to an operator agent, first part (#347): the `delegation` rule and its policy
+  in `[engine.rules.delegation]`: problem classes (`agent`, `human`, `kelpie`) per rule as
+  config data with an empty default, `delegate_to` per board, and the loop guards (one open
+  card per incident, at most two attempts then a cooldown, no delegation about cards or the
+  operator's own tasks, hourly and daily limits, a circuit breaker). Only `warning`
+  problems of an `agent` class are delegated; `critical`, notices, outages and human-only
+  rules never are. The rule asks for a `delegate` action with the card's text (facts, the
+  rule's text quoted as data, what counts as fixed, a fixed how-to-handle block); no
+  adapter carries it out yet, so it stays in observe or suggest. Off by default.
 - `POST /conditions`: an agent registers the condition its task waits for (task id, kind,
   params), off by default (`[conditions] enabled`). On the main listener (loopback by
   default, behind the Host and connection guards), with a bearer token of its own

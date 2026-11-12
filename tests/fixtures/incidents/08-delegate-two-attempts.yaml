@@ -1,0 +1,48 @@
+id: "08-delegate-two-attempts"
+incident: 8
+title: "Delegation: at most two attempts per incident, then the person"
+description: >
+  The operator closed two cards about the block on T-821 today and Kelpie's check still
+  failed both times, so a third card would only loop: none is made (the person has the
+  problem). T-822 had one failed attempt, so it gets its second and last card. T-823 has a
+  card that is still open, so no new card is made for it. T-824 is itself a delegation card
+  (a problem about a card stays with the person).
+rule: delegation
+config:
+  classes: {stale_blocks: agent}
+  delegate_to: {hermes: ops-1}
+  breaker_failures: 5
+snapshot:
+  now: "2026-03-02T16:00:00+00:00"
+  owners:
+    - {id: agent-dev-1, role: dev}
+    - {id: ops-1, role: ops}
+  tasks:
+    - {id: T-821, title: "Cache warmup", status: blocked, status_since: "2026-03-02T08:00:00+00:00", owner_id: agent-dev-1, source: hermes}
+    - {id: T-822, title: "Rate limiter", status: blocked, status_since: "2026-03-02T09:00:00+00:00", owner_id: agent-dev-1, source: hermes}
+    - {id: T-823, title: "Search index", status: blocked, status_since: "2026-03-02T09:00:00+00:00", owner_id: agent-dev-1, source: hermes}
+    - {id: T-824, title: "Kelpie: stale_blocks on T-823: Search index", status: blocked, status_since: "2026-03-02T15:00:00+00:00", owner_id: ops-1, source: hermes}
+  problems:
+    - {id: "stale-block:T-821", rule: stale_blocks, severity: warning, since: "2026-03-02T08:00:00+00:00", opened_at: "2026-03-02T08:30:00+00:00", summary: "T-821 is blocked on a merged PR.", task_id: T-821}
+    - {id: "stale-block:T-822", rule: stale_blocks, severity: warning, since: "2026-03-02T09:00:00+00:00", opened_at: "2026-03-02T09:30:00+00:00", summary: "T-822 is blocked on a merged PR.", task_id: T-822}
+    - {id: "stale-block:T-823", rule: stale_blocks, severity: warning, since: "2026-03-02T09:00:00+00:00", opened_at: "2026-03-02T09:30:00+00:00", summary: "T-823 is blocked on a merged PR.", task_id: T-823}
+    - {id: "stale-block:T-824", rule: stale_blocks, severity: warning, since: "2026-03-02T15:00:00+00:00", opened_at: "2026-03-02T15:30:00+00:00", summary: "T-824 is blocked on a green CI run.", task_id: T-824}
+  delegations:
+    - {problem: "stale-block:T-821", incident: "task:T-821", attempt: 1, kind: card, at: "2026-03-02T09:00:00+00:00", outcome: executed, task_id: T-821, operator: ops-1, card_id: T-831}
+    - {problem: "stale-block:T-821", incident: "task:T-821", attempt: 1, kind: verdict, at: "2026-03-02T11:00:00+00:00", outcome: alerted, task_id: T-821, verdict: still_broken}
+    - {problem: "stale-block:T-821", incident: "task:T-821", attempt: 2, kind: card, at: "2026-03-02T11:00:00+00:00", outcome: executed, task_id: T-821, operator: ops-1, card_id: T-832}
+    - {problem: "stale-block:T-821", incident: "task:T-821", attempt: 2, kind: verdict, at: "2026-03-02T14:00:00+00:00", outcome: alerted, task_id: T-821, verdict: still_broken}
+    - {problem: "stale-block:T-822", incident: "task:T-822", attempt: 1, kind: card, at: "2026-03-02T10:00:00+00:00", outcome: executed, task_id: T-822, operator: ops-1, card_id: T-833}
+    - {problem: "stale-block:T-822", incident: "task:T-822", attempt: 1, kind: verdict, at: "2026-03-02T13:00:00+00:00", outcome: alerted, task_id: T-822, verdict: still_broken}
+    - {problem: "stale-block:T-823", incident: "task:T-823", attempt: 1, kind: card, at: "2026-03-02T15:00:00+00:00", outcome: executed, task_id: T-823, operator: ops-1, card_id: T-824}
+expected_actions:
+  - kind: delegate
+    task_id: T-822
+    params: {attempt: 2, operator: ops-1}
+not_expected_actions:
+  - kind: delegate
+    task_id: T-821
+  - kind: delegate
+    task_id: T-823
+  - kind: delegate
+    task_id: T-824

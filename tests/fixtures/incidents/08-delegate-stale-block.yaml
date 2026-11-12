@@ -1,0 +1,41 @@
+id: "08-delegate-stale-block"
+incident: 8
+title: "Delegation: a block nothing clears is handed to the operator agent"
+description: >
+  A block stayed after its cause was gone and stale_blocks keeps a warning open about it.
+  The farm lists stale_blocks as a problem the operator agent may fix and names ops-1 as the
+  operator of the hermes board, so the problem goes to ops-1 as a card (first attempt) with
+  the facts, the rule's text quoted as data and what counts as fixed. A needs-you item and a
+  disk alert on the same board stay with the person whatever the config says, and a problem
+  about the operator's own task is never handed to it.
+rule: delegation
+config:
+  classes: {stale_blocks: agent, orphan_status: agent}
+  delegate_to: {hermes: ops-1}
+snapshot:
+  now: "2026-03-02T14:00:00+00:00"
+  owners:
+    - {id: agent-dev-1, role: dev}
+    - {id: ops-1, role: ops}
+  tasks:
+    - {id: T-801, title: "Add retry to the sync job", status: blocked, status_since: "2026-03-02T09:00:00+00:00", owner_id: agent-dev-1, source: hermes}
+    - {id: T-802, title: "Pick a pricing tier", status: blocked, status_since: "2026-03-02T09:00:00+00:00", owner_id: agent-dev-1, source: hermes}
+    - {id: T-803, title: "Weekly board sweep", status: blocked, status_since: "2026-03-02T10:00:00+00:00", owner_id: ops-1, source: hermes}
+  problems:
+    - {id: "stale-block:T-801", rule: stale_blocks, severity: warning, since: "2026-03-02T09:00:00+00:00", opened_at: "2026-03-02T11:00:00+00:00", summary: "T-801 is blocked on 'waiting for CI on #4', but CI on #4 is green since 10:10.", task_id: T-801}
+    - {id: "needs-you:T-802", rule: needs_you, severity: warning, since: "2026-03-02T09:00:00+00:00", opened_at: "2026-03-02T11:00:00+00:00", summary: "T-802 waits for a person's decision.", task_id: T-802}
+    - {id: "stale-block:T-803", rule: stale_blocks, severity: warning, since: "2026-03-02T10:00:00+00:00", opened_at: "2026-03-02T11:30:00+00:00", summary: "T-803 is blocked on a merged PR.", task_id: T-803}
+    - {id: "disk:host-a", rule: resources, severity: warning, since: "2026-03-02T12:00:00+00:00", opened_at: "2026-03-02T12:00:00+00:00", summary: "Disk on host-a is 90% full."}
+expected_actions:
+  - kind: delegate
+    task_id: T-801
+    severity: warning
+    reason_contains: "Handed to ops-1 (attempt 1)"
+    params: {problem: "stale-block:T-801", incident: "task:T-801", attempt: 1, operator: ops-1, problem_rule: stale_blocks}
+not_expected_actions:
+  - kind: delegate
+    task_id: T-802
+  - kind: delegate
+    task_id: T-803
+  - kind: delegate
+    params: {problem: "disk:host-a"}

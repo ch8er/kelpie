@@ -189,6 +189,7 @@ is accepted and ignored with a warning. Rules run in the order below.
 | – | `return_causes` | P1 | implemented | `alert`, `comment` | adapter `comment` |
 | – | `output_offenders` | P1 | implemented | `comment`, `alert` | adapter `comment` (Hermes: `hermes kanban comment`) |
 | – | `instruction_bloat` | P1 | implemented | `alert` | alert channel |
+| – | `delegation` | P1 | implemented | `delegate` | an adapter that creates cards (none yet) |
 | – | `unanswered_asks` | P1 | implemented | `alert` | alert channel |
 
 Several rules share these terms:
@@ -855,6 +856,50 @@ split. Kelpie never edits instruction files; the rule only alerts.
 | `max_growth_per_week` | `10000` | integer > 0 | Characters added per week, over the growth window. |
 | `max_tokens_per_day` | `500000` | integer > 0 | Daily read cost that makes a file over `max_chars` worth splitting even when it is stable. |
 | `min_span` | `"1d"` | duration > 0 | Growth is judged only over at least this much history. |
+
+### delegation
+
+Hands a problem Kelpie found to the farm's main agent (the *operator*) as a card on that
+agent's own queue (#347; design in [plan.md](plan.md), "Delegation to an operator agent").
+A problem is an alert state another rule keeps open (an ownerless task, a block nothing
+clears); Kelpie verifies the fix by that rule's own condition, not by the agent's word.
+**Off by default**: nothing is delegated until `classes` lists a rule as `agent` and
+`delegate_to` names an operator for the task's board. It needs a database (`[storage]
+path`, not `":memory:"`): the guards read back what the rule did from the ledger, and the
+problems from the alert states. If that read fails, nothing is delegated that tick.
+
+What is delegated: a problem of a rule listed as `agent`, with severity `warning`, on a task
+whose board has a `delegate_to` operator, that is not the operator's own task, not a
+delegation card and not an outage. A `critical` problem goes to the person at once and is
+not delegated; an `info` (notice) never is. `needs_you`, `resources`, `instruction_bloat`,
+`output_offenders`, `no_progress` and `delegation` itself are human-only, and
+`loop_breaker` and `ci_economy` are Kelpie's own: listing one of them as `agent` is refused.
+
+```toml
+[engine.rules.delegation]
+mode = "observe"                     # observe -> suggest ("would hand ... to ops-1") -> act
+classes = { stale_blocks = "agent", orphan_status = "agent" }
+delegate_to = { hermes = "ops-1" }   # board (a task's source) -> operator profile
+```
+
+| Key | Default | Allowed | Meaning |
+| --- | --- | --- | --- |
+| `classes` | `{}` | rule = `agent` \| `human` \| `kelpie` | Who may fix the problems a rule reports. A rule not listed is `human`. |
+| `delegate_to` | `{}` | board = profile | The operator agent of each board: the adapter name (`hermes`), or `<agent>:<adapter>` on a hub. A board not listed never delegates. |
+| `max_attempts` | `2` | 1 to 2 | Cards per incident (a task, or the problem when it has none) within `same_incident`. |
+| `same_incident` | `"1d"` | duration, > 0 | A card whose check failed, or the problem back within this, counts as another attempt of the same incident. |
+| `cooldown` | `"7d"` | duration, > 0, at most 30d | No new card for an incident given back to the person for this long. |
+| `hold` | `"30m"` | duration, > 0 | How long a fix must stay clear before Kelpie calls it verified. |
+| `pickup_within` | `"1h"` | duration, < `finish_within` | A card nobody picked up by then goes back to the person. |
+| `finish_within` | `"6h"` | duration, > 0 | A card not finished by then goes back to the person. |
+| `max_per_hour` | `3` | integer >= 1 | New cards carried out per hour; the oldest problems go first. |
+| `max_per_day` | `10` | integer >= 1 | New cards carried out per day. |
+| `breaker_failures` | `3` | integer >= 1 | Failed verifications within a day that stop all delegation (the circuit breaker). |
+
+Guards: one open card per incident (a card carried out with no verdict yet); after
+`max_attempts` failed cards, or once the incident was given back to the person, no new
+card within `cooldown`; no delegation about a delegation card or the operator's own tasks.
+Each card is carried out once per problem and attempt (`Action.once`).
 
 ### unanswered_asks
 

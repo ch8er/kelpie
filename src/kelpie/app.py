@@ -86,6 +86,9 @@ from kelpie.core.conditions import (
     widen,
 )
 from kelpie.core.config import EngineConfig, Mode
+from kelpie.core.delegation import RULE as DELEGATION
+from kelpie.core.delegation import Policy
+from kelpie.core.delegation import history as delegation_history
 from kelpie.core.engine import Engine
 from kelpie.core.host_sleep import SleepWatch
 from kelpie.core.ledger import LedgerStore, MemoryLedgerStore
@@ -2162,6 +2165,7 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
             instructions=instruction_watch(settings, adapters),
         )
         loop = ControlLoop(engine, source, metrics, housekeeping=ledger_retention.maybe_start)
+        _with_delegation(loop, loaded, store)
         app = App(
             settings,
             loaded,
@@ -2255,6 +2259,7 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
         metrics,
         housekeeping=_both(retention.maybe_start, ledger_retention.maybe_start),
     )
+    _with_delegation(loop, loaded, store)
     alerts = _start_alerts(settings, engine, metrics, store, clock, loop)
     if hub is not None:
         # A span whose ids no agent token vouches for could be forged into any host's
@@ -2473,6 +2478,41 @@ def _answer_runner(
             '[alerts] answer buttons need a database: set [storage] path (not ":memory:")'
         )
     return AnswerRunner(store, engine, answer_boards(settings), settings.engine.dry_run, clock)
+
+
+def delegation_policy(loaded: LoadedRules) -> Policy | None:
+    """The delegation policy of the loaded rules (#347), or None when nothing is delegated."""
+    rule = next((r for r in loaded.rules if r.name == DELEGATION), None)
+    policy = getattr(rule, "policy", None)
+    return policy if isinstance(policy, Policy) and policy.enabled else None
+
+
+def _with_delegation(loop: ControlLoop, loaded: LoadedRules, store: LedgerStore) -> None:
+    """Fill ``Snapshot.problems``, ``resolved_problems`` and ``delegations`` from the state
+    store and the ledger while a delegation policy is on (#347). A failed read leaves no
+    problems, so nothing is delegated on a history Kelpie could not read (fails closed)."""
+    policy = delegation_policy(loaded)
+    if policy is None:
+        return
+    if not isinstance(store, SqliteLedgerStore):
+        raise ConfigError(
+            '[engine.rules.delegation] needs a database: set [storage] path (not ":memory:")'
+        )
+    source = loop.snapshot_source
+
+    def read() -> Snapshot:
+        snapshot = source()
+        after = snapshot.now - policy.history
+        try:
+            problems, resolved, events = delegation_history(
+                store.open_states(), store.closed_states(after), store.by_rule(DELEGATION, after)
+            )
+        except Exception as exc:
+            log.error("delegation history not read: %s; nothing is delegated", type(exc).__name__)
+            return replace(snapshot, problems=(), resolved_problems=(), delegations=())
+        return replace(snapshot, problems=problems, resolved_problems=resolved, delegations=events)
+
+    loop.snapshot_source = read
 
 
 def _with_answers(
