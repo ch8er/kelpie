@@ -11,10 +11,12 @@ from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, NamedTuple
 
 from kelpie import __version__
+from kelpie.core.limits import ProviderLimits, provider_limits
 from kelpie.core.model import Reconciliation, ResourceKind, Session, Snapshot, Status
 from kelpie.core.stages import STAGES, UNKNOWN_ROLE, live_stage, rework_role, task_roles
 from kelpie.rules._tasks import is_live
 from kelpie.rules.bottlenecks import RoleLoad, role_loads
+from kelpie.traces.scope import MAX_FUTURE
 
 if TYPE_CHECKING:
     from kelpie.app import RuleStatus
@@ -44,6 +46,9 @@ def _labels(**labels: str) -> str:
         return ""
     return "{" + ",".join(f'{k}="{_escape(v)}"' for k, v in labels.items()) + "}"
 
+
+LIMITS_WINDOW = timedelta(hours=24)  # limit hits from traces: the last day of the snapshot
+MAX_LIMIT_PROVIDERS = 20  # provider names come from span attributes: bounded series
 
 # A task's board as a label value: None (no label) unless boards are configured, then the
 # board's configured name, or "" for a task on no configured board (#283).
@@ -182,6 +187,14 @@ class Metrics:
         self.provider_status: dict[str, ProviderStatus] = {}
         self.provider_failures: Counter[tuple[str, str]] = Counter()
         self.provider_hits: Counter[str] = Counter()
+        # Limit hits counted from traces, per provider, over the last LIMITS_WINDOW of the
+        # tick's spans, and the concurrency they suggest (kelpie.core.limits); set by the
+        # app with the provider of a model (SpendConfig.provider_for).
+        self.limit_provider: Callable[[str | None], str | None] | None = None
+        self.trace_limits: tuple[ProviderLimits, ...] = ()
+        self.metrics_requests: Counter[str] = Counter()  # POST /v1/metrics, by status code
+        self.metric_points_total: Counter[str] = Counter()  # stored | ignored
+        self.metric_points_rejected: Counter[str] = Counter()  # reason
         self.alert_channels: tuple[str, ...] = ()
         self.alerts_sent: Counter[str] = Counter()
         self.alerts_failed: Counter[tuple[str, str]] = Counter()
@@ -242,6 +255,24 @@ class Metrics:
     def spans_received(self, kind: str, count: int) -> None:
         with self._lock:
             self.spans_received_total[kind] += count
+
+    def metrics_request(self, code: int) -> None:
+        """A ``POST /v1/metrics`` answered with ``code``."""
+        with self._lock:
+            self.metrics_requests[str(code)] += 1
+
+    def metric_points(self, stored: int, ignored: int, rejected: Mapping[str, int]) -> None:
+        """One ``POST /v1/metrics`` export (:mod:`kelpie.traces.metrics`)."""
+        with self._lock:
+            self.metric_points_total["stored"] += stored
+            self.metric_points_total["ignored"] += ignored
+            for reason, n in rejected.items():
+                self.metric_points_rejected[reason] += n
+
+    def set_limit_provider(self, provider_for: Callable[[str | None], str | None]) -> None:
+        """Turn on limit hits from traces: ``provider_for`` names a model's provider."""
+        with self._lock:
+            self.limit_provider = provider_for
 
     def spans_rejected(self, reason: str, count: int) -> None:
         with self._lock:
@@ -459,6 +490,14 @@ class Metrics:
             self.idle_step = max(MAX_IDLE_STEP, IDLE_STEP_TICKS * engine.config.interval)
             if snapshot is not None:
                 self._fleet(snapshot)
+                if self.limit_provider is not None:
+                    found = provider_limits(
+                        snapshot.spans,
+                        snapshot.now - LIMITS_WINDOW,
+                        snapshot.now + MAX_FUTURE,
+                        self.limit_provider,
+                    )
+                    self.trace_limits = found[:MAX_LIMIT_PROVIDERS]
             self.ticks += 1
             self.tick_seconds += seconds
             self.last_tick = time.time()
@@ -875,6 +914,8 @@ class Metrics:
                 self._render_resources(metric)
             if self.providers:
                 self._render_providers(metric)
+            if self.limit_provider is not None:
+                self._render_trace_limits(metric)
             if self.alert_channels:
                 self._render_alerts(metric)
             if self.chat_channels:
@@ -1088,6 +1129,30 @@ class Metrics:
                 f"kelpie_llm_provider_limit_hits_total{_labels(provider=n)} "
                 f"{self.provider_hits.get(n, 0)}"
                 for n in self.providers
+            ],
+        )
+
+    def _render_trace_limits(self, metric: Callable[[str, str, str, Iterable[str]], None]) -> None:
+        metric(
+            "kelpie_llm_provider_trace_limit_hits",
+            "gauge",
+            "Model calls a provider refused for a limit (HTTP 429, a rate-limit error type), "
+            "counted from traces over the last 24 hours, by provider.",
+            [
+                f"kelpie_llm_provider_trace_limit_hits{_labels(provider=p.provider)} {p.hits}"
+                for p in self.trace_limits
+            ],
+        )
+        metric(
+            "kelpie_llm_provider_suggested_concurrency",
+            "gauge",
+            "Sessions to run at once on a provider: below the lowest concurrency that hit its "
+            "limit in the last 24 hours (a suggestion; Kelpie never changes it).",
+            [
+                f"kelpie_llm_provider_suggested_concurrency{_labels(provider=p.provider)} "
+                f"{p.suggested}"
+                for p in self.trace_limits
+                if p.suggested is not None
             ],
         )
 
@@ -1360,6 +1425,34 @@ class Metrics:
             [
                 f"kelpie_spans_received_total{_labels(kind=k)} {n}"
                 for k, n in sorted(self.spans_received_total.items())
+            ],
+        )
+        metric(
+            "kelpie_metrics_requests_total",
+            "counter",
+            "POST /v1/metrics requests (Claude Code's cost and token metrics), by status code.",
+            [
+                f"kelpie_metrics_requests_total{_labels(code=c)} {n}"
+                for c, n in sorted(self.metrics_requests.items())
+            ],
+        )
+        metric(
+            "kelpie_metric_points_total",
+            "counter",
+            "Data points from POST /v1/metrics: stored (Claude Code's cost and token "
+            "metrics) or ignored (other metrics, never stored).",
+            [
+                f"kelpie_metric_points_total{_labels(outcome=k)} {n}"
+                for k, n in sorted(self.metric_points_total.items())
+            ],
+        )
+        metric(
+            "kelpie_metric_points_rejected_total",
+            "counter",
+            "Data points of Claude Code's metrics rejected from POST /v1/metrics, by reason.",
+            [
+                f"kelpie_metric_points_rejected_total{_labels(reason=r)} {n}"
+                for r, n in sorted(self.metric_points_rejected.items())
             ],
         )
         metric(

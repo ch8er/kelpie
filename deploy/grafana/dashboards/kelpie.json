@@ -1292,7 +1292,16 @@
           },
           "refId": "A",
           "expr": "sum by (code) (rate(kelpie_traces_requests_total[5m])) * 60",
-          "legendFormat": "{{code}}"
+          "legendFormat": "traces {{code}}"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "kelpie-prometheus"
+          },
+          "refId": "B",
+          "expr": "sum by (code) (rate(kelpie_metrics_requests_total[5m])) * 60",
+          "legendFormat": "metrics {{code}}"
         }
       ],
       "fieldConfig": {
@@ -1334,6 +1343,24 @@
           "refId": "B",
           "expr": "sum by (reason) (rate(kelpie_spans_rejected_total[5m])) * 60",
           "legendFormat": "rejected {{reason}}"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "kelpie-prometheus"
+          },
+          "refId": "C",
+          "expr": "sum by (outcome) (rate(kelpie_metric_points_total[5m])) * 60",
+          "legendFormat": "metric points {{outcome}}"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "kelpie-prometheus"
+          },
+          "refId": "D",
+          "expr": "sum by (reason) (rate(kelpie_metric_points_rejected_total[5m])) * 60",
+          "legendFormat": "metric points rejected {{reason}}"
         }
       ],
       "fieldConfig": {
@@ -1726,7 +1753,7 @@
     {
       "id": 45,
       "type": "timeseries",
-      "title": "Limit hits and probe failures per hour",
+      "title": "Limit hits, probe failures and suggested concurrency",
       "datasource": {
         "type": "prometheus",
         "uid": "kelpie-prometheus"
@@ -1755,6 +1782,24 @@
           "refId": "B",
           "expr": "sum by (provider, cause) (increase(kelpie_llm_provider_probe_failures_total[1h]))",
           "legendFormat": "probe failures {{provider}} / {{cause}}"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "kelpie-prometheus"
+          },
+          "refId": "C",
+          "expr": "max by (provider) (kelpie_llm_provider_trace_limit_hits)",
+          "legendFormat": "limit hits in traces, last 24h {{provider}}"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "kelpie-prometheus"
+          },
+          "refId": "D",
+          "expr": "max by (provider) (kelpie_llm_provider_suggested_concurrency)",
+          "legendFormat": "suggested concurrency {{provider}}"
         }
       ],
       "fieldConfig": {
@@ -1763,7 +1808,7 @@
         },
         "overrides": []
       },
-      "description": "Trailing-hour increase; a series appears with its first event."
+      "description": "Probe limit hits and failures: trailing-hour increase; a series appears with its first event. Limit hits in traces: model calls refused for a limit over the last 24 hours. Suggested concurrency: below the lowest that hit the limit (a suggestion; Kelpie never changes it)."
     },
     {
       "id": 46,

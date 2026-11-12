@@ -35,6 +35,7 @@ from typing import Protocol
 
 from kelpie.core.model import Span
 from kelpie.core.spans import SpanStore
+from kelpie.traces import metrics as otlp_metrics
 from kelpie.traces import otlp
 from kelpie.traces.auth import TokenCheck, TokenFile
 from kelpie.traces.scope import MAX_FUTURE, ScopeGuard, stamp
@@ -179,12 +180,26 @@ class TraceIngest:
                 hook()
         return found
 
+    def handle_metrics(self, headers: Headers, read: Callable[[int], bytes]) -> Reply:
+        """Ingest one ``POST /v1/metrics`` export (Claude Code's cost and token metrics,
+        :mod:`kelpie.traces.metrics`): the same checks as a trace export, before a byte of
+        the body is read. Only the shared token (or none, when none is needed) may send
+        metrics: a per-agent token's scope is its own sessions' spans, and a metric point
+        names a session no span may have shown yet, so it is refused (403)."""
+        reply = self._handle(headers, read, False, None, metrics=True)
+        hook = getattr(self.observer, "metrics_request", None)
+        if callable(hook):
+            hook(reply.status)
+        return reply
+
     def _handle(
         self,
         headers: Headers,
         read: Callable[[int], bytes],
         authenticated: bool,
         rewrite: Callable[[Span], Span] | None,
+        *,
+        metrics: bool = False,
     ) -> Reply:
         media = (headers.get("Content-Type") or "").split(";")[0].strip().lower()
         # Errors before the media type is known are answered in JSON.
@@ -204,6 +219,9 @@ class TraceIngest:
         sender = _SHARED if authenticated else self._authorized(headers.get("Authorization"))
         if sender is None:
             return _error(401, encoding, otlp.UNAUTHENTICATED, "missing or invalid bearer token")
+        if metrics and sender:
+            message = "metrics need the shared traces token, not a per-agent one"
+            return _error(403, encoding, otlp.PERMISSION_DENIED, message)
         if not authenticated and self._open() and headers.get("Origin") is not None:
             # No exporter sends an Origin; a browser does on every cross-site POST. Without
             # a token to ask for, it is the one sign of a web page (#406).
@@ -222,6 +240,8 @@ class TraceIngest:
         try:
             original_type = headers.get("Content-Type") or media
             body = read(length)
+            if metrics:
+                return self._ingest_metrics(body, media, content_encoding, encoding)
             return self._ingest(
                 body, media, original_type, content_encoding, encoding, rewrite, sender
             )
@@ -283,6 +303,46 @@ class TraceIngest:
             except Exception:
                 log.exception("accepted-request hook failed")
         return Reply(200, otlp.encode_response(media, total, message), media)
+
+    def _ingest_metrics(
+        self, body: bytes, media: str, content_encoding: str, encoding: str
+    ) -> Reply:
+        if content_encoding == "gzip":
+            try:
+                body = _gunzip(body, self.max_body_bytes)
+            except _TooLarge:
+                message = f"decompressed body over {self.max_body_bytes} bytes"
+                return _error(413, encoding, otlp.RESOURCE_EXHAUSTED, message, close=False)
+            except (zlib.error, ValueError) as exc:
+                message = f"bad gzip body: {exc}"
+                return _error(400, encoding, otlp.INVALID_ARGUMENT, message, close=False)
+        try:
+            decoded = otlp_metrics.decode(body, media, self.options.task_attribute)
+        except otlp.DecodeError as exc:
+            return _error(400, encoding, otlp.INVALID_ARGUMENT, str(exc), close=False)
+        now = self.clock()
+        oldest, latest = _ns(now - self.max_age), _ns(now + MAX_FUTURE)
+        rejected = Counter(decoded.rejected)
+        points = [p for p in decoded.points if otlp_metrics.plausible(p, oldest, latest)]
+        if len(points) < len(decoded.points):
+            rejected[INVALID_TIME] += len(decoded.points) - len(points)
+        rows = [
+            (p.session_id, p.task_id, p.model, p.kind, p.value, p.time_ns, p.start_ns)
+            for p in points
+        ]
+        append = getattr(self.store, "append_metric_points", None)
+        if rows and callable(append):
+            try:
+                append(rows)
+            except Exception as exc:  # the store is down: let the exporter retry
+                log.error("cannot store %d metric points: %s", len(rows), exc)
+                return _error(503, encoding, otlp.UNAVAILABLE, "store unavailable", close=False)
+        hook = getattr(self.observer, "metric_points", None)
+        if callable(hook):
+            hook(len(points), decoded.ignored, dict(rejected))
+        total = sum(rejected.values())
+        message = "; ".join(f"{n} {reason}" for reason, n in sorted(rejected.items()))
+        return Reply(200, otlp_metrics.encode_response(media, total, message), media)
 
     def _store(self, spans: Sequence[Span], now: datetime, encoding: str) -> Reply | None:
         """Store ``spans`` and fill their links; the error reply when the store is down."""

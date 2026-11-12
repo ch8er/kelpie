@@ -10,6 +10,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ### Added
 
+- `POST /v1/metrics`: Claude Code's OpenTelemetry cost and token metrics as a spend source,
+  behind the same token, `Origin`, size, media type and slot checks as `/v1/traces` (only
+  the shared token, not a per-agent one). Only `claude_code.token.usage` and
+  `claude_code.cost.usage` delta points with a `session.id` are kept (session, task, model,
+  token type, value); other metrics are ignored and never stored. Their tokens count for
+  budgets for sessions with no model call in traces in the window, so a session exported
+  both ways counts once. New metrics `kelpie_metrics_requests_total`,
+  `kelpie_metric_points_total` and `kelpie_metric_points_rejected_total`.
+- Limit hits counted from traces per provider (a model call refused with HTTP 429 or a
+  rate-limit `error.type`) with a suggested concurrency: one below the lowest number of
+  sessions running at once when the limit was hit. The daily report's new "Provider
+  limits" section and the gauges `kelpie_llm_provider_trace_limit_hits` and
+  `kelpie_llm_provider_suggested_concurrency` show them; Kelpie never changes concurrency.
 - Daily report: each of the top 3 recommendations says whether it is only *proposed* or
   *accepted*, and how to accept it (`kelpie fix` with the `--rule`, `--command` or `--role`
   the line shows). Accepted means a fix noted for it in the days the report reads, with

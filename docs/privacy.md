@@ -130,6 +130,15 @@ configured list, or when commands are not recorded (`[traces] commands = false`,
 `..._SPOOL_COMMANDS=0`, OpenClaw's `"commands": false`). Code: the `shared runners` block
 of [`src/kelpie/traces/command.py`](../src/kelpie/traces/command.py), copied into the hooks.
 
+## Claude Code metrics
+
+`POST /v1/metrics` stores only the data points of Claude Code's `claude_code.token.usage`
+and `claude_code.cost.usage`: the session id, the task id (`kelpie.task_id`, if set), the
+model, the token type, the value and the time. Every other attribute of a point or its
+resource (user id, email, account, organization, terminal) is dropped before anything is
+stored, and every other metric is counted and dropped. The points live in the span store's
+database and are pruned with the spans (`[traces] retention`).
+
 ## Hermes hooks plugin
 
 Code: [`src/kelpie/adapters/hermes/plugin.py`](../src/kelpie/adapters/hermes/plugin.py).
