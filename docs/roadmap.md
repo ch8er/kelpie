@@ -155,6 +155,8 @@ the ones rules actually need to typed fields before implementing those rules.
 - [x] Tasks and owners can be tied to a host (`Task.host`, `Owner.host`, #127)
 - [ ] `Session` tied to a host; `Owner` exposes availability/capacity
 - [x] `Block` has a category so allowed-reason checks do not parse free text (`Block.category`, set by the Hermes adapter; rule 1 reads the reason only for a block without one, #387)
+- [x] `Resource` has `sampled_at` and a window for event counts (e.g. hits per day) (the sample time is `Resource.at`; `Resource.events_window`, read by rule 7, #456)
+- [ ] Task status history is available to rules (time-to-accept, bounce count) (rules see `status_since`, `returns`, `reopened_at`, `review_rounds`; no history, see #157)
 - [ ] `Resource` has `sampled_at` and a window for event counts (e.g. hits per day) (the sample time is `Resource.at`; `events` has no window)
 - [x] Task status history is available to rules (time-to-accept, bounce count) (`Snapshot.status_history` from the transitions #157 records, last 7 days per task; `kelpie.rules._history.time_to_accept` and `bounces`; #462)
 - [x] CI build/run records in the snapshot, supplied by the CI connector (fixture 05 today only

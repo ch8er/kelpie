@@ -325,3 +325,31 @@ def test_work_routed_to_a_mapped_agent_counts_before_it_is_claimed() -> None:
         run(build({"provider_owners": {"main": ["agent-2"]}}), providers=(status,), tasks=routed)
     )
     assert a.params["blocked_tasks"] == ["T-7"]
+
+
+@pytest.mark.parametrize(
+    ("window", "counted"),
+    [
+        (None, True),
+        (timedelta(hours=1), True),
+        (timedelta(hours=24), True),
+        (timedelta(days=2), False),
+        (timedelta(0), True),
+    ],
+)
+def test_rate_limit_events_count_only_over_the_rule_window(
+    window: timedelta | None, counted: bool
+) -> None:
+    r = Resource(
+        "llm:main",
+        ResourceKind.LLM_QUOTA,
+        used=1,
+        limit=1000,
+        events=30,
+        at=NOW,
+        events_window=window,
+    )
+    actions = Resources(rate_limit_events_warning=20).evaluate(Snapshot(now=NOW, resources=(r,)))
+    assert bool(actions) is counted
+    if counted:
+        assert actions[0].params["limit_hits"] == 30

@@ -1,0 +1,37 @@
+id: "06-rate-limit-count-over-a-longer-window"
+incident: 6
+title: "A week's rate-limit count is not a day's"
+description: >
+  A quota source reports how many rate-limit errors it saw, and over what period. 60
+  errors over the last seven days says nothing about the last 24 hours, the window rule 7
+  counts limit hits over: it must not raise "hit its limit 60 times in 24h". The same
+  count over the last 12 hours does.
+rule: resources
+config:
+  rate_limit_events_warning: 50
+snapshot:
+  now: "2026-03-02T18:00:00+00:00"
+  resources:
+    - name: "llm:provider-week"
+      kind: llm_quota
+      used: 100
+      limit: 5000000
+      unit: tokens
+      events: 60
+      events_window: "7d"
+      at: "2026-03-02T17:55:00+00:00"
+    - name: "llm:provider-day"
+      kind: llm_quota
+      used: 100
+      limit: 5000000
+      unit: tokens
+      events: 60
+      events_window: "12h"
+      at: "2026-03-02T17:55:00+00:00"
+expected_actions:
+  - kind: alert
+    severity: warning
+    reason_contains: "provider-day"
+not_expected_actions:
+  - kind: alert
+    reason_contains: "provider-week"

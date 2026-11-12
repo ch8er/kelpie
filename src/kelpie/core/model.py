@@ -337,7 +337,10 @@ class Resource:
 
     ``used``/``limit`` share ``unit``. ``expires_at`` is set for credentials and
     quota windows; ``resets_at`` for quotas that refill. ``at`` is when the reading was
-    taken (None: current as of the snapshot); rules ignore readings that are too old.
+    taken, its sample time (None: current as of the snapshot); rules ignore readings that
+    are too old. ``events`` counts events the source saw (rate-limit errors of a quota)
+    over ``events_window`` ending at ``at`` (None: the source does not say; taken as
+    recent).
     """
 
     name: str
@@ -350,6 +353,7 @@ class Resource:
     resets_at: datetime | None = None
     events: int = 0
     at: datetime | None = None
+    events_window: timedelta | None = None  # the period ``events`` counts over
     # How fast ``used`` grows, in ``unit`` per day, over the source's window (negative when
     # it shrinks); None when unknown.
     growth_per_day: float | None = None
