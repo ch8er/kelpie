@@ -515,14 +515,120 @@ def test_cancel_refused_for_runs_the_scan_did_not_offer() -> None:
         assert posts(gh) == []
 
 
-def test_fail_fast_cancel_is_refused_even_for_a_superseded_run() -> None:
+LINT = ".github/workflows/lint.yml"
+IOS = ".github/workflows/ios.yml"
+SHA = "d" * 40
+
+
+def doomed_head(gh: FakeGitHub, check: dict[str, Any] | None = None) -> None:
+    """A PR head whose cheap check failed while an expensive build of it still runs."""
+    lint = check or pr_run(
+        11,
+        10,
+        7,
+        "main",
+        path=LINT,
+        workflow_id=8,
+        head_sha=SHA,
+        status="completed",
+        conclusion="failure",
+    )
+    ios = pr_run(12, 9, 7, "main", path=IOS, workflow_id=9, head_sha=SHA)
+    runs_page(gh, [ios, lint])
+    gh.reply(f"{RUNS}/12", ios)
+    heads(gh, [ios, lint])
+    gh.reply(f"POST {RUNS}/12/cancel", {}, status=202)
+
+
+def heads(gh: FakeGitHub, runs: list[dict[str, Any]]) -> None:
+    gh.reply(f"{RUNS}?head_sha={SHA}&per_page=100", {"workflow_runs": runs})
+
+
+def doomed(build_id: Any = f"{REPO}:12", **params: Any) -> Action:
+    base = {"build_id": build_id, "cause": "fail_fast", "check_workflow": LINT, **params}
+    return Action(ActionKind.CANCEL_BUILD, "ci_economy", "doomed", params=base)
+
+
+def test_fail_fast_cancel_of_a_doomed_run() -> None:
     with serve() as gh:
-        superseded_pair(gh)
+        doomed_head(gh)
+        source = ci(gh, **ALLOWED)
+        builds = builds_by_id(source)
+        assert not builds[f"{REPO}:12"].cancellable  # not superseded: no plain cancel
+        assert source.execute(cancel(f"{REPO}:12")) is ActionResult.REFUSED
+        assert source.execute(doomed()) is ActionResult.DONE
+        assert posts(gh) == [f"{RUNS}/12/cancel"]
+        assert source.execute(doomed()) is ActionResult.NOTHING_TO_DO  # already cancelled
+        assert posts(gh) == [f"{RUNS}/12/cancel"]
+
+
+def test_fail_fast_cancel_refused_by_policy_or_without_a_check() -> None:
+    for settings, action in (
+        ({}, doomed()),  # allow_cancel off
+        ({"cancel_workflows": (LINT,), **ALLOWED}, doomed()),  # not a cancel workflow
+        ({"cancel_branches": ("release/*",), **ALLOWED}, doomed()),
+        (ALLOWED, doomed(check_workflow=None)),
+        (ALLOWED, doomed(check_workflow=IOS)),  # the check is the build itself
+        (ALLOWED, doomed(f"{REPO}:11")),  # finished in the scan: not a target
+        (ALLOWED, doomed(f"{OTHER}:12")),
+    ):
+        with serve() as gh:
+            doomed_head(gh)
+            source = ci(gh, **settings)
+            source(Snapshot(now=NOW))
+            assert source.execute(action) is ActionResult.REFUSED, (settings, action.params)
+            assert posts(gh) == []
+    with serve() as gh:
+        doomed_head(gh)
+        assert ci(gh, **ALLOWED).execute(doomed()) is ActionResult.REFUSED  # no scan yet
+    with serve() as gh:  # never on the default branch
+        ios = pr_run(12, 9, 7, "main", path=IOS, head_sha=SHA, head_branch="main")
+        runs_page(gh, [ios])
         source = ci(gh, **ALLOWED)
         source(Snapshot(now=NOW))
-        doomed = cancel(f"{REPO}:1")
-        doomed = replace(doomed, params={**doomed.params, "cause": "fail_fast"})
-        assert source.execute(doomed) is ActionResult.REFUSED
+        assert source.execute(doomed()) is ActionResult.REFUSED
+        assert posts(gh) == []
+
+
+def test_fail_fast_recheck_before_cancel() -> None:
+    lint_run = {"path": LINT, "workflow_id": 8, "head_sha": SHA}
+    rerun = pr_run(11, 10, 7, "main", status="in_progress", run_attempt=2, **lint_run)
+    passed = pr_run(11, 10, 7, "main", status="completed", conclusion="success", **lint_run)
+    newer_green = pr_run(13, 3, 7, "main", status="completed", conclusion="success", **lint_run)
+    old_red = pr_run(11, 10, 7, "main", status="completed", conclusion="failure", **lint_run)
+    full = [old_red] * 100
+    for check_runs in ([rerun], [passed], [old_red, newer_green], [], full):
+        with serve() as gh:
+            doomed_head(gh)
+            source = ci(gh, **ALLOWED)
+            source(Snapshot(now=NOW))
+            heads(gh, check_runs)
+            assert source.execute(doomed()) is ActionResult.NOTHING_TO_DO
+            assert source.execute(doomed()) is ActionResult.REFUSED  # target dropped
+            assert posts(gh) == []
+    ios = pr_run(12, 9, 7, "main", path=IOS, workflow_id=9, head_sha=SHA)
+    for now_run in (
+        {**ios, "status": "completed", "conclusion": "success"},  # finished meanwhile
+        {**ios, "run_attempt": 2},  # re-run by a human
+        {**ios, "head_sha": "e" * 40},  # not the scanned commit
+    ):
+        with serve() as gh:
+            doomed_head(gh)
+            source = ci(gh, **ALLOWED)
+            source(Snapshot(now=NOW))
+            gh.reply(f"{RUNS}/12", now_run)
+            assert source.execute(doomed()) is ActionResult.NOTHING_TO_DO
+            assert posts(gh) == []
+
+
+def test_fail_fast_check_runs_are_read_fresh() -> None:
+    with serve() as gh:
+        doomed_head(gh)
+        source = ci(gh, **ALLOWED)
+        source(Snapshot(now=NOW))
+        gh.reply(f"{RUNS}?head_sha={SHA}&per_page=100", {"message": "boom"}, status=500)
+        with pytest.raises(GitHubError):
+            source.execute(doomed())  # transient: the engine retries later
         assert posts(gh) == []
 
 

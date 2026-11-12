@@ -60,8 +60,16 @@ changing a workflow file: see :mod:`kelpie.connectors.github.proposals`. And
 - right before cancelling, both runs are fetched again, outside the cache: the run must
   still be active and on the same attempt, and the newer run must still be a newer run of
   the same group. Anything else refuses the cancel;
+- a fail-fast cancel (``params.cause`` ``fail_fast``, rule 9's doomed builds) needs no
+  newer run: its target is any run that was active in a current scan and that the same
+  policy allows (repository, workflow, branch, never the default branch). Right before
+  cancelling, the run is fetched again (still active, same attempt, same commit) and the
+  failed check's runs on that commit are listed outside the cache: the newest run of the
+  ``check_workflow`` must have failed, and no run of it may be active (a re-run may still
+  pass). Anything else refuses the cancel or finds nothing to do;
 - results: done; nothing to do (the run finished, was re-run or is no longer superseded
-  meanwhile, the newer run is gone, HTTP 409, or Kelpie already cancelled it); refused (a
+  meanwhile, the newer run is gone, the check passed or runs again, HTTP 409, or Kelpie
+  already cancelled it); refused (a
   policy says no, or GitHub answers the cancel with 403 because the token lacks
   ``Actions: write``: a human is told). A transient failure (network, back-off, rate
   limit, a re-check served from the cache, 5xx, a 403 on a read) raises, so the engine
@@ -400,6 +408,18 @@ class _Target:
     created_at: datetime
 
 
+@dataclass(frozen=True, slots=True)
+class _Doomable:
+    """An active run of the last scan that policy lets Kelpie cancel: the only targets a
+    fail-fast cancel may touch (rule 9 names the build; the check is re-read at cancel)."""
+
+    repo: str
+    run_id: int
+    attempt: int
+    sha: str
+    workflow: str | None
+
+
 @dataclass(slots=True)
 class _RepoScan:
     repo: str
@@ -444,6 +464,7 @@ class GitHubCI:
         self._scanned_at: datetime | None = None
         self._rotation = 0
         self._targets: dict[str, _Target] = {}
+        self._doomable: dict[str, _Doomable] = {}
         self._cancelled: OrderedDict[str, None] = OrderedDict()
         # Minutes and jobs per run attempt: a finished attempt does not change.
         self._jobs: OrderedDict[tuple[str, int], tuple[float, tuple[Job, ...]]] = OrderedDict()
@@ -463,6 +484,7 @@ class GitHubCI:
             if self._reserve_low(now):
                 # No new scan, and nothing may be cancelled on old evidence.
                 self._targets = {}
+                self._doomable = {}
                 self._builds = tuple(replace(b, cancellable=False) for b in self._builds)
             else:
                 self._reserve_logged = False
@@ -499,6 +521,7 @@ class GitHubCI:
     def _scan(self, now: datetime) -> list[Build]:
         s = self.settings
         self._targets = {}  # only this scan's evidence counts
+        self._doomable = {}
         self.client.begin_tick(
             s.max_requests_per_tick, s.tick_budget, min_cache_entries=4 * s.max_requests_per_tick
         )
@@ -574,6 +597,10 @@ class GitHubCI:
         for scan, run in work:
             run_id = _id(run.get("id")) or 0
             build = self._build(scan, run_id, run, now, tick)
+            if build.sha is not None and self._allowed(scan, run, build):
+                self._doomable[build.id] = _Doomable(
+                    scan.repo, run_id, _attempt(run), build.sha, build.workflow
+                )
             successor = newer.get((scan.repo, run_id))
             if successor is not None:
                 newer_id = _id(successor.get("id")) or 0
@@ -610,21 +637,25 @@ class GitHubCI:
         newer_id: int,
         build: Build,
     ) -> _Target | None:
-        branch, group, path = run.get("head_branch"), _group(run), run.get("path")
-        if (
-            not scan.current
-            or not build.status.is_active
-            or group is None
-            or not isinstance(branch, str)
-            or scan.default_branch is None
-            or not self.settings.may_cancel(
-                scan.repo, path if isinstance(path, str) else None, branch, scan.default_branch
-            )
-        ):
+        group = _group(run)
+        if group is None or not self._allowed(scan, run, build):
             return None
         created = _time(run.get("created_at"))
         assert created is not None  # _page keeps only runs with a creation time
         return _Target(scan.repo, run_id, _attempt(run), newer_id, group, created)
+
+    def _allowed(self, scan: _RepoScan, run: Mapping[str, Any], build: Build) -> bool:
+        """An active run of a current scan that the cancel policy covers."""
+        branch, path = run.get("head_branch"), run.get("path")
+        return (
+            scan.current
+            and build.status.is_active
+            and isinstance(branch, str)
+            and scan.default_branch is not None
+            and self.settings.may_cancel(
+                scan.repo, path if isinstance(path, str) else None, branch, scan.default_branch
+            )
+        )
 
     def _build(
         self, scan: _RepoScan, run_id: int, run: Mapping[str, Any], now: datetime, tick: _Tick
@@ -764,7 +795,7 @@ class GitHubCI:
     # --- action -------------------------------------------------------------------
 
     def execute(self, action: Action) -> ActionResult:
-        """Cancel a superseded run; see the module docs for every guard.
+        """Cancel a superseded or a doomed (fail fast) run; see the module docs for the guards.
 
         Raises :class:`GitHubError` on a transient failure, so the engine retries later.
         ``propose_ci_config`` goes to the :class:`Proposer`, when one is configured."""
@@ -775,13 +806,10 @@ class GitHubCI:
         build_id = action.params.get("build_id")
         if not isinstance(build_id, str):
             return ActionResult.REFUSED
-        if action.params.get("cause") == "fail_fast":
-            # Rule 9's fail-fast cancel is not carried out yet: only superseded runs are
-            # cancel targets here, even when the doomed run is also superseded.
-            log.info("cancel_build %s refused: fail-fast cancels are not supported yet", build_id)
-            return ActionResult.REFUSED
         if build_id in self._cancelled:
             return ActionResult.NOTHING_TO_DO  # already cancelled by Kelpie
+        if action.params.get("cause") == "fail_fast":
+            return self._cancel_doomed(build_id, action.params.get("check_workflow"))
         target = self._targets.get(build_id)
         if target is None:
             log.warning("cancel_build %s refused: not a cancellable run of the last scan", build_id)
@@ -811,7 +839,61 @@ class GitHubCI:
             log.info("cancel_build %s: nothing to do, no longer superseded", build_id)
             self._targets.pop(build_id, None)
             return ActionResult.NOTHING_TO_DO
-        path = f"/repos/{target.repo}/actions/runs/{target.run_id}/cancel"
+        return self._post_cancel(target.repo, target.run_id, build_id)
+
+    def _cancel_doomed(self, build_id: str, check: Any) -> ActionResult:
+        """Rule 9's fail-fast cancel: the run is still active on the same attempt and
+        commit, and the check's newest run on that commit still failed, none running."""
+        target = self._doomable.get(build_id)
+        if target is None:
+            log.warning("cancel_build %s refused: not an active run of the last scan", build_id)
+            return ActionResult.REFUSED
+        if not isinstance(check, str) or not check or check == target.workflow:
+            log.warning("cancel_build %s refused: no failed check named", build_id)
+            return ActionResult.REFUSED
+        run = self._fresh(target.repo, target.run_id)
+        if (
+            not _status(run).is_active
+            or _attempt(run) != target.attempt
+            or _str(run.get("head_sha")) != target.sha
+        ):
+            log.info("cancel_build %s: nothing to do, the run finished or changed", build_id)
+            self._doomable.pop(build_id, None)
+            return ActionResult.NOTHING_TO_DO
+        if not self._still_failed(target.repo, target.sha, check):
+            log.info(
+                "cancel_build %s: nothing to do, %s no longer failed on %s",
+                build_id,
+                check,
+                target.sha[:7],
+            )
+            self._doomable.pop(build_id, None)
+            return ActionResult.NOTHING_TO_DO
+        return self._post_cancel(target.repo, target.run_id, build_id)
+
+    def _still_failed(self, repo: str, sha: str, check: str) -> bool:
+        """The newest run of ``check`` on commit ``sha`` failed and none of it is active,
+        read from GitHub just now. A full page (more runs than one page) is no verdict."""
+        query = {"head_sha": sha, "per_page": str(PER_PAGE)}
+        response = self.client.get(f"/repos/{repo}/actions/runs", query, fresh=True)
+        if response.stale:
+            raise GitHubError("stale", "check runs could not be re-checked")
+        listed = _list(_mapping(response.body).get("workflow_runs"))
+        if len(listed) >= PER_PAGE:
+            return False
+        runs = [
+            r
+            for r in listed
+            if _str(r.get("head_sha")) == sha
+            and (_str(r.get("path")) or _str(r.get("name"))) == check
+        ]
+        if not runs or any(_status(r).is_active for r in runs):
+            return False
+        newest = max(runs, key=lambda r: (_created(r), _id(r.get("id")) or 0))
+        return _status(newest) is BuildStatus.FAILURE
+
+    def _post_cancel(self, repo: str, run_id: int, build_id: str) -> ActionResult:
+        path = f"/repos/{repo}/actions/runs/{run_id}/cancel"
         try:
             code = self.cancel_client.post(path)
         except GitHubError as exc:
@@ -821,10 +903,11 @@ class GitHubCI:
                 "cancel_build %s refused by GitHub (HTTP 403): the cancel token lacks "
                 "Actions: write on %s",
                 build_id,
-                target.repo,
+                repo,
             )
             return ActionResult.REFUSED
         self._targets.pop(build_id, None)
+        self._doomable.pop(build_id, None)
         _remember(self._cancelled, build_id, None)
         if code == 409:
             log.info("cancel_build %s: nothing to do, the run is already finishing", build_id)

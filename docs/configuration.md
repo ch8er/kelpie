@@ -621,8 +621,11 @@ refused, or a build whose jobs the connector did not read, is no verdict on the 
 no build of it is running there (a re-run may still pass). Held builds (an approval, a
 concurrency group) and builds the superseded cancel already covers are left alone; once
 per build. Observe-only until `fail_fast_mode = "rule"`. The GitHub connector carries out
-only superseded cancels for now and refuses every fail-fast cancel, even of a run that
-is also superseded (a person is told in `act`).
+a fail-fast cancel under the same policy as a superseded one (`allow_cancel`,
+`cancel_repos`, `cancel_workflows`, `cancel_branches`, never the default branch), for a run
+that was active in its last scan, and only after a fresh re-check: the run is still active
+on the same attempt and commit, and the check's newest run on that commit failed with none
+of it running (a re-run may still pass). Otherwise it finds nothing to do.
 
 ### 10. loop_breaker
 

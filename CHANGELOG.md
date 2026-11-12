@@ -10,6 +10,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ### Added
 
+- The GitHub CI connector carries out rule 9's fail-fast `cancel_build`: a queued or
+  running build on a PR commit whose cheap required check already failed is cancelled,
+  under the same `[connectors.github.ci]` cancel policy as superseded runs (`allow_cancel`,
+  `cancel_repos`, `cancel_workflows`, `cancel_branches`; never the default branch). Right
+  before the cancel it re-reads the run (still active, same attempt and commit) and the
+  check's runs on that commit outside the cache (the newest failed, none running);
+  otherwise it does nothing. Until now it refused every fail-fast cancel. Rule 9's
+  fail-fast cancels stay observe-only until `fail_fast_mode = "rule"`, and the rule's own
+  mode and the global dry-run still apply.
 - Multi-host: `kelpie agent`'s OTLP relay forwards Claude Code's cost and token metrics
   (`/v1/metrics`) to the hub under the agent's token, as it does spans; the hub ingests
   them with `/v1/metrics`' checks and puts every point's session and task in the agent's
