@@ -112,6 +112,11 @@ class ReportStore:
         store = self._span_store()
         return [s for s in store.spans_since(start) if _last(s) < end]
 
+    def metered(self, start: datetime, end: datetime) -> tuple[tuple[str | None, int, float], ...]:
+        """Per model, tokens and USD from Claude Code's metrics in ``[start, end)``, for
+        sessions with no model call in traces then (:meth:`SqliteSpanStore.metered_between`)."""
+        return self._span_store().metered_between(start, end)
+
     def fixes(self, start: datetime, end: datetime) -> list[FixEvent]:
         return read_fixes(self._db, start, end)
 

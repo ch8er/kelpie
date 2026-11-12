@@ -299,6 +299,28 @@ CREATE TABLE task_transitions (
 CREATE INDEX task_transitions_task ON task_transitions (task_id, at);
 CREATE INDEX task_transitions_at ON task_transitions (at);
 """
+# Claude Code's OpenTelemetry metrics (``POST /v1/metrics``, kelpie.traces.metrics): delta
+# data points of its token and cost counters, per session. Created by the span store's
+# writer when missing (no schema version: an older reader just sees no metrics); pruned
+# with the spans (by age and, oldest first, beyond the spans' row cap). Exporters retry, so a
+# point stored twice is kept once: ``model`` is '' for none, as NULLs never collide in a
+# UNIQUE constraint.
+_METRIC_POINTS = """
+CREATE TABLE IF NOT EXISTS metric_points (
+    session_id TEXT NOT NULL,
+    task_id    TEXT,
+    model      TEXT NOT NULL DEFAULT '',
+    kind       TEXT NOT NULL,
+    value      REAL NOT NULL,
+    time_ns    INTEGER NOT NULL,
+    start_ns   INTEGER NOT NULL,
+    at         TEXT NOT NULL,
+    UNIQUE (session_id, model, kind, time_ns, start_ns)
+);
+CREATE INDEX IF NOT EXISTS metric_points_at ON metric_points (at);
+"""
+METERED_TOKEN_KINDS = ("input", "output", "cache_read", "cache_creation")
+METERED_COST = "cost_usd"
 SNOOZES_SINCE = 8  # the first schema with snoozes: read-only readers accept it (no growth)
 
 # version -> script that upgrades from version - 1. Append, never edit a released one.
@@ -798,6 +820,33 @@ def _json_path(key: str) -> str:
 SHORT_WINDOW = timedelta(hours=6)
 
 
+def _from_ns(ns: int) -> datetime:
+    """A time in nanoseconds since the epoch, to the microsecond."""
+    return datetime.fromtimestamp(ns // 1_000_000_000, tz=UTC) + timedelta(
+        microseconds=ns % 1_000_000_000 // 1000
+    )
+
+
+def _metered_usage(rows: Iterable[sqlite3.Row]) -> tuple[TokenUsage, ...]:
+    """Metric rows (session, task, model, kind, value) as token usage: input includes
+    cache reads and writes, as a span's does (Claude Code's ``input`` excludes them)."""
+    found: dict[tuple[str | None, str | None, str | None], dict[str, int]] = {}
+    for r in rows:
+        if r["kind"] in METERED_TOKEN_KINDS:
+            kinds = found.setdefault((r["session_id"], r["task_id"], r["model"]), {})
+            kinds[r["kind"]] = kinds.get(r["kind"], 0) + int(r["value"])
+    out = []
+    for (session, task, model), k in found.items():
+        read, write = k.get("cache_read", 0), k.get("cache_creation", 0)
+        out.append(
+            TokenUsage(
+                session, task, model, 0, k.get("input", 0) + read + write, k.get("output", 0),
+                read, write,
+            )
+        )  # fmt: skip
+    return tuple(sorted(out, key=_usage_key))
+
+
 def _usage_key(u: TokenUsage) -> tuple[str, str, str]:
     return (u.session_id or "", u.task_id or "", u.model or "")
 
@@ -954,6 +1003,7 @@ class SqliteSpanStore:
         self._sessions: dict[str, tuple[str, str | None, datetime]] | None = None
         self._labels: dict[str, tuple[tuple[str, ...], datetime]] | None = None
         if not readonly:
+            self._db.executescript(_METRIC_POINTS)
             self._decide_undecided()
 
     def close(self) -> None:
@@ -1095,6 +1145,67 @@ class SqliteSpanStore:
             out.append(tuple(sorted(rows, key=_usage_key)))
         return out
 
+    def append_metric_points(
+        self, points: Sequence[tuple[str, str | None, str | None, str, float, int, int]]
+    ) -> int:
+        """Store Claude Code metric points: (session, task, model, kind, value, time_ns,
+        start_ns); one already stored (an exporter's retry) is kept once."""
+        sql = (
+            "INSERT OR IGNORE INTO metric_points"
+            " (session_id, task_id, model, kind, value, time_ns, start_ns, at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+        )
+        rows = [(p[0], p[1], p[2] or "", *p[3:], _ts(_from_ns(p[5]))) for p in points]
+        added = 0
+        for i in range(0, len(rows), self._batch):
+            with self._lock, self._db:
+                added += self._db.executemany(sql, rows[i : i + self._batch]).rowcount
+        return added
+
+    def _metered(self, start: datetime, end: datetime | None) -> list[sqlite3.Row]:
+        """Metric points from ``start`` (to ``end``) summed per session, task, model and
+        kind, for sessions with no counted model call in traces in that range: those
+        count from traces, so a session exported both ways is counted once. No rows from
+        a database whose span store never wrote (no table yet)."""
+        bound = "" if end is None else " AND at < ?"
+        span_bound = "" if end is None else " AND last_at < ?"
+        args: list[object] = [_ts(start)] + ([] if end is None else [_ts(end)])
+        sql = (
+            "SELECT session_id, task_id, NULLIF(model, '') AS model, kind, SUM(value) AS value"
+            " FROM metric_points"
+            f" WHERE at >= ?{bound} AND session_id NOT IN (SELECT session_id FROM spans"
+            f" WHERE counted = 1 AND session_id IS NOT NULL AND last_at >= ?{span_bound})"
+            " GROUP BY session_id, task_id, model, kind"
+        )
+        try:
+            return self._read(sql, [*args, *args])
+        except sqlite3.OperationalError as exc:
+            if "no such table" in str(exc):
+                return []
+            raise
+
+    def metered_usage_since(
+        self, now: datetime, windows: Sequence[timedelta]
+    ) -> list[tuple[TokenUsage, ...]]:
+        """Token usage from Claude Code's metrics per window (:meth:`_metered`), shaped
+        like :meth:`usage_since`'s rows (no calls: metrics do not count them)."""
+        return [_metered_usage(self._metered(now - w, None)) for w in windows]
+
+    def metered_between(
+        self, start: datetime, end: datetime
+    ) -> tuple[tuple[str | None, int, float], ...]:
+        """Per model: tokens and the USD Claude Code reported, for sessions with no counted
+        model call in traces within [start, end) (the daily report)."""
+        tokens: dict[str | None, int] = {}
+        usd: dict[str | None, float] = {}
+        for r in self._metered(start, end):
+            if r["kind"] == METERED_COST:
+                usd[r["model"]] = usd.get(r["model"], 0.0) + float(r["value"])
+            elif r["kind"] in METERED_TOKEN_KINDS:
+                tokens[r["model"]] = tokens.get(r["model"], 0) + int(r["value"])
+        models = sorted(set(tokens) | set(usd), key=lambda m: (m is None, m or ""))
+        return tuple((m, tokens.get(m, 0), round(usd.get(m, 0.0), 6)) for m in models)
+
     def usage_between(self, start: datetime, end: datetime) -> tuple[TokenUsage, ...]:
         """A range scan on ``spans_counted`` (time first)."""
         sql = (
@@ -1189,6 +1300,7 @@ class SqliteSpanStore:
         while excess > 0 and (n := self._delete(oldest, (min(excess, self._batch),))):
             deleted += n
             excess -= n
+        self._prune_metric_points(before, max_rows)
         with self._lock:
             if not self._closing.is_set():
                 with self._db:
@@ -1196,6 +1308,26 @@ class SqliteSpanStore:
                         self._db.execute(f"DELETE FROM {table} WHERE seen_at < ?", (_ts(before),))
                 self._sessions = self._labels = None  # reload on the next write
         return deleted
+
+    def _prune_metric_points(self, before: datetime, max_rows: int) -> None:
+        """Claude Code metric points past the retention, then the oldest beyond
+        ``max_rows`` (the spans' cap: a sender picks a point's time, so age alone does not
+        bound them), in short batches like the spans. Not counted in the spans' rows."""
+        old = (
+            "DELETE FROM metric_points WHERE rowid IN"
+            " (SELECT rowid FROM metric_points WHERE at < ? LIMIT ?)"
+        )
+        while self._delete_points(old, (_ts(before), self._batch)):
+            pass
+        oldest = (
+            "DELETE FROM metric_points WHERE rowid IN"
+            " (SELECT rowid FROM metric_points ORDER BY at, rowid LIMIT ?)"
+        )
+        with self._read_lock:  # counted once, then by what was deleted, as the spans are
+            rows = int(self._reader.execute("SELECT COUNT(*) FROM metric_points").fetchone()[0])
+        excess = rows - max(0, max_rows)
+        while excess > 0 and (n := self._delete_points(oldest, (min(excess, self._batch),))):
+            excess -= n
 
     def discard(self, keys: Collection[SpanKey]) -> int:
         """Delete these spans (out of a scoped ingest token's scope, #302) in short batches,
@@ -1251,6 +1383,14 @@ class SqliteSpanStore:
             if n:
                 self.epoch += 1  # after the commit: a reload must not see the rows again
             return n
+
+    def _delete_points(self, sql: str, args: tuple[object, ...]) -> int:
+        """One batch of metric points: no span rows, so no count or epoch changes."""
+        with self._lock:
+            if self._closing.is_set():
+                return 0
+            with self._db:
+                return self._db.execute(sql, args).rowcount
 
     def oldest_at(self) -> datetime | None:
         rows = self._read("SELECT MIN(last_at) FROM spans INDEXED BY spans_last", ())

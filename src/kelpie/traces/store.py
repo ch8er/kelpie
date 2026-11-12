@@ -109,14 +109,22 @@ class SpanWindow:
         self, now: datetime, windows: Collection[timedelta]
     ) -> Mapping[timedelta, Sequence[TokenUsage]]:
         """Counted token usage per rolling window ending at ``now`` (budgets), read from
-        the store at most every ``totals_every``."""
+        the store at most every ``totals_every``: model calls in traces, and Claude Code's
+        token metrics (``/v1/metrics``) for sessions with none in the window."""
         wanted = sorted(set(windows))
         with self._lock:
             at = self._usage_at
             fresh = at is not None and timedelta(0) <= now - at < self.totals_every
             if fresh and set(wanted) <= set(self._usage):
                 return {w: self._usage[w] for w in wanted}
-        found = dict(zip(wanted, self.store.usage_since(now, wanted), strict=True))
+        spans = self.store.usage_since(now, wanted)
+        metered = getattr(self.store, "metered_usage_since", None)
+        if callable(metered):  # Claude Code's own metrics, for sessions without spans
+            spans = [
+                tuple(sorted((*rows, *extra), key=_usage_order))
+                for rows, extra in zip(spans, metered(now, wanted), strict=True)
+            ]
+        found = dict(zip(wanted, spans, strict=True))
         with self._lock:
             self._usage, self._usage_at = found, now
         return found
@@ -259,3 +267,7 @@ class SpanRetention:
                 "pruned %d spans in %.2fs (%d left)", deleted, time.monotonic() - started, rows
             )
         return deleted
+
+
+def _usage_order(u: TokenUsage) -> tuple[str, str, str]:
+    return (u.session_id or "", u.task_id or "", u.model or "")

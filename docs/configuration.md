@@ -1281,6 +1281,27 @@ issue is **delegated** to: name the app user as an agent's `assignee`.
 OTLP/HTTP trace ingest on `POST /v1/traces`, on the same port as `/metrics`. On by default.
 What is kept from each span: [privacy.md](privacy.md).
 
+`POST /v1/metrics` on the same port takes Claude Code's cost and token metrics
+(`claude_code.cost.usage`, `claude_code.token.usage`) with the same token, `Origin`, size,
+media type, gzip and slot checks as `/v1/traces`; only the shared token may send them, not
+a per-agent `[[traces.tokens]]` one (403). Each point needs `session.id` and delta
+temporality; other metrics are ignored and never stored. Their tokens count for budgets for
+sessions with no model call in traces in the budget's window (a session exported both ways
+counts once, from its traces); the points are pruned with the spans (`retention`,
+the spans' age limits apply to them too; beyond `max_rows` points the oldest go). The daily
+report lists them per model under "Provider limits", with the USD Claude Code reported.
+Single host only for now: `kelpie agent` relays `/v1/traces` to the hub, not `/v1/metrics`;
+`[[traces.forward]]` forwards spans, not these metrics.
+
+Limit hits are counted from traces too: a model call refused with HTTP 429 or a rate-limit
+`error.type`, per provider (`gen_ai.provider.name`, else the model's provider). The daily
+report's "Provider limits" section and the gauges `kelpie_llm_provider_trace_limit_hits` and
+`kelpie_llm_provider_suggested_concurrency` (over the spans each tick sees: `window`, 30
+minutes by default; the report covers the whole day) show them with a suggested
+concurrency: one below the lowest number of sessions running at once when the limit was
+hit; none when a single session reached it. A suggestion only: Kelpie never changes
+concurrency.
+
 | Key | Default | Unit | Meaning |
 | --- | --- | --- | --- |
 | `enabled` | `true` | bool | `false`: no ingest, no span store, no budgets. |

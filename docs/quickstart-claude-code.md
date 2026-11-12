@@ -100,7 +100,7 @@ from Claude Code's own traces, which budgets and rules 10–11 need. Start Kelpi
 
 ```bash
 export KELPIE_TRACES_TOKEN=$(openssl rand -hex 24)
-uv run kelpie serve        # 127.0.0.1:9464; POST /v1/traces, /metrics, /healthz
+uv run kelpie serve        # 127.0.0.1:9464; POST /v1/traces and /v1/metrics, /metrics, /healthz
 ```
 
 (or keep it in `[traces] token_file`, which `kelpie traces rotate-token` can rotate without
@@ -117,8 +117,25 @@ export OTEL_EXPORTER_OTLP_TRACES_HEADERS="Authorization=Bearer <the KELPIE_TRACE
 ```
 
 Spans carry the same `session.id` as the hook's lines, so Kelpie joins them per session.
-Kelpie accepts traces only, so leave Claude Code's metrics and logs exporters off or pointed
-elsewhere.
+
+Claude Code's own cost and token metrics are a spend source too: budgets count their
+tokens for sessions that send no model calls as spans (span export is a beta; metrics are
+not), and the daily report lists what they reported. Same endpoint, same token, delta
+temporality (Claude Code's default; Kelpie rejects cumulative points):
+
+```bash
+export OTEL_METRICS_EXPORTER=otlp
+export OTEL_EXPORTER_OTLP_METRICS_PROTOCOL=http/protobuf
+export OTEL_EXPORTER_OTLP_METRICS_ENDPOINT=http://127.0.0.1:9464/v1/metrics
+export OTEL_EXPORTER_OTLP_METRICS_HEADERS="Authorization=Bearer <the KELPIE_TRACES_TOKEN value>"
+export OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE=delta
+```
+
+Kelpie keeps only `claude_code.token.usage` and `claude_code.cost.usage` (session, model,
+token type, value; user and organization attributes are dropped) and ignores every other
+metric. It takes no logs, so leave Claude Code's logs exporter off or pointed elsewhere.
+Only the shared traces token may send metrics, not a per-agent `[[traces.tokens]]` one, and
+only to `kelpie serve` itself: `kelpie agent` does not relay them to a hub yet.
 
 A tool call reported by both the hook and OTLP should be kept once. **Unverified:** whether
 Claude Code's `claude_code.tool` span carries the call's `tool_use_id`. If it does not, Kelpie

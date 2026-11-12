@@ -14,6 +14,7 @@ import yaml
 from kelpie.app import ControlLoop
 from kelpie.core.engine import Engine
 from kelpie.core.ledger import Outcome
+from kelpie.core.limits import ProviderLimits
 from kelpie.core.model import (
     BudgetScope,
     BudgetStatus,
@@ -89,6 +90,10 @@ def _metrics() -> Metrics:
     metrics.provider_probed(ProviderStatus("provider-a", auth_ok=True, remaining=1, limit=2))
     metrics.provider_failed("provider-a", "timeout")
     metrics.provider_limit_hit("provider-a")
+    metrics.set_limit_provider(lambda model: "provider-a")  # limit hits from traces
+    metrics.trace_limits = (ProviderLimits("provider-a", 3, 10, (3, 4), 5, 2),)
+    metrics.metrics_request(200)
+    metrics.metric_points(2, 1, {"not_delta": 1})
     metrics.rules = [("rule-a", "observe", True)]
     metrics.set_adapters(["adapter-a"])
     metrics.connector_errors["connector-a"] += 1

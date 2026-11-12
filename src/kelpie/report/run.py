@@ -97,6 +97,7 @@ def load_inputs(sources: ReportSources, day: date, board: Snapshot) -> ReportInp
         reach - sources.report.verify_window,
     ) - timedelta(hours=1)
     actions, states, spans, fixes, attribution = [], [], [], [], None
+    metered: tuple[tuple[str | None, int, float], ...] = ()
     summed: list[ActionDay] = []
     snoozes: list[Snooze] = []
     tokens: list[TokenRow] = []
@@ -110,6 +111,7 @@ def load_inputs(sources: ReportSources, day: date, board: Snapshot) -> ReportInp
             states = store.states(history, end)
             spans = store.spans(history, end)
             fixes = store.fixes(reach - sources.report.verify_window, end)
+            metered = store.metered(start, end)
             attribution = store.attribution()
             snoozes = store.snoozes(start)
             tokens = store.instruction_tokens(history, end)
@@ -141,6 +143,7 @@ def load_inputs(sources: ReportSources, day: date, board: Snapshot) -> ReportInp
         modes=sources.modes,
         hour_usd=sources.report.hour_usd,
         fixes=fixes,
+        metered=metered,
         verify_window=sources.report.verify_window,
         review_roles=sources.report.review_roles,
         min_sample=sources.report.min_sample,

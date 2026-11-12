@@ -578,7 +578,7 @@ quotas run out or logins expire, and suggest a concurrency level tuned to the pr
 
 **Acceptance criteria**
 - [x] Repeated limit hits aggregated into one alert with counts per provider
-- [ ] Suggested concurrency per provider derived from the observed limit (not started)
+- [x] Suggested concurrency per provider derived from the observed limit: limit hits counted from traces per provider (HTTP 429, a rate-limit `error.type`), one below the lowest concurrency that hit the limit; a report line and `kelpie_llm_provider_suggested_concurrency`, never an automatic change (#431)
 - [x] Credentials expired or expiring within a window → `alert` (critical when expired)
 - [x] Fixtures: existing `06-llm-quota-and-expired-auth.yaml`
 
@@ -680,7 +680,7 @@ are limits.
 - [x] Soft threshold → `alert`; hard threshold → `stop` through `SupportsStop` (act mode only, alert fallback otherwise); transition-based alerts like other lasting states
 - [x] Burn-rate forecast: "budget runs out at <time>"; in subscription mode, time to the next limit from observed limit hits
 - [x] Spend from traces: tokens × price table, cached tokens and cache writes priced separately (#29, #184, #196)
-- [ ] Spend sources: Claude Code's OpenTelemetry cost and token metrics via OTLP ingest (ingest takes `/v1/traces` only); provider cost APIs as a budget source (today they only check the bill, #205)
+- [ ] Spend sources: Claude Code's OpenTelemetry cost and token metrics via OTLP ingest (done: `POST /v1/metrics`, its tokens count for budgets for sessions without model calls in traces, #431); provider cost APIs as a budget source (open: today they only check the bill, #205)
 - [x] Spend and remaining budget exported on `/metrics`; shown in `kelpie status`
 - [x] `loop_breaker` (rule 10) reads budgets from here instead of its own config
 - [x] No double counting of nested LLM spans in spend sums (see the double-count issue)

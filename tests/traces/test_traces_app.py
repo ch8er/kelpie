@@ -190,8 +190,13 @@ def test_end_to_end(serving_app: tuple[str, object, list[datetime]]) -> None:
         post(base, b"{broken", JSON, "synthetic-token")
     assert exc.value.code == 400
     with pytest.raises(urllib.error.HTTPError) as exc:
-        post(base, b"{}", JSON, "synthetic-token", path="/v1/metrics")
+        post(base, b"{}", JSON, "synthetic-token", path="/v1/logs")
     assert exc.value.code == 404
+    # Claude Code's metrics: the same token as traces.
+    assert post(base, b"{}", JSON, "synthetic-token", path="/v1/metrics")[0] == 200
+    with pytest.raises(urllib.error.HTTPError) as exc:
+        post(base, b"{}", JSON, path="/v1/metrics")
+    assert exc.value.code == 401
 
     clock[0] = NOW + timedelta(minutes=2)  # totals are recomputed once a minute
     snapshot = app.loop.snapshot_source()  # type: ignore[attr-defined]

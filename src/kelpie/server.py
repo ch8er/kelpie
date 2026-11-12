@@ -1,5 +1,6 @@
-"""HTTP server for ``kelpie serve``: ``/metrics``, ``/healthz`` and OTLP/HTTP trace ingest
-(``POST /v1/traces``); runs the control loop.
+"""HTTP server for ``kelpie serve``: ``/metrics``, ``/healthz`` and OTLP/HTTP ingest
+(``POST /v1/traces``, and ``POST /v1/metrics`` for Claude Code's cost and token metrics,
+behind the same token, Host and body guards); runs the control loop.
 
 Requests are served on their own threads, so a large trace export never delays the control
 loop, which runs on its own thread too. Connections are guarded by :mod:`kelpie.httpguard`
@@ -20,6 +21,7 @@ from kelpie.httpguard import GuardedHandler, GuardedServer, Limits
 from kelpie.metrics import Metrics
 from kelpie.traces.ingest import PATH as TRACES_PATH
 from kelpie.traces.ingest import TraceIngest
+from kelpie.traces.metrics import PATH as METRICS_PATH
 
 log = logging.getLogger(__name__)
 
@@ -58,18 +60,26 @@ class Handler(GuardedHandler):
     def do_POST(self) -> None:
         self.close_connection = True  # one request per connection, like the hub
         ingest = self.server.ingest
-        if self.path.split("?")[0] != TRACES_PATH or ingest is None:
+        path = self.path.split("?")[0]
+        if path not in (TRACES_PATH, METRICS_PATH) or ingest is None:
             self._reply(404, "not found\n", "text/plain; charset=utf-8")
             return
+        metrics = path == METRICS_PATH  # Claude Code's cost and token metrics: same guards
+        count = (
+            self.server.metrics.metrics_request if metrics else self.server.metrics.traces_request
+        )
         try:
-            reply = ingest.handle(self.headers, self._read_body)
+            if metrics:
+                reply = ingest.handle_metrics(self.headers, self._read_body)
+            else:
+                reply = ingest.handle(self.headers, self._read_body)
         except OSError as exc:  # the client stalled past the timeout or went away
-            log.info("trace export from %s aborted: %s", self.client_address[0], exc)
-            self.server.metrics.traces_request(408)
+            log.info("OTLP export from %s aborted: %s", self.client_address[0], exc)
+            count(408)
             return
         except Exception:  # a bug in ingest must not look like a client error or kill Kelpie
-            log.exception("trace ingest failed")
-            self.server.metrics.traces_request(500)
+            log.exception("OTLP ingest failed")
+            count(500)
             self._reply(500, "internal error\n", "text/plain; charset=utf-8")
             return
         # ``reply.close`` (body left unread) needs nothing more: every connection closes.

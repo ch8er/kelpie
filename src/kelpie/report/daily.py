@@ -361,6 +361,9 @@ class ReportInputs:
     # [spend]: each provider's spend mode (dollars, or tokens against a plan's limit). None:
     # every model is billed and ``estimated`` marks subscription dollars, as before modes.
     spend: SpendConfig | None = None
+    # Claude Code's own metrics (/v1/metrics) of the day, per model: (model, tokens, USD
+    # it reported), for sessions with no model call in traces (the limits section)
+    metered: tuple[tuple[str | None, int, float], ...] = ()
     estimated: bool = False  # subscription mode: dollars are an estimate
     outputs: OutputSettings = field(default_factory=OutputSettings)
     attribution: Attribution | None = None
