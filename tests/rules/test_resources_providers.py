@@ -339,8 +339,6 @@ def test_work_routed_to_a_mapped_agent_counts_before_it_is_claimed() -> None:
 def test_rate_limit_events_count_only_over_the_rule_window(
     window: timedelta | None, counted: bool
 ) -> None:
-    from kelpie.core.model import Resource, ResourceKind
-
     r = Resource(
         "llm:main",
         ResourceKind.LLM_QUOTA,
