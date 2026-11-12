@@ -852,8 +852,8 @@ before/after (#54, #258).
 
 **Acceptance criteria**
 - [x] The current bottleneck role or stage identified each day (the "Bottleneck of the day" line of Farm throughput; #423)
-- [ ] Recommendations ranked and fed into the top 3 of the daily report (the ranking exists for sections' advice; the bottleneck gives no recommendation of its own yet)
-- [ ] Before/after verification applies to accepted recommendations
+- [x] Recommendations ranked and fed into the top 3 of the daily report: a queue or review bottleneck competes with its own advice; waiting and ownerless are covered by the biggest wait and orphan_status (#430)
+- [x] Before/after verification applies to accepted recommendations: accepted = a fix noted with `kelpie fix` (or the rule's mode change to act, an output filter seen in traces) naming the recommendation's key; each top-3 line says proposed or accepted, and an accepted one's fix is verified even when older than the day before (#430)
 
 ### docs: install, configuration and extension guides
 labels: P0, week-3, area:docs
