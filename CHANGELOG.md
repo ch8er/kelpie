@@ -11,7 +11,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 ### Added
 
 - `Resource.events_window`: the period a source's event count (`events`, e.g. a quota's
-  rate-limit errors) covers, ending at the reading's time (#PR). Rule 7 counts those
+  rate-limit errors) covers, ending at the reading's time (#456). Rule 7 counts those
   events only when the window is unknown or no longer than `rate_limit_window`, so a
   week's count is not reported as "hit its limit N times in 24h".
 - Multi-host: `kelpie agent`'s OTLP relay forwards Claude Code's cost and token metrics
