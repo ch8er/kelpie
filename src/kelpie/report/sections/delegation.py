@@ -61,13 +61,13 @@ def delegation(ctx: SectionContext) -> Section | None:
         return None  # nothing within the day
     lines: list[str] = [_summary(made, suggested, held)] if made or suggested or held else []
     if said:
-        lines += ["", "| Verdict | Count |", "| --- | ---: |"]
+        lines += [*([""] if lines else []), "| Verdict | Count |", "| --- | ---: |"]
         lines += [f"| {text} | {said[v]} |" for v, text in VERDICTS if said[v]]
     if on_cards:
         spend = ctx.price(on_cards)
         money = f" (${spend.usd:,.2f})" if spend.usd else ""
         lines += [
-            "",
+            *([""] if lines else []),
             f"Agents spent {spend.tokens:,} tokens{money} on Kelpie's cards "
             f"(on {len({card_of(u.task_id, u.session_id) for u in on_cards})} card(s)).",
         ]
@@ -81,9 +81,13 @@ def delegation(ctx: SectionContext) -> Section | None:
 def _summary(
     made: list[DelegationEvent], suggested: list[DelegationEvent], held: list[DelegationEvent]
 ) -> str:
-    parts = [f"Kelpie handed {len(made)} problem(s) to operator agents as cards"]
+    parts = []
+    if made:
+        parts.append(f"Kelpie handed {len(made)} card(s) to operator agents")
     if held:
         parts.append(f"held back {len(held)} alert(s) for them")
     if suggested:
-        parts.append(f"would have handed {len(suggested)} more (suggest mode)")
-    return "; ".join(parts) + " within the day."
+        more = " more" if made else ""
+        parts.append(f"would have handed {len(suggested)}{more} card(s) (suggest mode)")
+    text = "; ".join(parts) + " within the day."
+    return text[0].upper() + text[1:]

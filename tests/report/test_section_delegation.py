@@ -103,8 +103,8 @@ def test_cards_holds_verdicts_and_the_operators_tokens() -> None:
             spans=(llm, other),
         )
     )
-    assert "Kelpie handed 1 problem(s) to operator agents as cards; held back 1 alert(s)" in text
-    assert "would have handed 1 more (suggest mode)" in text
+    assert "Kelpie handed 1 card(s) to operator agents; held back 1 alert(s)" in text
+    assert "would have handed 1 more card(s) (suggest mode)" in text
     assert "| fixed, verified | 1 |" in text
     assert "not fixed" not in text  # its send failed: not said
     assert "Agents spent 1,500 tokens" in text and "(on 1 card(s))" in text
@@ -171,3 +171,8 @@ def test_cards_not_carried_out_do_not_count() -> None:
     for outcome in (Outcome.OBSERVED, Outcome.DRY_RUN, Outcome.SUPPRESSED, Outcome.FAILED):
         markdown = report(entry(ActionKind.DELEGATE, outcome, BASE, detail="card t_1 for ops-1"))
         assert "Kelpie handed 1" not in markdown
+
+
+def test_suggest_mode_alone() -> None:
+    text = section(report(entry(ActionKind.DELEGATE, Outcome.SUGGESTED, BASE)))
+    assert text.strip().startswith("Would have handed 1 card(s) (suggest mode) within the day.")

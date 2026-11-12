@@ -415,7 +415,8 @@ board the report is unchanged.
   mode), the alerts held back for them, the verdicts the person got by Kelpie's own check
   (fixed and verified, still broken, given back, held then kept with the person), cards by
   operator, and the tokens agents spent on Kelpie's cards (counted model calls whose task,
-  or whose session's task, is one of Kelpie's cards, also cards made before the day).
+  or whose session's task, is one of Kelpie's cards, also cards made before the day, within the days the report
+  reads).
 - **Instruction files** (with `[instructions]`, incident 21): the files each role loads that
   cost the most tokens a day, as measured when the report runs (the 24 hours before), with
   where the figure comes from (counted skill loads, or size times sessions: an *estimate*,
