@@ -246,6 +246,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ### Fixed
 
+- The in-memory ledger (`[storage] path = ":memory:"`, and `kelpie demo`) looked up every
+  action by scanning all the entries it keeps (up to 100,000), so a tick slowed down as the
+  ledger filled. It now keeps an index by fingerprint and subject (#PR). A tick with about
+  19,000 actions on a synthetic 2,000-task farm went from 16 s to about 1 s. A per-tick
+  time budget test on that farm (`tests/perf/`) guards it.
 - Docs: the Hermes quickstart names the rules that can act on Hermes (it said only `stop`
   existed), the OpenClaw quickstart's doctor legend includes WARN, the multi-host
   check says when `kelpie_agent_up` turns 1, and the Hermes README's `human_decisions`

@@ -217,36 +217,71 @@ MAX_MEMORY_ENTRIES = 100_000
 @dataclass(slots=True)
 class MemoryLedgerStore:
     """The ledger in memory: bounded to ``max_entries`` (the oldest go first) and pruned by
-    age with :meth:`prune`."""
+    age with :meth:`prune`. Lookups by fingerprint and subject go through an index of
+    positions, so a dispatch costs the entries of that fingerprint or subject, not every
+    entry kept (up to ``max_entries``)."""
 
     entries: list[LedgerEntry] = field(default_factory=list)
     max_entries: int = MAX_MEMORY_ENTRIES
+    # Positions in ``entries`` counted from the first entry ever appended: ``_base`` of
+    # them have gone from the front since.
+    _base: int = field(default=0, init=False, repr=False)
+    _by_fingerprint: dict[str, list[int]] = field(default_factory=dict, init=False, repr=False)
+    _by_subject: dict[str, list[int]] = field(default_factory=dict, init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        self._reindex()
 
     def append(self, entry: LedgerEntry) -> None:
+        self._index(self._base + len(self.entries), entry)
         self.entries.append(entry)
         if len(self.entries) > self.max_entries:
             # a tenth at a time, so a full store does not copy the list on every append
-            del self.entries[: len(self.entries) - self.max_entries * 9 // 10]
+            self._drop(len(self.entries) - self.max_entries * 9 // 10)
 
     def prune(self, before: datetime) -> int:
         """Drop entries older than ``before`` (they are appended in time order); how many
         went. Not thread-safe, like the rest of the store: call it from the thread that
         appends (``kelpie serve`` runs it in the control loop's housekeeping)."""
         gone = next((i for i, e in enumerate(self.entries) if e.at >= before), len(self.entries))
-        del self.entries[:gone]
+        if gone:
+            self._drop(gone)
         return gone
 
     def by_fingerprint(self, fingerprint: str, after: datetime) -> Sequence[LedgerEntry]:
-        return [e for e in self.entries if e.fingerprint == fingerprint and e.at > after]
+        return [e for e in self._at(self._by_fingerprint.get(fingerprint, ())) if e.at > after]
 
     def by_subject(self, subject: str, after: datetime) -> Sequence[LedgerEntry]:
-        return [e for e in self.entries if e.subject == subject and e.at > after]
+        return [e for e in self._at(self._by_subject.get(subject, ())) if e.at > after]
 
     def bump_suppressed(self, fingerprint: str, mode: Mode, after: datetime) -> bool:
-        return _bump(self.entries, fingerprint, mode, after)
+        for position in reversed(self._by_fingerprint.get(fingerprint, ())):
+            i = position - self._base
+            e = self.entries[i]
+            if e.mode is mode and e.at > after:
+                self.entries[i] = replace(e, suppressed=e.suppressed + 1)
+                return True
+        return False
 
     def since(self, after: datetime) -> Sequence[LedgerEntry]:
         return [e for e in self.entries if e.at > after]
+
+    def _at(self, positions: Sequence[int]) -> list[LedgerEntry]:
+        return [self.entries[p - self._base] for p in positions]
+
+    def _index(self, position: int, entry: LedgerEntry) -> None:
+        self._by_fingerprint.setdefault(entry.fingerprint, []).append(position)
+        self._by_subject.setdefault(entry.subject, []).append(position)
+
+    def _drop(self, count: int) -> None:
+        del self.entries[:count]
+        self._base += count
+        self._reindex()
+
+    def _reindex(self) -> None:
+        self._by_fingerprint, self._by_subject = {}, {}
+        for i, entry in enumerate(self.entries):
+            self._index(self._base + i, entry)
 
 
 @dataclass(slots=True)
