@@ -31,6 +31,7 @@ import importlib
 import logging
 import math
 import pkgutil
+import shlex
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime
@@ -39,6 +40,7 @@ from typing import TYPE_CHECKING, Any
 
 from kelpie.core.model import Span
 from kelpie.core.spans import SpanKey, TokenUsage
+from kelpie.core.stages import UNKNOWN_ROLE
 
 if TYPE_CHECKING:
     from kelpie.report.attribution import CallOwners
@@ -84,15 +86,40 @@ class Spend:
 
 
 @dataclass(frozen=True, slots=True)
+class FixKey:
+    """What a fix recorded for a recommendation names, so the report can tell the
+    recommendation was accepted: the ``--rule``, ``--command`` and ``--role`` of ``kelpie
+    fix`` (:mod:`kelpie.report.fixes`). A rule's mode change read from the ledger names its
+    rule (with ``mode``, only a change to that mode counts), and an output filter seen in
+    traces its command and role, so those count too."""
+
+    rule: str | None = None
+    command: str | None = None
+    role: str | None = None
+    mode: str | None = None  # a mode change accepts it only when it switched to this mode
+
+    def __post_init__(self) -> None:
+        if self.role == UNKNOWN_ROLE:  # tasks of no known role: no fix can name that role
+            object.__setattr__(self, "role", None)
+
+    def flags(self) -> str:
+        """The ``kelpie fix`` options that record this key, quoted for a shell."""
+        named = (("--rule", self.rule), ("--command", self.command), ("--role", self.role))
+        return " ".join(f"{flag} {shlex.quote(v)}" for flag, v in named if v is not None)
+
+
+@dataclass(frozen=True, slots=True)
 class Advice:
     """A recommendation: what to do, why, and what it is worth per day (dollars, hours).
-    The report renders ``**title** (value): detail.``, so ``detail`` has no final period."""
+    The report renders ``**title** (value): detail.``, so ``detail`` has no final period.
+    ``accept``: what a fix noted for it names (None: no fix can be told apart as its)."""
 
     title: str
     detail: str
     usd: float = 0.0
     hours: float = 0.0
     tasks: tuple[str, ...] = ()
+    accept: FixKey | None = None
 
 
 @dataclass(frozen=True, slots=True)

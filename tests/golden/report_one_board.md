@@ -39,9 +39,11 @@ Would have done in act mode (observe, suggest or dry-run):
 
 ## Top 3 recommendations
 
-1. **Reduce blocks that outlived their cause** (13.8 hours lost): check which block reasons Kelpie could not tie to a condition. Tasks: `T-4`.
-2. **Reduce activity without progress** (about $1.76/day, 4.0 hours lost): longer heartbeat interval, a cheaper model for maintenance calls, bounded sessions with a handoff file. Tasks: `T-9`.
-3. **Let orphan_status act** (4.0 hours lost): in observe mode it would have done reassign on 1 subject(s); ownerless tasks lasted 4.0 task-hours. Tasks: `T-3`.
+1. **Reduce blocks that outlived their cause** (13.8 hours lost): check which block reasons Kelpie could not tie to a condition. Tasks: `T-4`. *Proposed*: not accepted yet (note it with `kelpie fix --rule stale_blocks "<what changed>"`).
+2. **Reduce activity without progress** (about $1.76/day, 4.0 hours lost): longer heartbeat interval, a cheaper model for maintenance calls, bounded sessions with a handoff file. Tasks: `T-9`. *Proposed*: not accepted yet (note it with `kelpie fix --rule no_progress "<what changed>"`).
+3. **Let orphan_status act** (4.0 hours lost): in observe mode it would have done reassign on 1 subject(s); ownerless tasks lasted 4.0 task-hours. Tasks: `T-3`. *Accepted* 2026-03-02 12:00 (its mode change); before/after below.
+
+A *proposed* recommendation has no fix noted for it in the days this report reads: once the change is made, note it with the `kelpie fix` command shown and the report checks its effect before/after. An *accepted* one has a fix noted (`kelpie fix`, a rule's mode change, or an output filter seen in traces), measured under "Before/after of recent fixes".
 
 ## Farm throughput
 

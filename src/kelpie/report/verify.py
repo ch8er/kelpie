@@ -280,16 +280,22 @@ def overlapping(events: Iterable[FixEvent], window: timedelta) -> list[tuple[Fix
 
 
 def verify_all(
-    events: Iterable[FixEvent], ev: Evidence, since: datetime
+    events: Iterable[FixEvent],
+    ev: Evidence,
+    since: datetime,
+    include: Collection[FixEvent] = (),
 ) -> tuple[Verification, ...]:
     """Every group of overlapping fixes (:func:`overlapping`) with a fix at or after
-    ``since``; ``events`` should reach back far enough to see the fixes a recent one
-    overlaps."""
+    ``since`` or one of ``include`` (older fixes asked for by name); ``events`` should
+    reach back far enough to see the fixes a recent one overlaps."""
     groups = overlapping((e for e in events if e.at < ev.end), ev.window)
     nexts: list[datetime | None] = [g[0].at for g in groups[1:]]
     nexts.append(None)
+    wanted = set(include)
     return tuple(
-        verify_group(g, ev, n) for g, n in zip(groups, nexts, strict=True) if g[-1].at >= since
+        verify_group(g, ev, n)
+        for g, n in zip(groups, nexts, strict=True)
+        if g[-1].at >= since or wanted.intersection(g)
     )
 
 

@@ -86,7 +86,10 @@ repeated huge-output offenders. **Top 3 recommendations.** Filters for huge tool
 (:mod:`kelpie.traces.outputs`) with their estimated savings, rules that would have fixed
 part of the chaos in act mode, and a fixed remedy for the largest remaining causes; ranked
 by dollars, with hours converted by ``hour_usd`` when it is set, else alternating the best
-by dollars and the best by hours.
+by dollars and the best by hours. Each is *proposed* or *accepted*: accepted when a fix
+read for the report (``kelpie fix``, a rule's mode change to act, an output filter seen in
+traces) names what its :class:`~kelpie.report.sections.FixKey` names (:func:`accepts`); an
+accepted one's fix is verified before/after even when older than the day before.
 
 **Biggest wait.** Under the headline: the role and cause whose tasks spent the most
 task-hours waiting for conditions, with a suggestion (:mod:`kelpie.report.waits`); a known
@@ -162,10 +165,11 @@ from kelpie.report import farm, intervals, md
 from kelpie.report.attribution import CallOwners, call_owners
 from kelpie.report.boards import BoardLine, board_lines, rest_line
 from kelpie.report.farm import UNKNOWN_FARM, FarmFacts
-from kelpie.report.fixes import FixEvent
+from kelpie.report.fixes import FILTER, MANUAL, MODE, FixEvent
 from kelpie.report.sections import (
     SECTIONS,
     Advice,
+    FixKey,
     Section,
     SectionBuilder,
     SectionContext,
@@ -203,9 +207,11 @@ from kelpie.report.waits import (
     outages,
 )
 from kelpie.report.waits import UNKNOWN as UNKNOWN_WAIT
+from kelpie.rules import REGISTRY
 from kelpie.rules.needs_you import PLANNED_AGENT_TASKS, PLANNED_TASKS
 from kelpie.rules.orphan_status import OrphanStatus
 from kelpie.traces.outputs import (
+    Call,
     OutputGroup,
     OutputSettings,
     Recommendation,
@@ -534,6 +540,9 @@ class DailyReport:
     offenders: tuple[Recommendation, ...]  # repeated huge-output offenders
     outputs: tuple[OutputGroup, ...]  # the largest output groups of the day
     recommendations: tuple[Advice, ...]
+    # per recommendation, the fix that accepted it (``kelpie fix`` or an equivalent: a
+    # rule's mode change, an output filter seen in traces); None: only proposed
+    accepted: tuple[FixEvent | None, ...] = ()
     estimated: bool = False
     priced: bool = True  # False: no [prices] table, dollars unknown
     # (limit tokens, window) of the providers on a subscription: plan tokens are shown as a
@@ -655,6 +664,8 @@ def build_report(
         wait,
         frozenset((f, g.platform) for g in groups for f in g.filters),
     )
+    fixes = _fix_events(inputs, end)
+    accepted = _accepted(advice, fixes.events)
     return DailyReport(
         day=inputs.day,
         start=start,
@@ -670,12 +681,15 @@ def build_report(
         offenders=tuple(r for r in filters if r.repeated),
         outputs=tuple(groups[:5]),
         recommendations=advice,
+        accepted=accepted,
         estimated=inputs.estimated if inputs.spend is None else False,
         priced=_priced(inputs, spend),
         limits=_limits(inputs.spend, spend),
         hour_usd=inputs.hour_usd,
         tz=inputs.tz,
-        verifications=_verifications(inputs, index, start, end),
+        verifications=_verifications(
+            inputs, index, end, fixes, [e for e in accepted if e is not None]
+        ),
         sections=extra,
         biggest_wait=wait,
         outages=outage_lines,
@@ -978,10 +992,20 @@ def _roles(inputs: ReportInputs, end: datetime) -> dict[str, str]:
     return session_context(board, inputs.attribution)[0]
 
 
-def _verifications(
-    inputs: ReportInputs, index: Mapping[SpanKey, Span], start: datetime, end: datetime
-) -> tuple[Verification, ...]:
-    """Before/after of every fix made on the report's day or the day before."""
+@dataclass(frozen=True, slots=True)
+class _FixEvents:
+    """The fixes the report reads (manual, config, rule mode changes, output filters seen
+    in traces), from two windows before the day before on, and what finding them took."""
+
+    events: tuple[FixEvent, ...]
+    since: datetime  # the start of the day before
+    reach: datetime  # where they are read from
+    known: tuple[Span, ...]
+    roles: Mapping[str, str]
+    found: tuple[Call, ...]
+
+
+def _fix_events(inputs: ReportInputs, end: datetime) -> _FixEvents:
     known = [s for s in inputs.spans if last_at(s) < end]
     board = Snapshot(
         now=end,
@@ -1001,7 +1025,47 @@ def _verifications(
         *filter_events(found, replace(inputs.outputs, window=inputs.verify_window)),
     ]
     events = [e for e in events if reach <= e.at < end]
-    if not any(e.at >= since for e in events):
+    return _FixEvents(tuple(events), since, reach, tuple(known), roles, tuple(found))
+
+
+def accepts(key: FixKey, event: FixEvent) -> bool:
+    """Whether ``event`` records the fix a recommendation keyed ``key`` asked for: it names
+    the key's rule, else its command, else its role, and no other role than the key's. A
+    config change names nothing, so it accepts nothing."""
+    if event.kind == MODE and key.mode is not None and not event.note.endswith(f"-> {key.mode}"):
+        return False  # "Let X act" is accepted by a switch to act, not away from it
+    if key.rule is not None:  # a fix may name a rule's cause: bottlenecks:hold
+        named = event.rule is not None and event.rule.split(":", 1)[0] == key.rule
+    elif key.command is not None:
+        named = event.command == key.command
+    elif key.role is not None:
+        named = event.role == key.role
+    else:
+        return False
+    return named and (key.role is None or event.role is None or event.role == key.role)
+
+
+def _accepted(advice: Sequence[Advice], events: Sequence[FixEvent]) -> tuple[FixEvent | None, ...]:
+    """For each recommendation, the latest fix that accepted it, or None: only proposed."""
+    out: list[FixEvent | None] = []
+    for a in advice:
+        found = [e for e in events if a.accept is not None and accepts(a.accept, e)]
+        out.append(max(found, key=lambda e: (e.at, e.kind, e.note)) if found else None)
+    return tuple(out)
+
+
+def _verifications(
+    inputs: ReportInputs,
+    index: Mapping[SpanKey, Span],
+    end: datetime,
+    fixes: _FixEvents,
+    include: Collection[FixEvent] = (),
+) -> tuple[Verification, ...]:
+    """Before/after of every fix made on the report's day or the day before, and of the
+    older fixes in ``include`` (those that accepted a top recommendation)."""
+    events, since, reach, known = list(fixes.events), fixes.since, fixes.reach, list(fixes.known)
+    roles, found = fixes.roles, list(fixes.found)
+    if not any(e.at >= since for e in events) and not include:
         return ()
     after = _occurrences(inputs)
     counted = counted_llm(index, known)
@@ -1048,7 +1112,7 @@ def _verifications(
         owners=inputs.owners,
         instruction_tokens=inputs.instruction_tokens,
     )
-    return verify_all(events, evidence, since)
+    return verify_all(events, evidence, since, include)
 
 
 def _priced(inputs: ReportInputs, spend: Spend) -> bool:
@@ -1818,6 +1882,7 @@ def _recommendations(
                 ),
                 hours=wait.hours,
                 tasks=wait.tasks,
+                accept=FixKey(role=wait.role),
             )
         )
     for rec in filters:
@@ -1855,6 +1920,7 @@ def _recommendations(
                 ),
                 usd=pricer.input_usd(rec.saved_tokens, model),
                 tasks=group.tasks,
+                accept=FixKey(command=group.key, role=group.role),
             )
         )
     roles = {o.role for o in inputs.owners if o.kind is OwnerKind.AGENT} or None
@@ -1886,7 +1952,11 @@ def _recommendations(
             if blocked is not None and fix is not None:
                 detail += f" (act mode is not available here: {md.text(blocked)})"
             tasks = line.tasks
-        candidates.append(Advice(title, detail, line.spend.usd, line.hours, tasks))
+        rule = line.rule.split(":", 1)[0]  # bottlenecks:hold is rule bottlenecks' cause
+        key = None  # outages, people: no rule to name
+        if rule in REGISTRY:
+            key = FixKey(rule=rule, mode="act" if title.startswith("Let ") else None)
+        candidates.append(Advice(title, detail, line.spend.usd, line.hours, tasks, key))
     return tuple(_top(candidates, inputs.hour_usd))
 
 
@@ -2089,7 +2159,8 @@ def render_markdown(report: DailyReport, task_url: str | None = None) -> str:
     lines += needs or ["Nothing open."]
     lines += ["", "## Top 3 recommendations", ""]
     if report.recommendations:
-        for i, a in enumerate(report.recommendations, 1):
+        accepted = report.accepted or (None,) * len(report.recommendations)
+        for i, (a, fix) in enumerate(zip(report.recommendations, accepted, strict=True), 1):
             value = []
             if a.usd > 0:
                 value.append(f"about ${a.usd:,.2f}/day{est}")
@@ -2097,7 +2168,17 @@ def render_markdown(report: DailyReport, task_url: str | None = None) -> str:
                 value.append(f"{a.hours:.1f} hours lost")
             tail = f" ({', '.join(value)})" if value else ""
             linked = f" Tasks: {tasks(a.tasks)}." if a.tasks else ""
-            lines.append(f"{i}. **{a.title}**{tail}: {a.detail}.{linked}")
+            status = _acceptance(a, fix, report.tz)
+            lines.append(f"{i}. **{a.title}**{tail}: {a.detail}.{linked} {status}")
+        if any(f is None for f in accepted):
+            lines += [
+                "",
+                "A *proposed* recommendation has no fix noted for it in the days this report "
+                "reads: once the change is made, note it with the `kelpie fix` command shown "
+                "and the report checks its effect before/after. An *accepted* one has a fix "
+                "noted (`kelpie fix`, a rule's mode change, or an output filter seen in "
+                'traces), measured under "Before/after of recent fixes".',
+            ]
     else:
         lines.append("None: nothing above the thresholds.")
     for section in report.sections:
@@ -2121,6 +2202,26 @@ def render_markdown(report: DailyReport, task_url: str | None = None) -> str:
                 f"{approx}{round(g.mean):,} | {used} |"
             )
     return "\n".join(lines) + "\n"
+
+
+def _acceptance(advice: Advice, fix: FixEvent | None, tz: tzinfo) -> str:
+    """Whether a top recommendation is only proposed or was accepted, and how to accept it."""
+    if fix is None:
+        how = advice.accept.flags() if advice.accept is not None else ""
+        full = f'kelpie fix {how} "<what changed>"'
+        if not how:
+            cmd = "`kelpie fix`"
+        elif len(full) <= md.MAX_NAME:
+            cmd = md.code(full)  # names from the board and traces: a span it cannot close
+        else:  # too long to show whole: a cut command would record the wrong key
+            cmd = "`kelpie fix` with the command above"
+        return f"*Proposed*: not accepted yet (note it with {cmd})."
+    by = {MODE: "its mode change", FILTER: "the filter seen in traces"}.get(
+        fix.kind, "`kelpie fix`"
+    )
+    when = fix.at.astimezone(tz).strftime("%Y-%m-%d %H:%M")
+    note = f": {md.short_text(fix.note)}" if fix.kind == MANUAL and fix.note else ""
+    return f"*Accepted* {when} ({by}{note}); before/after below."
 
 
 def summary_title(report: DailyReport) -> str:
