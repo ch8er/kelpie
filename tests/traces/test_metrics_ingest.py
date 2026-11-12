@@ -292,3 +292,35 @@ def test_budgets_read_metered_usage_beside_the_spans(store: SqliteSpanStore) -> 
     window = SpanWindow(store, timedelta(hours=1), timedelta(hours=1))
     rows = window.usage(NOW + timedelta(minutes=1), [timedelta(hours=1)])[timedelta(hours=1)]
     assert [(r.session_id, r.calls) for r in rows] == [("s-1", 0), ("s-9", 1)]
+
+
+@pytest.mark.parametrize("start", [2**64 - 1, NS + 1])
+def test_a_start_time_sqlite_cannot_hold_or_after_the_point_is_rejected(start: int) -> None:
+    payload = body(metric(m.COST, [{**point(1.0), "startTimeUnixNano": str(start)}]))
+    assert m.decode(payload, JSON).rejected == {"invalid_time": 1}
+
+
+def test_a_retry_of_a_point_without_a_model_is_kept_once(store: SqliteSpanStore) -> None:
+    target = TraceIngest(store, lambda: NOW, token=TOKEN)  # type: ignore[arg-type]
+    payload = body(metric(m.TOKENS, [point(5, type="input")]))
+    assert post(target, payload).status == 200
+    assert post(target, payload).status == 200
+    [(usage,)] = store.metered_usage_since(NOW + timedelta(minutes=1), [timedelta(hours=1)])
+    assert (usage.model, usage.input_tokens) == (None, 5)
+
+
+def test_parts_of_one_counter_in_one_export_are_summed(store: SqliteSpanStore) -> None:
+    target = TraceIngest(store, lambda: NOW, token=TOKEN)  # type: ignore[arg-type]
+    parts = [point(5, type="input", model="claude-x", query_source="a"),
+             point(7, type="input", model="claude-x", query_source="b")]  # fmt: skip
+    assert post(target, body(metric(m.TOKENS, parts))).status == 200
+    [(usage,)] = store.metered_usage_since(NOW + timedelta(minutes=1), [timedelta(hours=1)])
+    assert usage.input_tokens == 12
+
+
+def test_metric_points_beyond_the_row_cap_go_oldest_first(store: SqliteSpanStore) -> None:
+    rows = [("s-1", None, "m", "input", 1.0, NS + n, NS + n) for n in range(10)]
+    assert store.append_metric_points(rows) == 10
+    store.prune(NOW - timedelta(days=1), 4)
+    [(usage,)] = store.metered_usage_since(NOW + timedelta(minutes=1), [timedelta(hours=1)])
+    assert usage.input_tokens == 4

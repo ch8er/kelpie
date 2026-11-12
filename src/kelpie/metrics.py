@@ -7,7 +7,7 @@ import threading
 import time
 from collections import Counter
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, NamedTuple
 
 from kelpie import __version__
@@ -47,7 +47,6 @@ def _labels(**labels: str) -> str:
     return "{" + ",".join(f'{k}="{_escape(v)}"' for k, v in labels.items()) + "}"
 
 
-LIMITS_WINDOW = timedelta(hours=24)  # limit hits from traces: the last day of the snapshot
 MAX_LIMIT_PROVIDERS = 20  # provider names come from span attributes: bounded series
 
 # A task's board as a label value: None (no label) unless boards are configured, then the
@@ -187,8 +186,8 @@ class Metrics:
         self.provider_status: dict[str, ProviderStatus] = {}
         self.provider_failures: Counter[tuple[str, str]] = Counter()
         self.provider_hits: Counter[str] = Counter()
-        # Limit hits counted from traces, per provider, over the last LIMITS_WINDOW of the
-        # tick's spans, and the concurrency they suggest (kelpie.core.limits); set by the
+        # Limit hits counted from traces, per provider, over the tick's spans ([traces]
+        # window), and the concurrency they suggest (kelpie.core.limits); set by the
         # app with the provider of a model (SpendConfig.provider_for).
         self.limit_provider: Callable[[str | None], str | None] | None = None
         self.trace_limits: tuple[ProviderLimits, ...] = ()
@@ -486,18 +485,22 @@ class Metrics:
         engine: Engine,
         snapshot: Snapshot | None = None,
     ) -> None:
+        limits = None
+        provider_for = self.limit_provider
+        if snapshot is not None and provider_for is not None:  # outside the lock: O(n log n)
+            found = provider_limits(
+                snapshot.spans, datetime.min.replace(tzinfo=UTC), snapshot.now + MAX_FUTURE,
+                provider_for,
+            )  # fmt: skip
+            # the most hits first: names come from spans, so bogus ones must not crowd out
+            ranked = sorted(found, key=lambda p: (-p.hits, p.provider))
+            limits = tuple(ranked[:MAX_LIMIT_PROVIDERS])
         with self._lock:
             self.idle_step = max(MAX_IDLE_STEP, IDLE_STEP_TICKS * engine.config.interval)
             if snapshot is not None:
                 self._fleet(snapshot)
-                if self.limit_provider is not None:
-                    found = provider_limits(
-                        snapshot.spans,
-                        snapshot.now - LIMITS_WINDOW,
-                        snapshot.now + MAX_FUTURE,
-                        self.limit_provider,
-                    )
-                    self.trace_limits = found[:MAX_LIMIT_PROVIDERS]
+                if limits is not None:
+                    self.trace_limits = limits
             self.ticks += 1
             self.tick_seconds += seconds
             self.last_tick = time.time()
@@ -1137,7 +1140,7 @@ class Metrics:
             "kelpie_llm_provider_trace_limit_hits",
             "gauge",
             "Model calls a provider refused for a limit (HTTP 429, a rate-limit error type), "
-            "counted from traces over the last 24 hours, by provider.",
+            "counted from the spans each tick sees ([traces] window), by provider.",
             [
                 f"kelpie_llm_provider_trace_limit_hits{_labels(provider=p.provider)} {p.hits}"
                 for p in self.trace_limits
@@ -1147,7 +1150,7 @@ class Metrics:
             "kelpie_llm_provider_suggested_concurrency",
             "gauge",
             "Sessions to run at once on a provider: below the lowest concurrency that hit its "
-            "limit in the last 24 hours (a suggestion; Kelpie never changes it).",
+            "limit within the spans each tick sees (a suggestion; Kelpie never changes it).",
             [
                 f"kelpie_llm_provider_suggested_concurrency{_labels(provider=p.provider)} "
                 f"{p.suggested}"

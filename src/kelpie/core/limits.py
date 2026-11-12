@@ -89,7 +89,9 @@ class ProviderLimits:
     hits: int
     calls: int  # model calls of the provider in the window, hits included
     at_hits: tuple[int, int] | None
-    peak: int  # the most sessions with a call of the provider running at once
+    # the most sessions with a call of the provider running at once, a session counted for
+    # CONCURRENT_SLACK after its call ended, as at a hit
+    peak: int
     suggested: int | None
     reason: str = ""
 

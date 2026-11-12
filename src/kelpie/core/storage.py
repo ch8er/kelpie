@@ -302,12 +302,14 @@ CREATE INDEX task_transitions_at ON task_transitions (at);
 # Claude Code's OpenTelemetry metrics (``POST /v1/metrics``, kelpie.traces.metrics): delta
 # data points of its token and cost counters, per session. Created by the span store's
 # writer when missing (no schema version: an older reader just sees no metrics); pruned
-# with the spans. Exporters retry, so a point stored twice is kept once.
+# with the spans (by age and, oldest first, beyond the spans' row cap). Exporters retry, so a
+# point stored twice is kept once: ``model`` is '' for none, as NULLs never collide in a
+# UNIQUE constraint.
 _METRIC_POINTS = """
 CREATE TABLE IF NOT EXISTS metric_points (
     session_id TEXT NOT NULL,
     task_id    TEXT,
-    model      TEXT,
+    model      TEXT NOT NULL DEFAULT '',
     kind       TEXT NOT NULL,
     value      REAL NOT NULL,
     time_ns    INTEGER NOT NULL,
@@ -818,6 +820,13 @@ def _json_path(key: str) -> str:
 SHORT_WINDOW = timedelta(hours=6)
 
 
+def _from_ns(ns: int) -> datetime:
+    """A time in nanoseconds since the epoch, to the microsecond."""
+    return datetime.fromtimestamp(ns // 1_000_000_000, tz=UTC) + timedelta(
+        microseconds=ns % 1_000_000_000 // 1000
+    )
+
+
 def _metered_usage(rows: Iterable[sqlite3.Row]) -> tuple[TokenUsage, ...]:
     """Metric rows (session, task, model, kind, value) as token usage: input includes
     cache reads and writes, as a span's does (Claude Code's ``input`` excludes them)."""
@@ -1146,11 +1155,7 @@ class SqliteSpanStore:
             " (session_id, task_id, model, kind, value, time_ns, start_ns, at)"
             " VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
         )
-        rows = [
-            (*p, _ts(datetime.fromtimestamp(p[5] // 1_000_000_000, tz=UTC)
-                     + timedelta(microseconds=p[5] % 1_000_000_000 // 1000)))
-            for p in points
-        ]  # fmt: skip
+        rows = [(p[0], p[1], p[2] or "", *p[3:], _ts(_from_ns(p[5]))) for p in points]
         added = 0
         for i in range(0, len(rows), self._batch):
             with self._lock, self._db:
@@ -1166,7 +1171,8 @@ class SqliteSpanStore:
         span_bound = "" if end is None else " AND last_at < ?"
         args: list[object] = [_ts(start)] + ([] if end is None else [_ts(end)])
         sql = (
-            "SELECT session_id, task_id, model, kind, SUM(value) AS value FROM metric_points"
+            "SELECT session_id, task_id, NULLIF(model, '') AS model, kind, SUM(value) AS value"
+            " FROM metric_points"
             f" WHERE at >= ?{bound} AND session_id NOT IN (SELECT session_id FROM spans"
             f" WHERE counted = 1 AND session_id IS NOT NULL AND last_at >= ?{span_bound})"
             " GROUP BY session_id, task_id, model, kind"
@@ -1294,14 +1300,35 @@ class SqliteSpanStore:
         while excess > 0 and (n := self._delete(oldest, (min(excess, self._batch),))):
             deleted += n
             excess -= n
+        self._prune_metric_points(before, max_rows)
         with self._lock:
             if not self._closing.is_set():
                 with self._db:
                     for table in ("span_sessions", "span_task_labels"):
                         self._db.execute(f"DELETE FROM {table} WHERE seen_at < ?", (_ts(before),))
-                    self._db.execute("DELETE FROM metric_points WHERE at < ?", (_ts(before),))
                 self._sessions = self._labels = None  # reload on the next write
         return deleted
+
+    def _prune_metric_points(self, before: datetime, max_rows: int) -> None:
+        """Claude Code metric points past the retention, then the oldest beyond
+        ``max_rows`` (the spans' cap: a sender picks a point's time, so age alone does not
+        bound them), in short batches like the spans. Not counted in the spans' rows."""
+        old = (
+            "DELETE FROM metric_points WHERE rowid IN"
+            " (SELECT rowid FROM metric_points WHERE at < ? LIMIT ?)"
+        )
+        while self._delete_points(old, (_ts(before), self._batch)):
+            pass
+        oldest = (
+            "DELETE FROM metric_points WHERE rowid IN"
+            " (SELECT rowid FROM metric_points ORDER BY at, rowid LIMIT ?)"
+        )
+        while True:
+            with self._read_lock:
+                rows = int(self._reader.execute("SELECT COUNT(*) FROM metric_points").fetchone()[0])
+            excess = rows - max(0, max_rows)
+            if excess <= 0 or not self._delete_points(oldest, (min(excess, self._batch),)):
+                return
 
     def discard(self, keys: Collection[SpanKey]) -> int:
         """Delete these spans (out of a scoped ingest token's scope, #302) in short batches,
@@ -1357,6 +1384,14 @@ class SqliteSpanStore:
             if n:
                 self.epoch += 1  # after the commit: a reload must not see the rows again
             return n
+
+    def _delete_points(self, sql: str, args: tuple[object, ...]) -> int:
+        """One batch of metric points: no span rows, so no count or epoch changes."""
+        with self._lock:
+            if self._closing.is_set():
+                return 0
+            with self._db:
+                return self._db.execute(sql, args).rowcount
 
     def oldest_at(self) -> datetime | None:
         rows = self._read("SELECT MIN(last_at) FROM spans INDEXED BY spans_last", ())

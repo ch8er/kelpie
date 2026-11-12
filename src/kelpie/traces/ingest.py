@@ -328,7 +328,7 @@ class TraceIngest:
             rejected[INVALID_TIME] += len(decoded.points) - len(points)
         rows = [
             (p.session_id, p.task_id, p.model, p.kind, p.value, p.time_ns, p.start_ns)
-            for p in points
+            for p in otlp_metrics.merged(points)
         ]
         append = getattr(self.store, "append_metric_points", None)
         if rows and callable(append):

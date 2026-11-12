@@ -1790,7 +1790,7 @@
           },
           "refId": "C",
           "expr": "max by (provider) (kelpie_llm_provider_trace_limit_hits)",
-          "legendFormat": "limit hits in traces, last 24h {{provider}}"
+          "legendFormat": "limit hits in traces {{provider}}"
         },
         {
           "datasource": {
@@ -1808,7 +1808,7 @@
         },
         "overrides": []
       },
-      "description": "Probe limit hits and failures: trailing-hour increase; a series appears with its first event. Limit hits in traces: model calls refused for a limit over the last 24 hours. Suggested concurrency: below the lowest that hit the limit (a suggestion; Kelpie never changes it)."
+      "description": "Probe limit hits and failures: trailing-hour increase; a series appears with its first event. Limit hits in traces: model calls refused for a limit among the spans each tick sees ([traces] window). Suggested concurrency: below the lowest that hit the limit (a suggestion; Kelpie never changes it)."
     },
     {
       "id": 46,

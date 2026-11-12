@@ -30,7 +30,7 @@ import json
 import math
 from collections import Counter
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from typing import Any
 
@@ -58,6 +58,7 @@ MAX_TOKENS_PER_POINT = 1_000_000_000
 MAX_USD_PER_POINT = 100_000.0
 MAX_ID = 256  # characters of a session id, task id or model
 TASK_ATTRIBUTE = "kelpie.task_id"
+MAX_NS = 2**63 - 1  # a time beyond it is no real time, and SQLite's INTEGER cannot hold it
 
 
 @dataclass(frozen=True, slots=True)
@@ -245,12 +246,23 @@ def _add(
     if session is None:
         out.rejected["no_session"] += 1
         return
-    if time_ns <= 0:
-        out.rejected["invalid_time"] += 1
+    if not 0 < time_ns <= MAX_NS or not 0 <= start_ns <= time_ns:
+        out.rejected["invalid_time"] += 1  # also what SQLite's INTEGER could not hold
         return
     task = _text(attributes.get(task_attribute)) or _text(resource.get(task_attribute))
     model = _text(attributes.get("model"))
-    out.points.append(MetricPoint(session, kind, value, time_ns, max(0, start_ns), model, task))
+    out.points.append(MetricPoint(session, kind, value, time_ns, start_ns, model, task))
+
+
+def merged(points: Iterable[MetricPoint]) -> list[MetricPoint]:
+    """Points of one export summed per stored key (session, model, kind, times): Claude
+    Code may split a counter by attributes Kelpie drops, and each part counts."""
+    found: dict[tuple[str, str | None, str, int, int, str | None], MetricPoint] = {}
+    for p in points:
+        key = (p.session_id, p.model, p.kind, p.time_ns, p.start_ns, p.task_id)
+        old = found.get(key)
+        found[key] = p if old is None else replace(old, value=old.value + p.value)
+    return list(found.values())
 
 
 def plausible(point: MetricPoint, oldest_ns: int, latest_ns: int) -> bool:
@@ -271,8 +283,3 @@ def encode_response(content_type: str, rejected: int = 0, message: str = "") -> 
     if rejected or message:
         body["partialSuccess"] = {"rejectedDataPoints": str(rejected), "errorMessage": message}
     return json.dumps(body).encode()
-
-
-def summarize(points: Iterable[MetricPoint]) -> Counter[str]:
-    """Data points per kind (metrics and logs)."""
-    return Counter(p.kind for p in points)

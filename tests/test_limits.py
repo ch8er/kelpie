@@ -149,6 +149,17 @@ def test_limit_gauges_from_the_ticks_spans() -> None:
     assert 'kelpie_llm_provider_trace_limit_hits{provider="anthropic"} 1' in text
     assert 'kelpie_llm_provider_suggested_concurrency{provider="anthropic"} 2' in text
     assert '\nx"' not in text  # a provider named by a span is escaped in its label
+    # Bogus names sorting first do not crowd a real provider out: the most hits first.
+    bogus = tuple(
+        call(100 + n, 4, f"z{n}", {"status_code": 429, "gen_ai.provider.name": f"a{n:02d}"})
+        for n in range(25)
+    )
+    more = (call(200, 5, "e", HIT), call(201, 5.5, "f", HIT))
+    crowded = Metrics()
+    crowded.set_limit_provider(by_model)
+    snap = Snapshot(now=now, spans=spans + bogus + more)
+    ControlLoop(Engine([]), lambda: snap, crowded).tick_once()
+    assert 'kelpie_llm_provider_trace_limit_hits{provider="anthropic"} 3' in crowded.render()
     off = Metrics()
     ControlLoop(Engine([]), lambda: Snapshot(now=now, spans=spans), off).tick_once()
     assert "kelpie_llm_provider_trace_limit_hits" not in off.render()
