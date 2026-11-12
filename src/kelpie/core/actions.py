@@ -25,6 +25,10 @@ class ActionKind(StrEnum):
     # Open a pull request with a better CI configuration for one pipeline (rule 9), by the
     # CI connector that reported its builds.
     PROPOSE_CI_CONFIG = "propose_ci_config"
+    # Lift a hold past its expiry (rule 6): ``params.hold`` names it, ``params.hold_kind``
+    # says what it is (label, flag, pause) and ``params.lift_prs`` the pull requests that
+    # carry a label hold. Carried out only by the executor the hold names as its owner.
+    LIFT_HOLD = "lift_hold"
     ESCALATE = "escalate"
     ALERT = "alert"
     # A person snoozed a task from a chat button (#176). Ledger only: recorded with the

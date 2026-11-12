@@ -428,9 +428,12 @@ gate agent work.
 
 | Key | Default | Meaning |
 | --- | --- | --- |
-| `label` | *required* | The label that marks held tasks. Unique. |
+| `label` | *required* | The hold's name: for a `label` hold, the label that marks held tasks (on the task or its PR). Unique. |
+| `kind` | `"label"` | `label`: a label on the task or its PR. `flag`: a platform flag on the task (`Task.flags`, which adapters fill; none does yet). `pause`: a blocked or waiting task whose block is a pause (category `pause`, else its reason matches `pattern`). A flag or pause hold is not a PR label to watch, and a task labelled with its name is held by it too. |
+| `pattern` | `^\s*pause(d\b\|\s*:)` | `pause` holds only: a regular expression (case-insensitive, at most 200 characters) over the block reason, e.g. `"paused by the owner"`. It runs over agent-written reasons every tick, so the rules of `[connectors.github.pulls] task_code` apply: no capturing groups (use `(?:…)`), no repeated group that itself repeats, no backreferences or lookarounds, and it must not match an empty string. |
 | `owner` | unset | Who owns the hold; named in the alert. |
-| `expires_after` | `hold_expiry`, else `"4h"` | Expected length. A hold's age is how long its oldest queued task has not moved, or since the label went on a PR (`[connectors.github.pulls]`). |
+| `expires_after` | `hold_expiry`, else `"4h"` | Expected length. A hold's age is how long its oldest queued task has not moved, or since the label went on a PR (`[connectors.github.pulls]`), or for a pause since its oldest block was set. |
+| `executor` | unset | The adapter or connector that owns the hold and lifts it past its expiry: rule 6 then emits `lift_hold` to it (once per hold, until the hold is back) beside the hold's alert, which says what became of the lift. Like every action it runs only in `act` (rule 6 runs in `observe` by default) and without dry-run; an executor that cannot lift it (no board adapter lifts holds yet, and the GitHub lifter refuses a hold on no PR) leaves a person to. Today only `"github_pulls"` lifts holds: a label hold on PRs, with `[connectors.github.pulls] allow_lift_holds`. Unset: Kelpie only alerts. |
 
 ### 7. resources
 
@@ -1952,6 +1955,9 @@ a warning. The token needs Pull requests: read and Issues: read (label events).
 | `max_details` | `20` | count, 0 to 100 | PRs whose mergeable state is read per scan, one request each, within `[connectors.github] max_requests_per_tick`. |
 | `closed_lookback` | `"7d"` | duration, 1h to 30d | Closed PRs (merged or not) are listed this far back, up to 300 per repository, after the open PRs and mergeable states of a scan. Rule 5 makes no WIP commit for a session that started before it (a PR closed during the session would not be seen). |
 | `task_code` | unset | regular expression, at most 200 characters | Task codes in task titles (besides the id) that link a PR whose title or branch carries them, e.g. `'^[A-Z][A-Z0-9]+-[0-9]+'` (anchored, so `UTF-8` later in a title is not a code). No capturing groups, no repeated group that itself repeats, no backreferences or lookarounds: it runs over agent-written titles every scan. |
+| `allow_lift_holds` | `false` | bool | Let rule 6 take a forgotten hold's label off its PRs (`lift_hold`, for holds with `executor = "github_pulls"`), as executor `github_pulls`. Needs `lift_repos` and `lift_token_env`. Only the label the hold names, only on the PRs the action names (at most 50), one `DELETE` of the label each; a label already gone is nothing to do. |
+| `lift_repos` | `[]` | list of `"owner/name"` | Repositories lifting may write to; each must be in `[connectors.github] repos`. |
+| `lift_token_env` | unset | variable name | A token of its own for lifting (Issues or Pull requests: write on `lift_repos`); `kelpie serve` refuses to start when it is unset, malformed or the same as another GitHub token Kelpie holds. |
 
 ### [[block_conditions]]
 

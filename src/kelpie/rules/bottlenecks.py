@@ -27,15 +27,20 @@ spare. An alert lasts as long as spare capacity exists.
   has waited ``idle_alert_after``: the dispatcher is not handing it out, and Kelpie alerts
   with the idle agents and the waiting work. Held work is parked on purpose and does not
   count until its hold expires (below).
-- **Holds with an owner and an expiry** (incident 14). A hold is a label that parks tasks on
-  purpose, listed in ``holds`` with an owner and an expected length (``expires_after``,
-  else ``hold_expiry``, else 4h). Bare ``hold_labels`` only park tasks, with no expiry
-  unless ``hold_expiry`` is set. A hold's age is how long its oldest queued task (ready,
-  review, accepted) has not moved, or, for a label on a PR, since the label went on when
-  the code host says (see below). Past the expiry
+- **Holds with an owner and an expiry** (incident 14). A hold parks tasks on purpose: a
+  label (on the task or its PR), a platform flag (``kind = "flag"``, ``Task.flags``) or a
+  pause (``kind = "pause"``: a blocked or waiting task whose block is a pause,
+  :func:`is_paused`), listed in ``holds`` with an owner and an expected length
+  (``expires_after``, else ``hold_expiry``, else 4h). Bare ``hold_labels`` only park
+  tasks, with no expiry unless ``hold_expiry`` is set. A hold's age is how long its oldest
+  queued task (ready, review, accepted) has not moved, or, for a label on a PR, since the
+  label went on when the code host says (see below), or for a pause since its oldest block
+  was set. Past the expiry
   Kelpie alerts once, naming the owner, the idle agents that could take the held work and
-  the idle agent minutes since the expiry (for the cost-of-chaos report). Lifting a hold in
-  act mode needs an executor that owns the label; none exists yet, so it is only an alert.
+  the idle agent minutes since the expiry (for the cost-of-chaos report). A hold that names
+  its owner (``executor``) gets ``lift_hold`` routed to that executor instead, which the
+  engine carries out only in act mode (an executor that cannot turns it into an alert);
+  without one it is only an alert.
 - **Human tasks on the critical path** (incident 16). For each open human-owned task, the
   agent tasks behind it, transitively, through dependencies and the ``human_task``
   conditions of blocked or waiting tasks. A human task the human can do now (ready or in
@@ -100,6 +105,7 @@ not on every tick.
 
 from __future__ import annotations
 
+import re
 from collections import deque
 from collections.abc import Collection, Sequence
 from dataclasses import dataclass, replace
@@ -107,7 +113,9 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from kelpie.core.actions import Action, ActionKind, Severity
+from kelpie.core.alerts import ANNOUNCES
 from kelpie.core.model import ConditionKind, OwnerKind, PullRequest, Snapshot, Status, Task
+from kelpie.core.pr_links import compile_task_code as safe_pattern
 from kelpie.core.serde import parse_duration
 from kelpie.rules import register
 from kelpie.rules._alerts import alert_params, count
@@ -128,6 +136,8 @@ NAME = "bottlenecks"
 PLANNED_AGENT_TASKS = "planned_agent_tasks"
 
 _RUNNABLE = frozenset({Status.READY, Status.IN_PROGRESS, Status.REVIEW, Status.ACCEPTED})
+MAX_PATTERN = 200  # characters of a pause hold's pattern (as a task_code)
+MAX_REASON = 2000  # characters of a block reason a pause pattern reads
 _FROZEN = frozenset({Status.BLOCKED, Status.WAITING})  # wait for the outside world
 _SHOWN = 5  # ids kept from each end of a long chain
 _QUEUED = frozenset({Status.READY, Status.REVIEW, Status.ACCEPTED})  # hand-off queues
@@ -285,6 +295,47 @@ def with_pr_labels(snapshot: Snapshot, linked: dict[str, tuple[PullRequest, ...]
     return replace(snapshot, tasks=tuple(tasks))
 
 
+LABEL, FLAG, PAUSE = "label", "flag", "pause"
+HOLD_KINDS = (LABEL, FLAG, PAUSE)
+# A pause hold without its own ``pattern``: a block the adapter files as a pause, or whose
+# reason starts with "paused" / "pause:" (case-insensitive).
+DEFAULT_PAUSE = re.compile(r"^\s*pause(?:d\b|\s*:)", re.IGNORECASE)
+PAUSE_CATEGORIES = frozenset({"pause", "paused"})
+MAX_LIFT_PRS = 50  # pull requests a lift names (the GitHub lifter's own cap: keep them equal)
+
+
+def is_paused(task: Task, pattern: re.Pattern[str] | None = None) -> bool:
+    """Whether ``task`` is blocked or waiting on a pause: its block's category is a pause,
+    or its reason matches ``pattern`` (default :data:`DEFAULT_PAUSE`)."""
+    block = task.block
+    if task.status not in _FROZEN or block is None:
+        return False
+    if (block.category or "").strip().lower() in PAUSE_CATEGORIES:
+        return True
+    return (pattern or DEFAULT_PAUSE).search(block.reason[:MAX_REASON]) is not None
+
+
+def with_hold_marks(snapshot: Snapshot, holds: Sequence[Hold]) -> Snapshot:
+    """The snapshot with each task held by a flag or pause hold also carrying that hold's
+    name as a label, so every check of held work reads one set of names."""
+    marked = [h for h in holds if h.kind != LABEL]
+    if not marked:
+        return snapshot
+    tasks = []
+    for t in snapshot.tasks:
+        extra = [
+            h.label
+            for h in marked
+            if h.label not in t.labels
+            and (
+                (h.kind == FLAG and h.label in t.flags)
+                or (h.kind == PAUSE and is_paused(t, h.pattern))
+            )
+        ]
+        tasks.append(replace(t, labels=t.labels + tuple(extra)) if extra else t)
+    return replace(snapshot, tasks=tuple(tasks))
+
+
 def _labeled_at(pr: PullRequest, label: str) -> datetime | None:
     return max((e.at for e in pr.labeled if e.label == label), default=None)
 
@@ -360,11 +411,19 @@ def critical_path(
 
 @dataclass(frozen=True, slots=True)
 class Hold:
-    """A label that parks tasks on purpose, who owns it and how long it should last."""
+    """Something that parks tasks on purpose, who owns it and how long it should last.
+    ``label`` names it; ``kind`` says how tasks are matched: a label on the task or its PR
+    (``label``), a platform flag on the task (``flag``, ``Task.flags``) or a pause
+    (``pause``: a blocked or waiting task whose block :func:`is_paused`, with ``pattern``).
+    ``executor`` names the platform adapter or connector that owns it and lifts it past
+    its expiry in act mode; None: Kelpie only alerts."""
 
     label: str
     owner: str | None = None
     expires_after: timedelta | None = None  # None: the rule's ``hold_expiry``
+    kind: str = LABEL
+    pattern: re.Pattern[str] | None = None  # pause holds: block reasons that are this pause
+    executor: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -484,6 +543,7 @@ class Bottlenecks:
 
     def evaluate(self, snapshot: Snapshot) -> Sequence[Action]:
         held = self.held_labels
+        snapshot = with_hold_marks(snapshot, self.holds)  # flag and pause holds, as labels
         linked, loose = link_pull_requests(snapshot)
         snapshot = with_pr_labels(snapshot, linked)  # a hold on a PR holds its task
         loads = role_loads(snapshot, self.min_idle_time, held, self.ready_is_queued)
@@ -789,14 +849,19 @@ class Bottlenecks:
             hold = holds[label]
             starts: dict[str, datetime] = {}
             for t in snapshot.tasks:
-                if t.status in _QUEUED and label in t.labels:
+                if label not in t.labels:
+                    continue
+                if hold.kind == PAUSE and t.status in _FROZEN and t.block is not None:
+                    starts[t.id] = t.block.since  # paused since the block was set
+                elif t.status in _QUEUED:
                     times = [x for pr in linked.get(t.id, ()) if (x := _labeled_at(pr, label))]
                     on = min(times, default=None)
                     starts[t.id] = t.status_since if on is None else max(t.status_since, on)
             prs = {
                 pr.ref: start
                 for pr in loose
-                if not pr.draft
+                if hold.kind == LABEL
+                and not pr.draft
                 and not pr.fork
                 and label in pr.labels
                 and (start := _labeled_at(pr, label) or _pr_since(pr)) is not None
@@ -830,6 +895,17 @@ class Bottlenecks:
             meanwhile = (
                 f" Meanwhile {len(idle)} agent(s) sit idle ({_names(idle)})." if idle else ""
             )
+            # The PRs a label hold is on (its tasks' and the loose ones): what its owner
+            # lifts it from. A flag or pause is lifted on the tasks by their board.
+            lift_prs = (
+                sorted(
+                    {pr.ref for tid in ids for pr in linked.get(tid, ()) if label in pr.labels}
+                    | set(pr_refs)
+                )[:MAX_LIFT_PRS]
+                if hold.kind == LABEL
+                else []
+            )
+            lift_key = f"{NAME}:lift:{label}"
             actions.append(
                 Action(
                     ActionKind.ALERT,
@@ -844,6 +920,9 @@ class Bottlenecks:
                     since=expired_at,
                     params={
                         "hold": label,
+                        **({"hold_kind": hold.kind} if hold.kind != LABEL else {}),
+                        # the lift below: the alert says what became of it
+                        **({ANNOUNCES: lift_key} if hold.executor is not None else {}),
                         "owner": hold.owner,
                         "held_tasks": ids[: _SHOWN * 2],
                         "held_count": len(ids) + len(pr_refs),
@@ -858,6 +937,24 @@ class Bottlenecks:
                     },
                 )
             )
+            if hold.executor is not None:
+                # Its owner lifts it, in act mode only; once per hold until it is back.
+                actions.append(
+                    Action(
+                        ActionKind.LIFT_HOLD,
+                        NAME,
+                        f"Hold '{label}' is past its expected {_human(expiry)}: lift it.",
+                        executor=hold.executor,
+                        key=lift_key,
+                        once=True,
+                        params={
+                            "hold": label,
+                            "hold_kind": hold.kind,
+                            "lift_prs": lift_prs,
+                            "held_tasks": ids[:MAX_LIFT_PRS],
+                        },
+                    )
+                )
         return actions
 
     def _human_gated(
@@ -1037,9 +1134,25 @@ def _hold(raw: Any) -> Hold:
     expires_after = None if expires is None else _duration(expires, f"holds.{label}.expires_after")
     if expires_after is not None and expires_after <= timedelta(0):
         raise ValueError(f"holds.{label}.expires_after must be positive")
+    kind = raw.pop("kind", LABEL)
+    if kind not in HOLD_KINDS:
+        raise ValueError(f"holds.{label}.kind must be one of {', '.join(HOLD_KINDS)}")
+    pattern = None
+    if (text := raw.pop("pattern", None)) is not None:
+        if kind != PAUSE:
+            raise ValueError(f"holds.{label}.pattern applies to pause holds only")
+        if not isinstance(text, str) or not text or len(text) > MAX_PATTERN:
+            raise ValueError(f"holds.{label}.pattern must be a regular expression")
+        try:  # it runs over agent-written reasons every tick: no backtracking patterns
+            pattern = re.compile(safe_pattern(text).pattern, re.IGNORECASE)
+        except ValueError as exc:
+            raise ValueError(f"holds.{label}.pattern {exc}") from None
+    executor = raw.pop("executor", None)
+    if executor is not None and (not isinstance(executor, str) or not executor.strip()):
+        raise ValueError(f"holds.{label}.executor must name an adapter or connector")
     if raw:
         raise ValueError(f"holds.{label}: unknown keys {sorted(raw)}")
-    return Hold(label, owner, expires_after)
+    return Hold(label, owner, expires_after, kind, pattern, executor.strip() if executor else None)
 
 
 @register(NAME)

@@ -328,6 +328,7 @@ FIX_KINDS = frozenset(
         ActionKind.STOP,
         ActionKind.CANCEL_BUILD,
         ActionKind.PROPOSE_CI_CONFIG,
+        ActionKind.LIFT_HOLD,
         ActionKind.WIP_COMMIT,
         ActionKind.COMMENT,
     }

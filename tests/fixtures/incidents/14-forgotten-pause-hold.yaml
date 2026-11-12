@@ -1,0 +1,50 @@
+id: "14-forgotten-pause-hold"
+incident: 14
+title: "A pause set on the board was forgotten"
+description: >
+  The farm's hold is not a label: the owner paused two tasks on the board (blocked, with
+  "Project paused by the owner" as the reason) and meant to resume them within four hours.
+  Six hours later nobody had, and the developers sat idle. A rule 6 hold of kind pause
+  matches those blocks by its pattern, ages the hold from when the blocks were set and
+  alerts once past its expiry, with the owner. A task blocked for something else (CI) is no
+  part of the pause, and a flag hold set an hour ago is within its expiry.
+rule: bottlenecks
+config:
+  min_idle_time: "30m"
+  idle_alert_after: "30m"
+  holds:
+    - {label: owner-pause, kind: pause, pattern: "paused by the owner", owner: human-owner, expires_after: "4h"}
+    - {label: release-freeze, kind: flag, owner: release-manager, expires_after: "4h"}
+snapshot:
+  now: "2026-03-02T17:00:00+00:00"
+  owners:
+    - {id: human-owner, role: owner, kind: human}
+    - {id: agent-dev-1, role: developer}
+    - {id: agent-dev-2, role: developer}
+  tasks:
+    - {id: T-1421, title: "Billing page", status: blocked, status_since: "2026-03-02T11:00:00+00:00", role: developer, block: {reason: "Project paused by the owner. Resume after the review.", since: "2026-03-02T11:00:00+00:00"}}
+    - {id: T-1422, title: "Invoice export", status: blocked, status_since: "2026-03-02T11:30:00+00:00", role: developer, block: {reason: "Project paused by the owner.", since: "2026-03-02T11:30:00+00:00"}}
+    # Distractor: blocked on CI, not on the pause.
+    - {id: T-1423, title: "Search fix", status: blocked, status_since: "2026-03-02T10:00:00+00:00", role: developer, block: {reason: "waiting for CI on PR #12", since: "2026-03-02T10:00:00+00:00"}}
+    # Distractor: flagged an hour ago, within its 4h.
+    - {id: T-1424, title: "Release notes", status: ready, status_since: "2026-03-02T16:00:00+00:00", role: developer, flags: [release-freeze]}
+  sessions:
+    - {id: S-1421, task_id: T-1420, owner_id: agent-dev-1, started_at: "2026-03-02T09:00:00+00:00", ended_at: "2026-03-02T11:00:00+00:00", final_status: done}
+    - {id: S-1422, task_id: T-1419, owner_id: agent-dev-2, started_at: "2026-03-02T09:00:00+00:00", ended_at: "2026-03-02T11:00:00+00:00", final_status: done}
+expected_actions:
+  - kind: alert
+    severity: warning
+    reason_contains: "past its expected 4h"
+    params:
+      hold: owner-pause
+      hold_kind: pause
+      owner: human-owner
+      held_tasks: [T-1421, T-1422]
+      held_count: 2
+      held_minutes: 360  # since the first block was set at 11:00
+not_expected_actions:
+  - kind: alert
+    params: {hold: release-freeze}
+  - kind: alert
+    params: {held_tasks: [T-1421, T-1422, T-1423]}
+  - kind: lift_hold  # no executor owns the pause: Kelpie only alerts

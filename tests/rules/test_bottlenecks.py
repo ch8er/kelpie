@@ -1,4 +1,5 @@
 import itertools
+import re
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -1438,3 +1439,68 @@ def test_a_gate_escalation_counts_its_planned_work() -> None:
         a for a in run(Snapshot(NOW, tasks, HUMANS, deps), GATES) if a.kind is ActionKind.ESCALATE
     ]
     assert [e.params["planned_agent_tasks"] for e in escalations] == [1]
+
+
+# --- holds by flag or pause, and their owner's lift (#425 item 5) -------------------------
+
+
+@pytest.mark.parametrize(
+    ("hold", "error"),
+    [
+        ({"label": "h", "kind": "sticker"}, "kind must be one of"),
+        ({"label": "h", "pattern": "x"}, "pattern applies to pause holds only"),
+        ({"label": "h", "kind": "pause", "pattern": "("}, "holds.h.pattern"),
+        ({"label": "h", "kind": "pause", "pattern": ""}, "must be a regular expression"),
+        ({"label": "h", "executor": ""}, "executor must name"),
+        ({"label": "h", "executor": 3}, "executor must name"),
+    ],
+)
+def test_bad_hold_kinds_patterns_and_executors_are_refused(
+    hold: dict[str, Any], error: str
+) -> None:
+    from kelpie.rules.bottlenecks import build
+
+    with pytest.raises(ValueError, match=re.escape(error)):
+        build({"holds": [hold]})
+
+
+def test_a_pause_by_category_or_default_wording() -> None:
+    from kelpie.core.model import Block
+    from kelpie.rules.bottlenecks import is_paused
+
+    since = datetime(2026, 3, 2, tzinfo=UTC)
+
+    def blocked(reason: str, category: str | None = None) -> Task:
+        return Task("T", "t", Status.BLOCKED, since, block=Block(reason, since, category=category))
+
+    assert is_paused(blocked("anything", category="Pause"))
+    assert is_paused(blocked("Paused until Monday"))
+    assert is_paused(blocked("pause: owner review"))
+    assert not is_paused(blocked("pausing is not a pause"))  # not the default's wording
+    assert not is_paused(blocked("waiting for CI"))
+    ready = Task("T", "t", Status.READY, since, block=Block("paused", since))
+    assert not is_paused(ready)  # only a blocked or waiting task is paused
+
+
+def test_only_label_holds_are_pr_labels_to_watch() -> None:
+    from kelpie.app import hold_labels
+
+    found = hold_labels(
+        {
+            "hold_labels": ["a"],
+            "holds": [
+                {"label": "b"},
+                {"label": "c", "kind": "flag"},
+                {"label": "d", "kind": "pause"},
+            ],
+        }
+    )
+    assert found == ["a", "b"]
+
+
+@pytest.mark.parametrize("pattern", ["(a+)+$", "(?=x)paused", r"(\w)\1", "a*"])
+def test_a_pause_pattern_that_could_backtrack_or_match_nothing_is_refused(pattern: str) -> None:
+    from kelpie.rules.bottlenecks import build
+
+    with pytest.raises(ValueError, match=re.escape("holds.h.pattern")):
+        build({"holds": [{"label": "h", "kind": "pause", "pattern": pattern}]})
