@@ -19,7 +19,9 @@ TITLE = "Provider limits"
 def limits(ctx: SectionContext) -> Section | None:
     inputs = ctx.inputs
     spend = inputs.spend if inputs.spend is not None else SpendConfig()
-    found = provider_limits(ctx.spans, ctx.start, ctx.end, spend.provider_for)
+    found = provider_limits(
+        ctx.spans, ctx.start, ctx.end, spend.provider_for, spend.configured_provider
+    )
     metered = inputs.metered
     if not found and not metered:
         return None

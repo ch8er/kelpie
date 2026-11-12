@@ -190,6 +190,7 @@ class Metrics:
         # window), and the concurrency they suggest (kelpie.core.limits); set by the
         # app with the provider of a model (SpendConfig.provider_for).
         self.limit_provider: Callable[[str | None], str | None] | None = None
+        self.limit_configured: Callable[[str | None], str | None] | None = None
         self.trace_limits: tuple[ProviderLimits, ...] = ()
         self.metrics_requests: Counter[str] = Counter()  # POST /v1/metrics, by status code
         self.metric_points_total: Counter[str] = Counter()  # stored | ignored
@@ -268,10 +269,16 @@ class Metrics:
             for reason, n in rejected.items():
                 self.metric_points_rejected[reason] += n
 
-    def set_limit_provider(self, provider_for: Callable[[str | None], str | None]) -> None:
-        """Turn on limit hits from traces: ``provider_for`` names a model's provider."""
+    def set_limit_provider(
+        self,
+        provider_for: Callable[[str | None], str | None],
+        configured: Callable[[str | None], str | None] | None = None,
+    ) -> None:
+        """Turn on limit hits from traces: ``provider_for`` names a model's provider,
+        ``configured`` the one ``[spend.providers]`` sets (it comes first)."""
         with self._lock:
             self.limit_provider = provider_for
+            self.limit_configured = configured
 
     def spans_rejected(self, reason: str, count: int) -> None:
         with self._lock:
@@ -490,7 +497,7 @@ class Metrics:
         if snapshot is not None and provider_for is not None:  # outside the lock: O(n log n)
             found = provider_limits(
                 snapshot.spans, datetime.min.replace(tzinfo=UTC), snapshot.now + MAX_FUTURE,
-                provider_for,
+                provider_for, self.limit_configured,
             )  # fmt: skip
             # the most hits first: names come from spans, so bogus ones must not crowd out
             ranked = sorted(found, key=lambda p: (-p.hits, p.provider))

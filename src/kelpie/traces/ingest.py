@@ -317,7 +317,9 @@ class TraceIngest:
                 message = f"bad gzip body: {exc}"
                 return _error(400, encoding, otlp.INVALID_ARGUMENT, message, close=False)
         try:
-            decoded = otlp_metrics.decode(body, media, self.options.task_attribute)
+            decoded = otlp_metrics.decode(
+                body, media, self.options.task_attribute, self.options.session_attribute
+            )
         except otlp.DecodeError as exc:
             return _error(400, encoding, otlp.INVALID_ARGUMENT, str(exc), close=False)
         now = self.clock()
@@ -330,16 +332,17 @@ class TraceIngest:
             (p.session_id, p.task_id, p.model, p.kind, p.value, p.time_ns, p.start_ns)
             for p in otlp_metrics.merged(points)
         ]
+        stored = 0
         append = getattr(self.store, "append_metric_points", None)
         if rows and callable(append):
             try:
-                append(rows)
+                stored = append(rows)  # without an exporter's retries
             except Exception as exc:  # the store is down: let the exporter retry
                 log.error("cannot store %d metric points: %s", len(rows), exc)
                 return _error(503, encoding, otlp.UNAVAILABLE, "store unavailable", close=False)
         hook = getattr(self.observer, "metric_points", None)
         if callable(hook):
-            hook(len(points), decoded.ignored, dict(rejected))
+            hook(stored, decoded.ignored, dict(rejected))
         total = sum(rejected.values())
         message = "; ".join(f"{n} {reason}" for reason, n in sorted(rejected.items()))
         return Reply(200, otlp_metrics.encode_response(media, total, message), media)

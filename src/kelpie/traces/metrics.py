@@ -5,8 +5,10 @@ Claude Code exports ``claude_code.token.usage`` (tokens, by ``type``: ``input``,
 sums, each data point carrying ``session.id`` and ``model``. Kelpie keeps those two and
 nothing else: every other metric is counted as ignored, never stored.
 
-What is taken from a data point: the session (``session.id``, required: without it the
-spend cannot be told apart from the traces of the same session), the model, the token
+What is taken from a data point: the session (required: without it the spend cannot be
+told apart from the traces of the same session; found as a span's is, ``[traces]
+session_attribute``, else ``gen_ai.conversation.id``, else ``session.id``, on the point
+then its resource), the model, the token
 type, the task (``kelpie.task_id``, on the point or the resource, as for spans), the time
 and the value. Every other attribute (user, organization, account, terminal) is dropped.
 Only **delta** temporality is accepted (Claude Code's default): a cumulative point would
@@ -31,7 +33,6 @@ import math
 from collections import Counter
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field, replace
-from datetime import UTC, datetime
 from typing import Any
 
 from google.protobuf.message import DecodeError as ProtobufDecodeError
@@ -41,6 +42,7 @@ from opentelemetry.proto.collector.metrics.v1.metrics_service_pb2 import (
 )
 
 from kelpie.traces import otlp
+from kelpie.traces.semconv import DEFAULT_SESSION_ATTRIBUTE, SESSION_FALLBACKS
 
 PATH = "/v1/metrics"
 TOKENS = "claude_code.token.usage"
@@ -58,6 +60,7 @@ MAX_TOKENS_PER_POINT = 1_000_000_000
 MAX_USD_PER_POINT = 100_000.0
 MAX_ID = 256  # characters of a session id, task id or model
 TASK_ATTRIBUTE = "kelpie.task_id"
+SESSION_ATTRIBUTE = DEFAULT_SESSION_ATTRIBUTE
 MAX_NS = 2**63 - 1  # a time beyond it is no real time, and SQLite's INTEGER cannot hold it
 
 
@@ -73,10 +76,6 @@ class MetricPoint:
     model: str | None = None
     task_id: str | None = None
 
-    @property
-    def at(self) -> datetime:
-        return datetime.fromtimestamp(self.time_ns / 1e9, tz=UTC)
-
 
 @dataclass(slots=True)
 class DecodedMetrics:
@@ -85,17 +84,22 @@ class DecodedMetrics:
     ignored: int = 0  # data points of metrics Kelpie does not read
 
 
-def decode(body: bytes, content_type: str, task_attribute: str = TASK_ATTRIBUTE) -> DecodedMetrics:
+def decode(
+    body: bytes,
+    content_type: str,
+    task_attribute: str = TASK_ATTRIBUTE,
+    session_attribute: str = SESSION_ATTRIBUTE,
+) -> DecodedMetrics:
     """Decode an ``ExportMetricsServiceRequest``; ``content_type`` is :data:`otlp.JSON` or
     :data:`otlp.PROTOBUF`. :class:`kelpie.traces.otlp.DecodeError` when it is not one."""
     if content_type == otlp.PROTOBUF:
-        return _from_protobuf(body, task_attribute)
+        return _from_protobuf(body, (task_attribute, session_attribute))
     if content_type == otlp.JSON:
-        return _from_json(body, task_attribute)
+        return _from_json(body, (task_attribute, session_attribute))
     raise ValueError(f"unsupported content type {content_type!r}")
 
 
-def _from_protobuf(body: bytes, task_attribute: str) -> DecodedMetrics:
+def _from_protobuf(body: bytes, keys: tuple[str, str]) -> DecodedMetrics:
     request = ExportMetricsServiceRequest()
     try:
         request.ParseFromString(body)
@@ -129,12 +133,12 @@ def _from_protobuf(body: bytes, task_attribute: str) -> DecodedMetrics:
                         value,
                         p.time_unix_nano,
                         p.start_time_unix_nano,
-                        task_attribute,
+                        keys,
                     )
     return out
 
 
-def _from_json(body: bytes, task_attribute: str) -> DecodedMetrics:
+def _from_json(body: bytes, keys: tuple[str, str]) -> DecodedMetrics:
     try:
         payload = json.loads(body)
     except (ValueError, RecursionError) as exc:
@@ -158,8 +162,15 @@ def _from_json(body: bytes, task_attribute: str) -> DecodedMetrics:
                         if isinstance(d, dict)
                     )
                     continue
-                if not isinstance(total, dict):
-                    out.rejected["not_a_sum"] += 1
+                if not isinstance(total, dict):  # counted per data point, as in protobuf
+                    out.rejected["not_a_sum"] += (
+                        sum(
+                            len(otlp._list(d, "dataPoints", "data_points"))
+                            for d in (m.get(k) for k in _DATA_KINDS)
+                            if isinstance(d, dict)
+                        )
+                        or 1
+                    )
                     continue
                 try:
                     temporality = otlp._json_int(
@@ -189,7 +200,7 @@ def _from_json(body: bytes, task_attribute: str) -> DecodedMetrics:
                         value,
                         time_ns,
                         start_ns,
-                        task_attribute,
+                        keys,
                     )
     return out
 
@@ -222,7 +233,7 @@ def _add(
     value: float | None,
     time_ns: int,
     start_ns: int,
-    task_attribute: str,
+    keys: tuple[str, str],
 ) -> None:
     if temporality != DELTA:
         out.rejected["not_delta"] += 1
@@ -242,7 +253,11 @@ def _add(
     if value > top:
         out.rejected["bad_value"] += 1
         return
-    session = _text(attributes.get("session.id")) or _text(resource.get("session.id"))
+    task_attribute, session_attribute = keys
+    session = None
+    for key in (session_attribute, *SESSION_FALLBACKS):  # as spans resolve theirs
+        if (session := _text(attributes.get(key)) or _text(resource.get(key))) is not None:
+            break
     if session is None:
         out.rejected["no_session"] += 1
         return
@@ -257,11 +272,14 @@ def _add(
 def merged(points: Iterable[MetricPoint]) -> list[MetricPoint]:
     """Points of one export summed per stored key (session, model, kind, times): Claude
     Code may split a counter by attributes Kelpie drops, and each part counts."""
-    found: dict[tuple[str, str | None, str, int, int, str | None], MetricPoint] = {}
+    found: dict[tuple[str, str | None, str, int, int], MetricPoint] = {}
     for p in points:
-        key = (p.session_id, p.model, p.kind, p.time_ns, p.start_ns, p.task_id)
+        key = (p.session_id, p.model, p.kind, p.time_ns, p.start_ns)  # the stored key
         old = found.get(key)
-        found[key] = p if old is None else replace(old, value=old.value + p.value)
+        found[key] = (
+            p if old is None
+            else replace(old, value=old.value + p.value, task_id=old.task_id or p.task_id)
+        )  # fmt: skip
     return list(found.values())
 
 

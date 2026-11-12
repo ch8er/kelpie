@@ -2157,7 +2157,8 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
     span_store = _open_span_store(settings.db_path)
     metrics.set_traces(True, [*(str(k) for k in SpanKind), IGNORED])
     metrics.set_span_rows_source(span_store.count)
-    metrics.set_limit_provider(settings.spend.provider_for)  # limit hits from traces
+    spend = settings.spend  # limit hits from traces, named as [spend.providers] names them
+    metrics.set_limit_provider(spend.provider_for, spend.configured_provider)
     if token is None and hub is None and not scoped:
         log.warning(
             "OTLP ingest on /v1/traces and /v1/metrics accepts data without a token; set $%s",

@@ -87,6 +87,15 @@ def test_the_provider_from_the_span_else_its_model() -> None:
     assert provider_of(call(1, 0, "s", model="local-z"), by_model) == "unknown"
 
 
+def test_a_configured_provider_comes_before_the_spans_own_name() -> None:
+    def configured(model: str | None) -> str | None:
+        return "claude-max" if model == "claude-x" else None
+
+    span_ = call(1, 0, "s", {"gen_ai.system": "anthropic"})
+    assert provider_of(span_, by_model, configured) == "claude-max"
+    assert provider_of(call(1, 0, "s", model="gpt-y"), by_model, configured) == "openai"
+
+
 def test_hits_with_several_sessions_running_suggest_fewer() -> None:
     spans = [
         call(1, 0, "a", length=10),

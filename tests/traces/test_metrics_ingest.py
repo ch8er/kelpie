@@ -324,3 +324,44 @@ def test_metric_points_beyond_the_row_cap_go_oldest_first(store: SqliteSpanStore
     store.prune(NOW - timedelta(days=1), 4)
     [(usage,)] = store.metered_usage_since(NOW + timedelta(minutes=1), [timedelta(hours=1)])
     assert usage.input_tokens == 4
+
+
+def test_the_session_is_found_as_a_spans_is(store: SqliteSpanStore) -> None:
+    # The host names its sessions with kelpie.session_id: its spans and its metric points
+    # land on the same session, so the traces win and nothing counts twice.
+    target = TraceIngest(store, lambda: NOW, token=TOKEN)  # type: ignore[arg-type]
+    payload = body(
+        metric(m.TOKENS, [point(5, type="input", model="claude-x")]),
+        resource=[kv("kelpie.session_id", "host-7")],
+    )
+    [p] = m.decode(payload, JSON).points
+    assert p.session_id == "host-7"
+    assert post(target, payload).status == 200
+    store.append_spans([span(1, NOW, end=NOW, session="host-7", tokens=10)], NOW)
+    assert store.metered_usage_since(NOW + timedelta(minutes=1), [timedelta(hours=1)]) == [()]
+
+
+def test_gzip_bodies_and_their_limit() -> None:
+    import gzip
+
+    target = TraceIngest(MemorySpanStore(), lambda: NOW, token=TOKEN, max_body_bytes=4096)
+    packed = gzip.compress(CLAUDE)
+    assert post(target, packed, **{"Content-Encoding": "gzip"}).status == 200
+    bomb = gzip.compress(b" " * 100_000)
+    assert post(target, bomb, **{"Content-Encoding": "gzip"}).status == 413
+
+
+def test_a_store_that_cannot_write_is_503_so_the_exporter_retries() -> None:
+    class Broken(MemorySpanStore):
+        def append_metric_points(self, rows: object) -> int:
+            raise OSError("disk full")
+
+    target = TraceIngest(Broken(), lambda: NOW, token=TOKEN)
+    assert post(target, CLAUDE).status == 503
+
+
+def test_points_without_a_model_are_reported_as_unknown(store: SqliteSpanStore) -> None:
+    target = TraceIngest(store, lambda: NOW, token=TOKEN)  # type: ignore[arg-type]
+    assert post(target, body(metric(m.COST, [point(0.5)]))).status == 200
+    window = (NOW - timedelta(hours=1), NOW + timedelta(hours=1))
+    assert store.metered_between(*window) == ((None, 0, 0.5),)

@@ -1323,12 +1323,11 @@ class SqliteSpanStore:
             "DELETE FROM metric_points WHERE rowid IN"
             " (SELECT rowid FROM metric_points ORDER BY at, rowid LIMIT ?)"
         )
-        while True:
-            with self._read_lock:
-                rows = int(self._reader.execute("SELECT COUNT(*) FROM metric_points").fetchone()[0])
-            excess = rows - max(0, max_rows)
-            if excess <= 0 or not self._delete_points(oldest, (min(excess, self._batch),)):
-                return
+        with self._read_lock:  # counted once, then by what was deleted, as the spans are
+            rows = int(self._reader.execute("SELECT COUNT(*) FROM metric_points").fetchone()[0])
+        excess = rows - max(0, max_rows)
+        while excess > 0 and (n := self._delete_points(oldest, (min(excess, self._batch),))):
+            excess -= n
 
     def discard(self, keys: Collection[SpanKey]) -> int:
         """Delete these spans (out of a scoped ingest token's scope, #302) in short batches,

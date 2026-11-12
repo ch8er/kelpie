@@ -4,8 +4,9 @@ Pure: no I/O and no clock. A **limit hit** is a model call (an LLM span) the pro
 refused for a usage or rate limit: HTTP 429 in Claude Code's ``status_code``, or an
 ``error.type`` that names a rate limit (``429``, ``rate_limit_error``, ``RateLimitError``,
 ``too_many_requests``, ...). An overload (HTTP 529, ``overloaded_error``) is the provider's
-own capacity, not the farm's limit, and is not counted. The provider is the span's
-``gen_ai.provider.name`` (or ``gen_ai.system``), else the one its model belongs to (a
+own capacity, not the farm's limit, and is not counted. The provider is the one
+``[spend.providers]`` configures for its model, else its ``gen_ai.provider.name``
+(or ``gen_ai.system``), else the one its model belongs to (a
 ``provider_for`` callable, :meth:`kelpie.core.spend.SpendConfig.provider_for`), else
 :data:`UNKNOWN`.
 
@@ -15,7 +16,9 @@ more than ``CONCURRENT_SLACK`` before it) are counted: the concurrency the limit
 at. The suggestion is one less than the lowest of those counts, at least 1: below the
 lowest concurrency that ever hit the limit in the window. When the limit was hit with a
 single session running, concurrency is not what reaches it (a plan's token limit, a
-weekly cap): there is no suggestion and the reason says so. It is a suggestion for a
+weekly cap): there is no suggestion and the reason says so. A call still running (no end
+yet) counts as running for ``CONCURRENT_SLACK`` after its start only, so a long call in
+flight may be missed at a hit: the count is a lower bound. It is a suggestion for a
 person (a report line and a metric); Kelpie never changes a farm's concurrency by itself.
 """
 
@@ -69,8 +72,16 @@ def is_limit_hit(span: Span) -> bool:
     return False
 
 
-def provider_of(span: Span, provider_for: Callable[[str | None], str | None]) -> str:
-    """The provider ``span`` called (module doc)."""
+def provider_of(
+    span: Span,
+    provider_for: Callable[[str | None], str | None],
+    configured: Callable[[str | None], str | None] | None = None,
+) -> str:
+    """The provider ``span`` called (module doc); a provider the farm configured for its
+    model (``configured``: ``[spend.providers]``) comes first, so hits and suggestions carry
+    the name the other provider series use."""
+    if configured is not None and (found := configured(span.model)) is not None:
+        return found
     for key in _PROVIDER_KEYS:
         value = span.attributes.get(key)
         if isinstance(value, str) and value.strip():
@@ -115,6 +126,7 @@ def provider_limits(
     start: datetime,
     end: datetime,
     provider_for: Callable[[str | None], str | None],
+    configured: Callable[[str | None], str | None] | None = None,
 ) -> tuple[ProviderLimits, ...]:
     """Every provider with a limit hit among the model calls that ended within
     [``start``, ``end``), by provider name. Pure: the same spans give the same answer."""
@@ -124,7 +136,7 @@ def provider_limits(
             continue
         last = span.end or span.start
         if start <= last < end:
-            calls[provider_of(span, provider_for)].append(span)
+            calls[provider_of(span, provider_for, configured)].append(span)
     out = []
     for provider in sorted(calls):
         found = calls[provider]

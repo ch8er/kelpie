@@ -1290,7 +1290,8 @@ sessions with no model call in traces in the budget's window (a session exported
 counts once, from its traces); the points are pruned with the spans (`retention`,
 the spans' age limits apply to them too; beyond `max_rows` points the oldest go). The daily
 report lists them per model under "Provider limits", with the USD Claude Code reported.
-Single host only for now: `kelpie agent` relays `/v1/traces` to the hub, not `/v1/metrics`.
+Single host only for now: `kelpie agent` relays `/v1/traces` to the hub, not `/v1/metrics`;
+`[[traces.forward]]` forwards spans, not these metrics.
 
 Limit hits are counted from traces too: a model call refused with HTTP 429 or a rate-limit
 `error.type`, per provider (`gen_ai.provider.name`, else the model's provider). The daily
