@@ -289,6 +289,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ### Fixed
 
+- The in-memory ledger (`[storage] path = ":memory:"`, and `kelpie demo`) looked up every
+  action by scanning all the entries it keeps (up to 100,000), so a tick slowed down as the
+  ledger filled. It now keeps an index by fingerprint and subject (#457). A tick with about
+  19,000 actions on a synthetic 2,000-task farm went from 16 s to about 1 s. A per-tick
+  time budget test on that farm (`tests/perf/`) guards it.
 - While host resources cannot be read (Prometheus down, unreachable or refusing the
   token), rule 7's disk, memory, load, process and heavy-task alerts that are already open
   stay open instead of resolving as "no recent reading any more" next to the "host checks
