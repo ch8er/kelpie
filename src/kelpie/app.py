@@ -2537,18 +2537,17 @@ def _check_hub_operators(settings: Settings, policy: Policy | None) -> None:
         return
     from kelpie.remote.protocol import ADAPTER_NAMES
 
-    agents = {a.name for a in settings.hub.agents}
+    allowed = {a.name: a.adapters for a in settings.hub.agents}
     bad = sorted(
         b
         for b in policy.delegate_to
-        if "/" in b
-        and (b.split("/", 1)[0] not in agents or b.split("/", 1)[1] not in ADAPTER_NAMES)
+        if "/" in b and b.split("/", 1)[1] not in allowed.get(b.split("/", 1)[0], frozenset())
     )
     if bad:
         raise ConfigError(
             f"[engine.rules.delegation] delegate_to {bad}: with [hub] a board is "
-            f"<agent>/<adapter>, an agent of [[hub.agents]] ({', '.join(sorted(agents))}) and "
-            f"an adapter ({', '.join(sorted(ADAPTER_NAMES))})"
+            f"<agent>/<adapter>, an agent of [[hub.agents]] ({', '.join(sorted(allowed))}) and "
+            "an adapter the hub takes from it (its adapters, by default every Kelpie adapter)"
         )
     if bare := sorted(b for b in policy.delegate_to if "/" not in b and b in ADAPTER_NAMES):
         raise ConfigError(

@@ -450,6 +450,13 @@ def test_delegation_runs_on_a_hub(
     for board in ("vm-9/hermes", "laptop/nope", "hermes"):
         with pytest.raises(ConfigError, match="delegate_to"):
             build_app(load_settings(write(tmp_path, hub(board))))
+    # An adapter the hub does not take from that agent could never delegate either.
+    narrowed = hub("laptop/hermes").replace(
+        'token_env = "KELPIE_TEST_AGENT_TOKEN"\n',
+        'token_env = "KELPIE_TEST_AGENT_TOKEN"\nadapters = ["claude-code"]\n',
+    )
+    with pytest.raises(ConfigError, match="delegate_to"):
+        build_app(load_settings(write(tmp_path, narrowed)))
 
 
 def test_a_person_cannot_be_the_operator(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

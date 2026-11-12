@@ -5,7 +5,7 @@ back in the farm's namespace, and nothing lets one host's card land on another's
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
@@ -145,6 +145,16 @@ def test_the_card_speaks_the_agents_own_ids_but_keeps_its_key_line() -> None:
     wire_params(ActionKind.DELEGATE, {"operator": "ops-1", "card": local})  # still valid
 
 
+def test_a_trailing_line_break_keeps_the_key_line_whole() -> None:
+    """A body the wire accepts (ending in a line break) stays valid once localised, even
+    when the key holds the farm's task id."""
+    trailing = {**card(), "body": card()["body"] + "\n"}
+    wire_params(ActionKind.DELEGATE, {"operator": "ops-1", "card": trailing})
+    local = _local_card(trailing, "laptop:t_1a", "t_1a")
+    assert local["body"].endswith(f"kelpie-delegation: {KEY}\n")
+    wire_params(ActionKind.DELEGATE, {"operator": "ops-1", "card": local})
+
+
 def test_a_delegate_reaches_the_agent_and_its_card_id_comes_back_namespaced() -> None:
     rig = ready()
     rig.farm._kinds["laptop/hermes"] = KINDS | {ActionKind.DELEGATE}
@@ -189,6 +199,11 @@ def test_a_board_that_does_not_offer_delegate_gets_no_card() -> None:
         ("card ops:t_9 for ops-1", "card laptop:ops:t_9 for ops-1"),  # a named Hermes board
         ("made something", "made something"),  # no card id: delegation reads none
         (None, True),
+        # Too long once namespaced: delegation would read a cut id, so it gets none.
+        (
+            "card " + "c" * 195 + " for ops-1",
+            "made a card whose id is too long for Kelpie to follow for ops-1",
+        ),
     ],
 )
 def test_card_ids_in_results_are_namespaced(detail: str | None, expected: Any) -> None:
@@ -263,3 +278,135 @@ def test_a_flood_of_cards_costs_one_budget_per_tick() -> None:
     with pytest.raises(Busy, match="busy this tick"):
         rig.executors["laptop/hermes"].execute(delegate())
     assert not rig.hub._agents["laptop"].queue
+
+
+# --- the rule over a hub-merged board ----------------------------------------------------
+
+
+def merged_board(card_status: Status, operator_owns: bool = False) -> Any:
+    """A laptop board as the agent reports it (its own ids), merged the way the hub does."""
+    from kelpie.core.model import Block, Snapshot
+    from kelpie.remote.protocol import namespace_snapshot
+
+    blocked = Task(
+        "t_1a",
+        "Fix login",
+        Status.BLOCKED,
+        NOW,
+        owner_id="ops-1" if operator_owns else "dev-1",
+        block=Block("waiting on a merged PR", NOW),
+    )
+    made = Task(
+        "t_9",
+        "Kelpie: stale_blocks on t_1a",
+        card_status,
+        NOW,
+        assignee="ops-1",
+        block=Block("cannot reach the PR", NOW) if card_status is Status.BLOCKED else None,
+    )
+    board = Snapshot(now=NOW, tasks=(blocked, made))
+    return namespace_snapshot("laptop", "hermes", board)
+
+
+def hub_problem(task: str = "laptop:t_1a") -> Problem:
+    return Problem(
+        id=f"stale:{task}",
+        rule="stale_blocks",
+        severity="warning",
+        since=NOW - timedelta(hours=3),
+        opened_at=NOW - timedelta(hours=2),
+        summary=f"{task} is blocked on a merged PR.",
+        task_id=task,
+        kind="unlinked",
+        last_seen=NOW - timedelta(minutes=1),
+        mode="act",
+    )
+
+
+HUB_POLICY_CONFIG = {
+    "classes": {"stale_blocks": "agent"},
+    "delegate_to": {"laptop/hermes": "ops-1"},
+}
+
+
+def made_card(at: datetime) -> Any:
+    """The ledger entry the hub writes for a card the agent made: its detail as the hub
+    turned it (``card laptop:t_9 for ops-1``), read back by delegation's history."""
+    from kelpie.core.config import Mode
+    from kelpie.core.delegation import event_of
+    from kelpie.core.ledger import LedgerEntry
+    from kelpie.core.ledger import Outcome as Done
+
+    detail = _farm_card("laptop", "card t_9 for ops-1")
+    assert isinstance(detail, str)
+    entry = LedgerEntry(
+        at=at,
+        fingerprint="f",
+        subject="task:laptop:t_1a",
+        rule="delegation",
+        kind=ActionKind.DELEGATE,
+        mode=Mode.ACT,
+        outcome=Done.EXECUTED,
+        reason="r",
+        task_id="laptop:t_1a",
+        params={
+            "problem": "stale:laptop:t_1a",
+            "incident": "task:laptop:t_1a",
+            "attempt": 1,
+            "operator": "ops-1",
+        },
+        detail=detail,
+    )
+    event = event_of(entry)
+    assert event is not None and event.card_id == "laptop:t_9"
+    return event
+
+
+def evaluate(snapshot: Any, *problems: Problem, events: tuple[Any, ...] = ()) -> list[Action]:
+    from dataclasses import replace
+
+    from kelpie.core.delegation import policy_from_config
+    from kelpie.rules.delegation import Delegation
+
+    snap = replace(snapshot, problems=problems, delegations=events, delegation_read=True)
+    return list(Delegation(policy_from_config(HUB_POLICY_CONFIG)).evaluate(snap))
+
+
+def test_on_a_merged_board_the_rule_delegates_and_finds_its_card_again() -> None:
+    board = merged_board(Status.READY)
+    (first,) = [a for a in evaluate(board, hub_problem()) if a.kind is ActionKind.DELEGATE]
+    assert first.task_id == "laptop:t_1a" and first.params["operator"] == "ops-1"
+    # The card was made: the next tick sends no second card while it is open.
+    event = made_card(NOW - timedelta(minutes=10))
+    again = evaluate(board, hub_problem(), events=(event,))
+    assert [a for a in again if a.kind is ActionKind.DELEGATE] == []
+
+
+def test_a_problem_on_the_card_itself_or_the_operators_task_is_not_delegated() -> None:
+    board = merged_board(Status.READY)
+    event = made_card(NOW - timedelta(minutes=10))
+    on_card = evaluate(board, hub_problem("laptop:t_9"), events=(event,))
+    assert [a for a in on_card if a.kind is ActionKind.DELEGATE] == []
+    own = merged_board(Status.READY, operator_owns=True)  # held by laptop:ops-1
+    assert [a for a in evaluate(own, hub_problem()) if a.kind is ActionKind.DELEGATE] == []
+
+
+@pytest.mark.parametrize(
+    ("status", "verdict"),
+    [(Status.BLOCKED, "not_fixed"), (Status.DONE, "still_broken")],
+)
+def test_the_verdict_reads_the_card_on_the_merged_board(status: Status, verdict: str) -> None:
+    """The card's id came back namespaced, so Kelpie sees what the operator did with it."""
+    from dataclasses import replace
+
+    board = merged_board(status)
+    if status is Status.DONE:  # closed long enough ago for the hold
+        tasks = tuple(
+            replace(t, status_since=NOW - timedelta(hours=2)) if t.id == "laptop:t_9" else t
+            for t in board.tasks
+        )
+        board = replace(board, tasks=tasks)
+    event = made_card(NOW - timedelta(minutes=40))
+    said = [a for a in evaluate(board, hub_problem(), events=(event,)) if "verdict" in a.params]
+    assert [a.params["verdict"] for a in said] == [verdict]
+    assert "laptop:t_9" in said[0].reason

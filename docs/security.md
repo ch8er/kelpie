@@ -486,7 +486,9 @@ holding it):
   its own: each agent locks its own.
 - **`kelpie agent`** takes the locks of the boards whose adapters carry out actions,
   whatever the hub's modes are (it cannot know them); with `[agent] actions = []` it only
-  reports and takes none.
+  reports and takes none. Among those actions is `delegate` (#347): by default a hub may
+  have an agent put cards, assigned to an operator agent, on its boards; leave `delegate`
+  out of `[agent] actions` to refuse that on a host.
 - **Where.** Hermes: `<kanban.db>.kelpie-act.lock` next to each board's database. Claude
   Code and OpenClaw: `<spool>.kelpie-act.lock` next to the hook spool (instances reading one
   spool would stop the same sessions; its folder is created 0700 when the hook has not run

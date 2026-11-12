@@ -121,7 +121,7 @@ _PARAMS: dict[ActionKind, dict[str, type]] = {
 # rule's own text (other agents' words already quoted as data) and ends with the key line
 # the agent's adapter finds the card by (``kelpie.core.delegation.card_for``).
 MAX_CARD_TITLE = 200
-MAX_CARD_BODY = 16 * 1024
+MAX_CARD_BODY = 8000  # characters: Hermes keeps that much of a card's body, key line included
 MAX_CARD_KEY = 512
 CARD_KEY_LINE = "kelpie-delegation: "
 _OPERATOR = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,99}")  # core.delegation's profile names
