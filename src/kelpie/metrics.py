@@ -1318,7 +1318,8 @@ class Metrics:
         metric(
             "kelpie_budget_billed_estimate_usd",
             "gauge",
-            "What traces priced for the same billed days, kept beside the bill.",
+            "What traces and Claude Code's metrics priced for the same billed days, kept beside "
+            "the bill.",
             [
                 f"kelpie_budget_billed_estimate_usd{lbl} {b.billed_estimate_usd or 0.0:.6f}"
                 for b, lbl in billed

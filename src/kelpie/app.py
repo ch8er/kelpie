@@ -2894,7 +2894,10 @@ def reconcile_spend(
         metered_rows = metered(start, end) if callable(metered) else ()
         metered_usd = dict.fromkeys(providers, 0.0)
         for row in metered_rows:  # as budgets count them: priced from tokens, by provider
-            provider = spend.provider_for(row.model)
+            if row.model and platform_wrapped(row.model):
+                provider = spend.configured_provider(row.model, as_written=True)
+            else:
+                provider = spend.provider_for(row.model)
             price = settings.budgets.prices.price_for(row.model, day)
             if provider in metered_usd and price is not None:
                 metered_usd[provider] += price.cost(row)
@@ -3816,7 +3819,8 @@ def budget_sources(s: BudgetStatus) -> list[str]:
     if s.sources_disagree:
         out.append("the bill and the traces disagree past the warning thresholds (rule 10)")
     if s.bill_only_hard:
-        out.append("only the bill passes the hard threshold: held at soft, nothing is stopped")
+        held = "held at soft" if s.state == "soft" else "not hard"
+        out.append(f"only the bill passes the hard threshold: {held}, nothing is stopped")
     return out
 
 
