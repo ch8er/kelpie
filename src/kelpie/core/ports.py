@@ -308,7 +308,8 @@ class Alerter(Protocol):
 
 class TransitionStore(Protocol):
     """Where the control loop keeps the task status transitions it observes (#157);
-    :class:`kelpie.core.transitions.TransitionRecorder` writes it. Rules never see it."""
+    :class:`kelpie.core.transitions.TransitionRecorder` writes it. Rules never read it: they
+    see the recorder's recent history in the snapshot (``Snapshot.status_history``)."""
 
     def last_statuses(self) -> Mapping[str, StatusChange]:
         """The newest stored change per task id (what a restart compares with)."""
@@ -319,6 +320,10 @@ class TransitionStore(Protocol):
     ) -> None:
         """Store a tick's ``changes`` (often none) and extend the recorder's watch that
         began at ``watch_start`` to ``now``, in one write; raise when it cannot be stored."""
+        ...
+
+    def transitions(self, start: datetime, end: datetime) -> Sequence[StatusChange]:
+        """Rows in ``[start, end)``, plus each task's newest row before ``start``."""
         ...
 
 

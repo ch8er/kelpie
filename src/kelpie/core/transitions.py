@@ -37,15 +37,19 @@ from __future__ import annotations
 import logging
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 
-from kelpie.core.model import Snapshot, Status, Task
+from kelpie.core.model import Snapshot, Status, StatusStep, Task
 from kelpie.core.ports import TransitionStore
 
 log = logging.getLogger(__name__)
 
 # Stored characters of the platform's own status, the board and the source: names, not text.
 MAX_NAME = 128
+# What rules see of the history (``Snapshot.status_history``): the changes of this window
+# per task, plus the last one before it (the status the window began in), at most this many.
+HISTORY_WINDOW = timedelta(days=7)
+MAX_STEPS_PER_TASK = 32
 
 
 @dataclass(frozen=True, slots=True)
@@ -192,7 +196,11 @@ class TransitionRecorder:
     changes not stored are compared again (and so stored) once the store is back."""
 
     store: TransitionStore
+    window: timedelta = HISTORY_WINDOW
+    max_steps: int = MAX_STEPS_PER_TASK
     _last: dict[str, StatusChange] | None = field(default=None, init=False)
+    _recent: dict[str, list[StatusStep]] | None = field(default=None, init=False)
+    _trimmed_at: datetime | None = field(default=None, init=False)
     _watch_start: datetime | None = field(default=None, init=False)
     _seen: dict[str, datetime] = field(default_factory=dict, init=False)
     failures: int = field(default=0, init=False)
@@ -215,7 +223,72 @@ class TransitionRecorder:
             self._last[c.task_id] = c
         for t in snapshot.tasks:
             self._seen[t.id] = snapshot.now
+        self._remember(changes, snapshot.now)
         return changes
+
+    def steps(self, now: datetime) -> tuple[StatusStep, ...]:
+        """The recent history for rules (``Snapshot.status_history``): per task with a
+        change within ``window`` before ``now``, those changes and the status the window
+        began in (the last change before it), oldest first, at most ``max_steps``. A task
+        with no change within the window has none. The same whether the recorder ran all
+        along or started now and read the store back."""
+        if self._recent is None:
+            return ()
+        start = now - self.window
+        return tuple(
+            step
+            for steps in self._recent.values()
+            if steps[-1].at >= start
+            for step in _window(steps, start, self.max_steps)
+        )
+
+    def _remember(self, changes: Sequence[StatusChange], now: datetime) -> None:
+        if self._recent is None:
+            earlier = self._earlier(now, changes)
+            if earlier is None:
+                return  # retried on the next tick, with that tick's changes
+            self._recent = {}
+            self._add(sorted(earlier, key=lambda c: c.at))
+        self._add(changes)
+        self._trim(now, {c.task_id for c in changes})
+
+    def _earlier(self, now: datetime, changes: Sequence[StatusChange]) -> list[StatusChange] | None:
+        """What was recorded before this run within the window (and each task's last row
+        before it), read once; None when the store cannot be read now."""
+        try:
+            rows = self.store.transitions(now - self.window, now)
+        except Exception:
+            log.exception("reading recorded task status transitions failed")
+            return None
+        return [c for c in rows if c not in changes]
+
+    def _add(self, changes: Iterable[StatusChange]) -> None:
+        assert self._recent is not None
+        for c in changes:
+            self._recent.setdefault(c.task_id, []).append(
+                StatusStep(c.task_id, changed_at(c), c.status, c.previous)
+            )
+
+    def _trim(self, now: datetime, touched: set[str]) -> None:
+        """Bound what is kept: the tasks that changed now to their window, and once a
+        window every task, dropping those neither changed nor seen within it."""
+        assert self._recent is not None
+        start = now - self.window
+        full = self._trimmed_at is None or now - self._trimmed_at >= self.window
+        if full:
+            self._trimmed_at = now
+            for task_id in list(self._recent):
+                steps = self._recent[task_id]
+                if steps[-1].at < start and self._seen.get(task_id, steps[-1].at) < start:
+                    del self._recent[task_id]  # gone from the boards: nothing to read
+        for task_id in self._recent if full else touched & self._recent.keys():
+            self._recent[task_id] = _window(self._recent[task_id], start, self.max_steps)
+
+
+def _window(steps: Sequence[StatusStep], start: datetime, cap: int) -> list[StatusStep]:
+    """The steps from ``start`` on and the last one before it, at most ``cap``."""
+    first = next((i for i, s in enumerate(steps) if s.at >= start), len(steps))
+    return list(steps[max(first - 1, 0) :][-cap:])
 
 
 def history(changes: Iterable[StatusChange]) -> dict[str, tuple[StatusChange, ...]]:
