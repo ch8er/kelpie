@@ -1160,9 +1160,9 @@ labels: P1, area:traces
 The Hermes state.db reader (#271) is on main now, so loads can be counted.
 
 **Acceptance criteria**
-- [ ] Tokens a day from counted loads (Hermes `skill_view`, Claude Code skill loads), `token_basis = "loads"`, falling back to sessions and saying which
+- [x] Tokens a day from counted loads (Hermes `skill_view`, Claude Code skill loads), `token_basis = "loads"`, falling back to sessions and saying which (`kelpie.instructions.watch`, `Snapshot.skill_loads_counted`; the report says which basis; already in main, ticked in #PR)
 - [x] Daily report section: the top instruction files by tokens a day, with growth and copies (with `token_basis` loads or sessions, an estimate said so; already in main, ticked in #423)
-- [ ] `kelpie fix` before/after for a split: tokens a day on instructions and tokens per completed task for that role
+- [x] `kelpie fix` before/after for a split: tokens a day on instructions and tokens per completed task for that role (`kelpie fix --rule instruction_bloat`: `_instruction_tokens` and `_tokens_per_task` in report/verify.py, from the stored `instruction_tokens` samples; already in main, ticked in #PR)
 - [ ] Files on `kelpie agent` hosts measured and their sessions counted
 
 ### hermes boards: the board in metrics and the report (#198 follow-up)
@@ -1179,7 +1179,7 @@ has no per-board view, so two projects on one farm read as one.
 labels: P1, area:core
 **Acceptance criteria**
 - [x] A throughput spike right after a fix that unblocked a queue is named as a backlog release, and the next full day is preferred for the comparison (`Release` in report/verify.py; already in main, ticked in #423)
-- [ ] Toolchain version (e.g. Xcode / CoreSimulator, read through the textfile collector as config data) recorded per host; an outage that starts when it changes names the change as the likely cause (incident 20)
+- [x] Toolchain version (e.g. Xcode / CoreSimulator, read through the textfile collector as config data) recorded per host; an outage that starts when it changes names the change as the likely cause (incident 20) (`scripts/kelpie-toolchain.sh`, `Snapshot.toolchain_changes`, `rules/_toolchain.py` for rules 4, 9 and 10, #284; already in main, ticked in #PR)
 
 ### rules: unanswered asks — a question to a person or another agent is an obligation until answered
 labels: P1, area:rules
