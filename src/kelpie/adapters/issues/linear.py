@@ -60,7 +60,6 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from kelpie import __version__, net
-from kelpie.adapters.issues.github import _time
 from kelpie.adapters.issues.mapping import (
     Agent,
     Board,
@@ -70,6 +69,7 @@ from kelpie.adapters.issues.mapping import (
     LinkedPull,
     login_key,
 )
+from kelpie.adapters.issues.mapping import parse_time as _time
 from kelpie.adapters.issues.writes import WriteGate
 from kelpie.connectors.github.client import check_api_url, valid_token
 from kelpie.core.ports import Deferred

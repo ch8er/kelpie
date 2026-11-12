@@ -51,7 +51,8 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
+from typing import Any
 
 from kelpie.core.model import Block, Dependency, Owner, OwnerKind, Status, Task
 
@@ -61,6 +62,18 @@ DEFAULT_ROLE = "issue-agent"
 MAX_BODY = 8000  # characters of an issue's description kept on the task
 DEFAULT_BLOCKED_LABELS = ("blocked",)
 CANCELLED_REASONS = frozenset({"not_planned", "duplicate"})
+
+
+def parse_time(value: Any) -> datetime | None:
+    """An ISO 8601 time from a tracker (``Z`` or an offset; a naive one is UTC); None
+    for anything else."""
+    if not isinstance(value, str):
+        return None
+    try:
+        at = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return at if at.tzinfo is not None else at.replace(tzinfo=UTC)
 
 
 class IssuesError(RuntimeError):

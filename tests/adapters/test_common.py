@@ -12,16 +12,19 @@ from kelpie.adapters import _common
 from kelpie.adapters.claude_code import adapter as claude_code
 from kelpie.adapters.hermes import adapter as hermes
 from kelpie.adapters.hermes import stop as hermes_stop
-from kelpie.adapters.issues import github, linear
+from kelpie.adapters.issues import github, linear, mapping
 from kelpie.adapters.openclaw import adapter as openclaw
 from kelpie.adapters.openclaw import stop as openclaw_stop
+from kelpie.core import actlock
+from kelpie.core.actlock import ActLock
 
 
 def test_the_twins_are_one_copy() -> None:
     assert hermes.format_age is claude_code.format_age is openclaw.format_age
+    assert hermes.format_age is _common.format_age
     assert claude_code._utc is openclaw._utc is _common.epoch_utc
     assert hermes_stop._kill_group is hermes_stop.kill_group is openclaw_stop._kill_group
-    assert linear._time is github._time
+    assert linear._time is github._time is mapping.parse_time
 
 
 @pytest.mark.parametrize(
@@ -55,4 +58,4 @@ def test_spool_act_locks(tmp_path: Path) -> None:
     assert _common.spool_act_locks("claude-code", None, tmp_path) == ()
     assert _common.spool_act_locks("claude-code", spool, None) == ()
     (lock,) = _common.spool_act_locks("claude-code", spool, tmp_path)
-    assert lock.board == f"claude-code ({spool})"
+    assert lock == ActLock(f"claude-code ({spool})", actlock.beside(spool), True)
