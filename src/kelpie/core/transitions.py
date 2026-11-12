@@ -37,15 +37,19 @@ from __future__ import annotations
 import logging
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 
-from kelpie.core.model import Snapshot, Status, Task
+from kelpie.core.model import Snapshot, Status, StatusStep, Task
 from kelpie.core.ports import TransitionStore
 
 log = logging.getLogger(__name__)
 
 # Stored characters of the platform's own status, the board and the source: names, not text.
 MAX_NAME = 128
+# What rules see of the history (``Snapshot.status_history``): the changes of this window
+# per task, plus the last one before it (the status the window began in), at most this many.
+HISTORY_WINDOW = timedelta(days=7)
+MAX_STEPS_PER_TASK = 32
 
 
 @dataclass(frozen=True, slots=True)
@@ -192,7 +196,10 @@ class TransitionRecorder:
     changes not stored are compared again (and so stored) once the store is back."""
 
     store: TransitionStore
+    window: timedelta = HISTORY_WINDOW
+    max_steps: int = MAX_STEPS_PER_TASK
     _last: dict[str, StatusChange] | None = field(default=None, init=False)
+    _recent: dict[str, list[StatusStep]] | None = field(default=None, init=False)
     _watch_start: datetime | None = field(default=None, init=False)
     _seen: dict[str, datetime] = field(default_factory=dict, init=False)
     failures: int = field(default=0, init=False)
@@ -215,7 +222,50 @@ class TransitionRecorder:
             self._last[c.task_id] = c
         for t in snapshot.tasks:
             self._seen[t.id] = snapshot.now
+        self._remember(changes, snapshot.now)
         return changes
+
+    def steps(self, now: datetime) -> tuple[StatusStep, ...]:
+        """The recent history for rules (``Snapshot.status_history``): per task, its changes
+        within ``window`` before ``now`` and the last one before that, oldest first, at most
+        ``max_steps``. A task with no change within the window has none."""
+        if self._recent is None:
+            return ()
+        self._trim(now)
+        return tuple(step for steps in self._recent.values() for step in steps)
+
+    def _remember(self, changes: Sequence[StatusChange], now: datetime) -> None:
+        if self._recent is None:
+            self._recent = {}
+            read = getattr(self.store, "transitions", None)
+            if callable(read):  # what was recorded before this run, once
+                try:
+                    earlier = [c for c in read(now - self.window, now) if c not in changes]
+                except Exception:
+                    log.exception("reading recorded task status transitions failed")
+                    earlier = []
+                self._add(sorted(earlier, key=lambda c: c.at))
+        self._add(changes)
+        self._trim(now)
+
+    def _add(self, changes: Iterable[StatusChange]) -> None:
+        assert self._recent is not None
+        for c in changes:
+            self._recent.setdefault(c.task_id, []).append(
+                StatusStep(c.task_id, changed_at(c), c.status, c.previous)
+            )
+
+    def _trim(self, now: datetime) -> None:
+        assert self._recent is not None
+        start = now - self.window
+        for task_id in list(self._recent):
+            steps = self._recent[task_id]
+            inside = [i for i, s in enumerate(steps) if s.at >= start]
+            if not inside:
+                del self._recent[task_id]  # nothing happened to it within the window
+                continue
+            first = max(inside[0] - 1, 0)  # keep the status the window began in
+            self._recent[task_id] = steps[first:][-self.max_steps :]
 
 
 def history(changes: Iterable[StatusChange]) -> dict[str, tuple[StatusChange, ...]]:

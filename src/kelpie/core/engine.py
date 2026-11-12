@@ -663,6 +663,8 @@ class Engine:
         self._log_sleeps(snapshot.host_sleeps)
         if self.transitions is not None:
             self.transitions.record(snapshot)
+            if not snapshot.status_history:  # a source's own history wins (fixtures)
+                snapshot = replace(snapshot, status_history=self.transitions.steps(snapshot.now))
         return self.execute(self.evaluate(snapshot), snapshot)
 
     def _log_sleeps(self, sleeps: Sequence[HostSleep]) -> None:
