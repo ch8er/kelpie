@@ -85,7 +85,10 @@ session, the two Claude Code metrics, size, gzip and slot limits) and puts every
 session and task in the agent's namespace before storing it, so an agent's spend joins its
 own host's sessions and can never be booked to another host's. With `[hub]`,
 `/v1/metrics` on the main port is off, like `/v1/traces`. Point Claude Code's
-`OTEL_EXPORTER_OTLP_ENDPOINT` at the relay (`http://127.0.0.1:4318`) and both arrive.
+`OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` and `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` at the relay
+(`http://127.0.0.1:4318/v1/traces`, `.../v1/metrics`); the relay takes no logs (404), so
+leave Claude Code's logs exporter off, as in
+[quickstart-claude-code.md](quickstart-claude-code.md).
 
 ### TLS
 

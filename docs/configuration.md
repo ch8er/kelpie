@@ -2576,8 +2576,8 @@ and the report.
 
 For `kelpie serve` taking reports from agents. With `[hub]`, in-process `[adapters.*]` are
 refused (run `kelpie agent` on the server's machine too), the engine never guesses which
-board an action belongs to, and `/v1/traces` on the main port is off (spans come through
-the agents' relays).
+board an action belongs to, and `/v1/traces` and `/v1/metrics` on the main port are off
+(spans and Claude Code's metrics come through the agents' relays).
 
 | Key | Default | Meaning |
 | --- | --- | --- |

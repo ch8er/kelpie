@@ -852,9 +852,10 @@ sandboxed (in a container, as another user, on another machine reporting straigh
 `kelpie serve`) while sharing the one traces token, or one Claude Code or OpenClaw spool. An
 unsandboxed agent running as the same user as its peers gains nothing new: it could already
 signal their processes or block their tasks. Across hosts the multi-host hub is not
-affected: it namespaces every span and run by the `kelpie agent` whose token sent it.
-Agents on one host share that host's OTLP relay, which takes spans without a token, so
-within a host the risk is the same as on a single-host farm.
+affected: it namespaces every span, run and relayed metric point by the `kelpie agent`
+whose token sent it. Agents on one host share that host's OTLP relay, which takes spans and
+Claude Code's cost and token metrics without a token (so a local process can add spend to
+that host's own sessions), so within a host the risk is the same as on a single-host farm.
 
 **What to do.** Give every agent its own `[[traces.tokens]]` entry and retire the shared
 token ([above](#per-agent-traces-tokens)), and update the Hermes plugin on every agent host.

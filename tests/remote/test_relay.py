@@ -227,8 +227,10 @@ def test_without_traces_the_hub_refuses_metrics() -> None:
 def test_the_relay_forwards_metrics_under_the_agents_token(relay: Relay, sink: Sink) -> None:
     port = relay.server_address[1]
     assert send(port, b"points", path=METRICS) == (200, b"metrics ok")
-    ((body, rename, _),) = sink.metric_calls
-    assert body == b"points" and rename is not None and rename("s") == "laptop:s"
+    # A local sender's own token is replaced by the agent's: still the laptop's namespace.
+    assert send(port, b"points", token=OTHER, path=METRICS) == (200, b"metrics ok")
+    for body, rename, _ in sink.metric_calls:
+        assert body == b"points" and rename is not None and rename("s") == "laptop:s"
     assert sink.calls == []
 
 
