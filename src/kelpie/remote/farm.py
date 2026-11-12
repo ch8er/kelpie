@@ -20,6 +20,7 @@ from typing import Any, Protocol
 
 from kelpie.core.actions import Action, ActionKind, Severity
 from kelpie.core.alerts import AlertEvent, Did, Transition
+from kelpie.core.delegation import CARD_DETAIL
 from kelpie.core.executors import Executor
 from kelpie.core.host_sleep import DEFAULT_KEEP as SLEEPS_KEPT
 from kelpie.core.ledger import Outcome as LedgerOutcome
@@ -37,11 +38,13 @@ from kelpie.remote.protocol import (
     local,
     local_condition_id,
     namespace_snapshot,
+    namespaced,
     wire_params,
 )
 
 log = logging.getLogger(__name__)
 
+MAX_FARM_CARD_ID = 200  # what CARD_DETAIL reads of a card's id (kelpie.core.delegation)
 MAX_ACTIONS_PER_TICK = 16  # per agent; more fail fast and the ledger retries them
 FRESH_SLACK = timedelta(seconds=10)  # on top of twice the agent's interval
 MAX_KEPT_SLEEPS = 4 * MAX_SLEEPS  # per agent, the newest by end
@@ -345,6 +348,8 @@ class RemoteFarm:
             budget.seconds += time.monotonic() - started
         match result.outcome:
             case Outcome.DONE:
+                if action.kind is ActionKind.DELEGATE:
+                    return _farm_card(agent, result.detail)
                 return result.detail or True
             case Outcome.NOTHING_TO_DO:
                 if result.detail:  # the agent's note (in its own ids), for the ledger
@@ -373,6 +378,10 @@ class RemoteFarm:
                 params[key] = mine
         # Only a wait carries conditions to register; elsewhere (wake, unblock) they are
         # condition ids for the record, which wire_params drops.
+        if action.kind is ActionKind.DELEGATE and isinstance(params.get("card"), Mapping):
+            if task_id is None or action.task_id is None:
+                return None
+            params["card"] = _local_card(params["card"], action.task_id, task_id)
         if action.kind is ActionKind.WAIT and isinstance(params.get("conditions"), list):
             others = [a.name for a in self.hub.settings.agents if a.name != agent]
             conditions = [_condition(agent, c, others) for c in params["conditions"]]
@@ -462,6 +471,38 @@ def _condition(agent: str, raw: object, others: Iterable[str] = ()) -> dict[str,
         "kind": raw.get("kind"),
         "params": params,
     }
+
+
+def _local_card(card: Mapping[str, Any], farm_id: str, own_id: str) -> dict[str, Any]:
+    """A delegation card naming its task as the operator knows it on its board (``t_1``,
+    not ``laptop:t_1``) in the title and every body line but the last, the key line, which
+    stays as the rule wrote it (the agent finds the card by it again, so it must not change
+    between attempts). Only the task's id: other ids in the text (an owner) keep the farm's
+    form. A plain text replace, so ``xlaptop:t_1`` would change too: harmless in text."""
+    out = dict(card)
+    title, body = card.get("title"), card.get("body")
+    if isinstance(title, str):
+        out["title"] = title.replace(farm_id, own_id)
+    if isinstance(body, str):
+        text = body.rstrip("\n")  # the key line is the last one, as the wire checks it
+        if "\n" in text:
+            head, key_line = text.rsplit("\n", 1)
+            out["body"] = f"{head.replace(farm_id, own_id)}\n{key_line}{body[len(text) :]}"
+    return out
+
+
+def _farm_card(agent: str, detail: str | None) -> bool | str:
+    """An agent's ``card <id> for <operator>`` with the card's id in the farm's namespace,
+    so delegation finds the card among the agent's tasks (``laptop:t_9``); a detail naming
+    no card is passed on as it came (delegation then reads no card id)."""
+    found = CARD_DETAIL.match(detail or "")
+    if detail is None or found is None:
+        return detail or True
+    card = namespaced(agent, found[1])
+    if len(card) > MAX_FARM_CARD_ID:  # delegation would read it cut short: never the card
+        log.warning("agent %s made a card whose id is too long to follow: %r", agent, found[1])
+        return f"made a card whose id is too long for Kelpie to follow{detail[found.end() :]}"
+    return f"card {card}{detail[found.end() :]}"
 
 
 def _slept(report: Report | None, silent_since: datetime | None) -> str:

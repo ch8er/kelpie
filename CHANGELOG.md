@@ -10,12 +10,25 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ### Added
 
+- The Grafana dashboard links to traces in Langfuse (#455). Set the new **Langfuse traces
+  URL** variable to your project's traces page, and the "Traces in Langfuse" dashboard
+  link and the trace panels' links open it. The variable is empty by default; see
+  docs/dashboard.md.
 - Multi-host: `kelpie agent`'s OTLP relay forwards Claude Code's cost and token metrics
   (`/v1/metrics`) to the hub under the agent's token, as it does spans; the hub ingests
   them with `/v1/metrics`' checks and puts every point's session and task in the agent's
   namespace. Trace and metric exports share one budget of two in flight per agent (more
   get 503 with `Retry-After`), half of ingest's default decode slots.
   `POST /conditions` stays single-host.
+- Delegation under `[hub]` (#347): a `delegate` action crosses the wire to the
+  `kelpie agent` whose board holds the task, and the agent's adapter makes the card
+  (Hermes: `hermes kanban create`). The card is checked on the wire (an operator profile
+  name; exactly a title, body and key within size limits, the body ending with its key
+  line), names the task in the agent's own ids, and its id comes back in the agent's
+  namespace so delegation verifies the fix on the merged board. The startup refusal of
+  delegation with `[hub]` is gone; a `delegate_to` board naming an agent the hub does not
+  know, or a bare adapter name, is refused instead. `[agent] actions` without `delegate`
+  turns cards off on that host.
 - Hermes makes WIP commits (#399, option 1): `checkpoints` in `act` mode commits a dirty
   worktree locally on the task branch after its session ended, and never pushes. Git runs
   with a fixed environment (no global or system config, no hooks, no signing, a fixed
