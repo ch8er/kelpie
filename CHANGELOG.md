@@ -10,7 +10,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ### Added
 
-- The Grafana dashboard links to traces in Langfuse (#PR). Set the new **Langfuse traces
+- The Grafana dashboard links to traces in Langfuse (#455). Set the new **Langfuse traces
   URL** variable to your project's traces page, and the "Traces in Langfuse" dashboard
   link and the trace panels' links open it. The variable is empty by default; see
   docs/dashboard.md.
