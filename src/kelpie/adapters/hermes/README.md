@@ -329,6 +329,19 @@ marker, whether it verifies or not, waits for a person and is never cleared
 it pages chats subscribed to the task, and an agent that blocks the same task again with the
 same kind sends it to `triage` (Hermes' unblock-loop breaker).
 
+Rule 6 (`bottlenecks`) lifts a forgotten pause hold the same way, with
+`[adapters.hermes] allow_lift_holds = true` (off by default) and a `kind = "pause"` hold whose
+`executor` is `"hermes"`, past its expiry, in act mode only. Hermes records no labels and no
+flags (`Task.flags` stays empty), so a pause is a block whose reason reads as one: an untyped
+block whose text starts with "paused" or "pause:" (`hermes kanban block -- <task> "paused
+until the release"`), or whatever the hold's `pattern` says. A typed block reads
+`waiting_human: <kind>: <reason>`, so the default pattern never takes one for a pause. Each
+held task's block is cleared with the unblock above and all of its guards (the block the
+snapshot showed, never Kelpie's stop, never the circuit breaker); a task those guards refuse
+is left to a person. At most 5 blocks are cleared per lift (each is a CLI call in the tick);
+the rest are left to a person, and the alert names them. Two pause holds whose patterns both
+match a task lift it alike: Hermes records nothing else to tell them apart. On several boards each board clears its own tasks.
+
 Rule 3 (`orphan_status`) hands a task nobody runs to an idle agent of its role with
 `hermes kanban assign -- <task> <profile>`, then says why in a comment signed `kelpie`. Only a
 `todo`, `ready` or `review` task that no run claims, with the status and run Kelpie's snapshot

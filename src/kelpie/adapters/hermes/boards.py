@@ -46,7 +46,7 @@ from kelpie.core.model import (
     Task,
 )
 from kelpie.core.offers import Expect
-from kelpie.core.ports import PlatformEvent, UnsupportedAction
+from kelpie.core.ports import NothingToDo, PlatformEvent, UnsupportedAction
 
 log = logging.getLogger(__name__)
 
@@ -221,6 +221,53 @@ class HermesBoards:
     def check_answer(self, task_id: str, expect: Expect) -> None:
         board, local = self._route(task_id)
         board.check_answer(local, expect)
+
+    @property
+    def lift_holds(self) -> bool:
+        """Every board's ``allow_lift_holds`` (one setting for the home)."""
+        return all(b.lift_holds for b in self.boards)
+
+    def lift_hold(self, hold: str, kind: str, task_ids: Sequence[str], reason: str) -> str:
+        """Each board lifts its own held tasks (:meth:`HermesAdapter.lift_hold`); ids of no
+        watched board are left alone. A board with nothing to do is skipped; refusals from
+        every board refuse, and a failure of one board is raised once the others were
+        tried, with what they did."""
+        if not self.lift_holds:
+            raise UnsupportedAction(f"allow_lift_holds is off for {self.name}")
+        mine: dict[str, tuple[HermesAdapter, list[str]]] = {}
+        for task_id in task_ids:
+            try:
+                board, local = self._route(task_id)
+            except UnsupportedAction:
+                continue
+            mine.setdefault(str(board.board), (board, []))[1].append(local)
+        if not mine:
+            raise UnsupportedAction(f"hold {hold!r} holds no task of a watched Hermes board")
+        done: list[str] = []
+        refused: list[str] = []
+        pending: HermesError | None = None
+        for name, (board, local) in mine.items():
+            try:
+                done.append(f"{name}: {board.lift_hold(hold, kind, local, reason)}")
+            except NothingToDo:
+                continue
+            except UnsupportedAction as exc:
+                refused.append(f"{name}: {exc}")
+            except HermesError as exc:
+                pending = pending or exc
+        if pending is not None:
+            said = "; ".join(done + [f"{r} (left to a person)" for r in refused])
+            if not said:
+                raise pending
+            raise HermesError(
+                f"{pending} (also {said})",
+                public_reason=f"{pending.public_reason or 'a board failed'}; also {said}",
+            ) from pending
+        if done:
+            return "; ".join(done + [f"{r} (left to a person)" for r in refused])
+        if refused:
+            raise UnsupportedAction("; ".join(refused))
+        raise NothingToDo(f"no task of hold {hold!r} is blocked any more")
 
     def delegate(self, task_id: str, operator: str, title: str, body: str, key: str) -> str:
         board, local = self._route(task_id)
