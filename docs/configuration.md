@@ -1388,8 +1388,11 @@ sessions with no model call in traces in the budget's window (a session exported
 counts once, from its traces); the points are pruned with the spans (`retention`,
 the spans' age limits apply to them too; beyond `max_rows` points the oldest go). The daily
 report lists them per model under "Provider limits", with the USD Claude Code reported.
-Single host only for now: `kelpie agent` relays `/v1/traces` to the hub, not `/v1/metrics`;
-`[[traces.forward]]` forwards spans, not these metrics.
+On a multi-host farm, Claude Code on an agent host sends them to the agent's relay
+(`127.0.0.1:4318/v1/metrics`), which forwards them to the hub under the agent's token like
+spans; the hub puts each point's session and task in that agent's namespace
+([multi-host.md](multi-host.md#transport)), and `/v1/metrics` on the main port is off with
+`[hub]`. `[[traces.forward]]` forwards spans, not these metrics.
 
 Limit hits are counted from traces too: a model call refused with HTTP 429 or a rate-limit
 `error.type`, per provider (`gen_ai.provider.name`, else the model's provider). The daily
@@ -2567,7 +2570,7 @@ and the report.
 | `timeout` | `30s` | One request to the hub (1s–5m). |
 | `actions` | every kind the adapters declare | Narrows the action kinds this agent carries out, e.g. `["comment"]`. `[]`: the agent only reports and takes no [act lock](security.md#one-acting-instance-per-board). |
 | `max_body_bytes` | 16 MiB | Largest report sent; must not exceed the hub's. |
-| `relay` | `"127.0.0.1:4318"` | Loopback address of the OTLP relay (spans from this machine go through it to the hub); `false`: none. |
+| `relay` | `"127.0.0.1:4318"` | Loopback address of the OTLP relay (spans and Claude Code's metrics from this machine go through it to the hub); `false`: none. |
 
 ## [hub]
 

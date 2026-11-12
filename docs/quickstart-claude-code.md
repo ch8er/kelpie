@@ -134,8 +134,10 @@ export OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE=delta
 Kelpie keeps only `claude_code.token.usage` and `claude_code.cost.usage` (session, model,
 token type, value; user and organization attributes are dropped) and ignores every other
 metric. It takes no logs, so leave Claude Code's logs exporter off or pointed elsewhere.
-Only the shared traces token may send metrics, not a per-agent `[[traces.tokens]]` one, and
-only to `kelpie serve` itself: `kelpie agent` does not relay them to a hub yet.
+Only the shared traces token may send metrics, not a per-agent `[[traces.tokens]]` one. On a
+multi-host farm, send them to the `kelpie agent` relay on that machine
+(`http://127.0.0.1:4318/v1/metrics`, no `Authorization` header) instead: it forwards them to
+the hub under the agent's own token ([multi-host.md](multi-host.md#transport)).
 
 A tool call reported by both the hook and OTLP should be kept once. **Unverified:** whether
 Claude Code's `claude_code.tool` span carries the call's `tool_use_id`. If it does not, Kelpie

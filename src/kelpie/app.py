@@ -2284,11 +2284,12 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
     _with_delegation(loop, loaded, store)
     alerts = _start_alerts(settings, engine, metrics, store, clock, loop)
     if hub is not None:
-        # A span whose ids no agent token vouches for could be forged into any host's
-        # namespace: with a hub, spans come only through the agents.
+        # A span or metric point whose ids no agent token vouches for could be forged into
+        # any host's namespace: with a hub, both come only through the agents.
         log.info(
-            "[hub] is set: OTLP ingest on /v1/traces of this port is off; spans reach Kelpie "
-            "through the agents' relays, on the hub listener"
+            "[hub] is set: OTLP ingest on /v1/traces and /v1/metrics of this port is off; "
+            "spans and Claude Code's metrics reach Kelpie through the agents' relays, on the "
+            "hub listener"
         )
         relayed, ingest = ingest, None
     else:

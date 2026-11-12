@@ -64,6 +64,7 @@ TLS, size limits and authentication for agents do not change `/metrics`. Three c
 | `/v1/agent/report` | protocol version, agent version, its `interval`, `sent_at`; per adapter: name, the action kinds it carries out, and its snapshot or the error it failed with, plus the boards it could not read (`unobserved`, only when there are some: several Hermes boards, listed as `<agent>:<board>` and alerted once); the stretches its host slept (`sleeps`, start and end, only for 15 minutes after a wake: issue #296) | `{}` |
 | `/v1/agent/actions` | results of actions carried out since the last call | actions for this agent; held open up to 20 s until one is queued (long poll) |
 | `/v1/traces` | OTLP/HTTP, relayed by the agent from local exporters | as the OTLP endpoint |
+| `/v1/metrics` | OTLP/HTTP, Claude Code's cost and token metrics, relayed by the agent | as the OTLP endpoint |
 
 `report` runs every `[agent] interval` (default 15 s). `actions` is a loop: the agent
 waits on it, executes what comes back one at a time, and calls again with the results, so
@@ -75,6 +76,16 @@ point at localhost as in single-host mode. The hub namespaces the spans (below) 
 they reach the span store. With `[hub]`, `/v1/traces` on the main port is turned off: a
 span whose ids are not namespaced by an agent token could be forged into any host's
 namespace.
+
+**Claude Code's metrics.** The relay takes `/v1/metrics` on the same loopback port and
+forwards it to the hub's `/v1/metrics` the same way (no token asked of local senders,
+`Origin` refused, the Host guard, `max_body_bytes`). The hub ingests it with
+`/v1/metrics`' own checks ([configuration](configuration.md#traces): delta points with a
+session, the two Claude Code metrics, size, gzip and slot limits) and puts every point's
+session and task in the agent's namespace before storing it, so an agent's spend joins its
+own host's sessions and can never be booked to another host's. With `[hub]`,
+`/v1/metrics` on the main port is off, like `/v1/traces`. Point Claude Code's
+`OTEL_EXPORTER_OTLP_ENDPOINT` at the relay (`http://127.0.0.1:4318`) and both arrive.
 
 ### TLS
 
@@ -118,8 +129,9 @@ namespace.
   token checks out. Someone with several addresses who opens connections faster than an
   agent completes its handshake can still crowd agents out; put the hub behind a firewall
   that admits only the agents' networks where that matters.
-- **Per agent:** one report, two polls and two trace exports in flight; more get 409 (a
-  trace export gets 503 with `Retry-After`, which OTLP exporters retry). A
+- **Per agent:** one report, two polls, two trace exports and two metric exports in
+  flight; more get 409 (a trace or metric export gets 503 with `Retry-After`, which OTLP
+  exporters retry). A
   new poll (its body read) replaces a held one, whose connection may be dead; if that
   keeps happening, or reports come from two agent processes at once, the hub warns (two
   processes share a token, or a stolen one is in use). Poll bodies are capped at 2 MiB.

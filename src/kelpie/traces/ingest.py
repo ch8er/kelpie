@@ -180,13 +180,23 @@ class TraceIngest:
                 hook()
         return found
 
-    def handle_metrics(self, headers: Headers, read: Callable[[int], bytes]) -> Reply:
+    def handle_metrics(
+        self,
+        headers: Headers,
+        read: Callable[[int], bytes],
+        *,
+        authenticated: bool = False,
+        rename: Callable[[str], str] | None = None,
+    ) -> Reply:
         """Ingest one ``POST /v1/metrics`` export (Claude Code's cost and token metrics,
         :mod:`kelpie.traces.metrics`): the same checks as a trace export, before a byte of
         the body is read. Only the shared token (or none, when none is needed) may send
         metrics: a per-agent token's scope is its own sessions' spans, and a metric point
-        names a session no span may have shown yet, so it is refused (403)."""
-        reply = self._handle(headers, read, False, None, metrics=True)
+        names a session no span may have shown yet, so it is refused (403).
+        ``authenticated``: the multi-host hub already checked which agent sent it; its
+        ``rename`` then maps every point's session and task id into that agent's namespace
+        before anything is stored, as the hub's span ``rewrite`` does for spans."""
+        reply = self._handle(headers, read, authenticated, None, metrics=True, rename=rename)
         hook = getattr(self.observer, "metrics_request", None)
         if callable(hook):
             hook(reply.status)
@@ -200,6 +210,7 @@ class TraceIngest:
         rewrite: Callable[[Span], Span] | None,
         *,
         metrics: bool = False,
+        rename: Callable[[str], str] | None = None,
     ) -> Reply:
         media = (headers.get("Content-Type") or "").split(";")[0].strip().lower()
         # Errors before the media type is known are answered in JSON.
@@ -241,7 +252,7 @@ class TraceIngest:
             original_type = headers.get("Content-Type") or media
             body = read(length)
             if metrics:
-                return self._ingest_metrics(body, media, content_encoding, encoding)
+                return self._ingest_metrics(body, media, content_encoding, encoding, rename)
             return self._ingest(
                 body, media, original_type, content_encoding, encoding, rewrite, sender
             )
@@ -305,7 +316,12 @@ class TraceIngest:
         return Reply(200, otlp.encode_response(media, total, message), media)
 
     def _ingest_metrics(
-        self, body: bytes, media: str, content_encoding: str, encoding: str
+        self,
+        body: bytes,
+        media: str,
+        content_encoding: str,
+        encoding: str,
+        rename: Callable[[str], str] | None = None,
     ) -> Reply:
         if content_encoding == "gzip":
             try:
@@ -328,6 +344,8 @@ class TraceIngest:
         points = [p for p in decoded.points if otlp_metrics.plausible(p, oldest, latest)]
         if len(points) < len(decoded.points):
             rejected[INVALID_TIME] += len(decoded.points) - len(points)
+        if rename is not None:  # the hub: every id in the sending agent's namespace
+            points = [otlp_metrics.renamed(p, rename) for p in points]
         rows = [
             (p.session_id, p.task_id, p.model, p.kind, p.value, p.time_ns, p.start_ns)
             for p in otlp_metrics.merged(points)
