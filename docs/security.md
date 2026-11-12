@@ -24,9 +24,9 @@ a CONNECT tunnel.
 ## Listeners
 
 `kelpie serve` listens on the main port (`/v1/traces`, `/v1/metrics`, `/metrics`, `/healthz`,
-and with `[conditions] enabled` `POST /conditions`, whose one token lets any agent holding
-it register a condition for any task, attached to in-progress and waiting tasks only, never
-to a blocked or ready one; loopback by default) and, with `[hub]`, on the hub port. Both go
+and with `[conditions] enabled` `POST /conditions`, where each agent's own token registers
+conditions for its own tasks only ([below](#per-agent-conditions-tokens)), attached to
+in-progress and waiting tasks only, never to a blocked or ready one; loopback by default) and, with `[hub]`, on the hub port. Both go
 through one set of connection guards (`kelpie.httpguard`, configured by
 [`[server]`](configuration.md#server)), so nobody needs a token to hold its threads:
 
@@ -454,6 +454,54 @@ way the multi-host hub limits each `kelpie agent` to its own host:
    without one of the agents' tokens gets 401, and `kelpie doctor` passes "traces tokens per
    agent".
 
+## Per-agent conditions tokens
+
+`POST /conditions` ([configuration.md](configuration.md#conditions), off by default) lets
+an agent register the condition its task waits for; rule 2 wakes the task once every
+condition linked to it holds. With one token for every agent, an agent holding it could
+add an unmet condition to another agent's waiting task and so hold back that task's wake
+(the question left open in #434). Since #442 each agent registers with its own
+`[[traces.tokens]]` token, and only for its own tasks:
+
+- **Who a task belongs to comes from the board,** by the same scoping as the token's spans
+  ([above](#per-agent-traces-tokens)): the task's owner, role or board is in the entry's
+  scope, or one of the task's sessions is (owner, role, board, or a `sessions` pattern).
+  Nothing in the request decides it. Unlike a span's, a task the board does not place is
+  never bound to the first token that names it: it is no one's, and refused.
+- **One answer for every refusal.** Another agent's task and a task the board does not
+  show both get `403` with the same body, checked after the body is valid and before the
+  database is read, so the answer does not tell whether the task exists or what it waits
+  on. Each refusal is counted (`kelpie_conditions_refused_total{reason="out_of_scope"}`),
+  logged, and written to the ledger with the token's name and the task (one line an hour
+  per token and task; repeats are counted on it), so `kelpie why <task>` shows who tried.
+- **Checked again on every tick.** A registration carries the token that made it, and
+  attaches only while that token is configured and the task is in its scope. Removing an
+  agent's entry refuses its token (401) and drops what it registered; a task moved to
+  another agent no longer carries the old agent's registrations.
+- **Floods stay with their token.** Each token has its own rate (`max_per_minute`, 429)
+  and its own share of live registrations (`max_per_token`, 507), so one token's flood
+  does not hold back another token's registrations.
+- **The tokens are the traces tokens.** Every token is compared, each in constant time;
+  `kelpie serve` refuses an entry whose token is unset, unreadable, weak (on loopback
+  too) or equal to another or to the shared token. An entry with `token_file` rotates as
+  for spans (`kelpie traces rotate-token --token <name>`), with its grace period.
+
+Registrations stay attach-only: they never change the board, never attach to a blocked
+task (rule 4 would read the condition as the end of the block) or a ready one (the
+dispatch gate would park it).
+
+**Moving from the shared token.**
+
+1. Give every agent its own `[[traces.tokens]]` entry (often it already has one for its
+   spans) and restart `kelpie serve`; the shared `$KELPIE_CONDITIONS_TOKEN` keeps working
+   meanwhile.
+2. Point each agent's registrations at its own token. A registration its token may not
+   make shows up as a 403, in `kelpie_conditions_refused_total{reason="out_of_scope"}` and
+   in the ledger: widen that entry's scope rather than going back to the shared token.
+3. Unset `$KELPIE_CONDITIONS_TOKEN`, remove `[conditions] token_env` and restart. From
+   then on only the agents' tokens register, and `kelpie doctor` passes "conditions tokens
+   per agent".
+
 ## CI and release workflows
 
 Every workflow action is pinned to a commit. Checkouts keep no token in `.git/config`
@@ -865,6 +913,25 @@ token ([above](#per-agent-traces-tokens)), and update the Hermes plugin on every
 Where agents that do not trust each other share a Claude Code or OpenClaw spool, set that
 adapter's `spool_stops = false` with per-agent tokens, or keep `loop_breaker` in `observe`
 or `suggest` ([act-checklist.md](act-checklist.md)), or give them separate farms.
+
+### Condition registrations (`POST /conditions`)
+
+With [per-agent tokens](#per-agent-conditions-tokens) an agent registers only for its own
+tasks. What is left:
+
+- **The shared `[conditions] token_env` token** (deprecated) still registers for any task:
+  whoever holds it can add an unmet condition to another agent's waiting task and hold
+  back its wake until the registration's `max_age` (7 days by default) or the task
+  finishes, and can fill `max_registered`. `kelpie doctor` warns while it is set.
+- **A token's scope is as wide as its entry.** A `roles` or `boards` entry, or a broad
+  `sessions` pattern, covers every agent it matches: scope a token to one agent (`owners`)
+  where agents of one role do not trust each other.
+- **Within its own tasks** an agent can still hold back its own task's wake (an unmet
+  registration), as it could by not setting its status.
+- **Many tokens together** can fill `max_registered` with `max_per_token` each; keep
+  `max_per_token` times the number of agents within it, or the limit low.
+- **The listener's guards** bound connections and bodies, not a flood of requests before
+  a token is checked: keep the port on loopback or a private network.
 
 ### Other open findings
 

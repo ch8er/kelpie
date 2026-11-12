@@ -1523,6 +1523,10 @@ session; with `[[traces.tokens]]` and no shared token, a request without a token
 token is set or ingest takes spans without a token. Moving from one token:
 [security.md](security.md#per-agent-traces-tokens).
 
+With [`[conditions]`](#conditions) enabled, the same entries are the agents' tokens for
+`POST /conditions` too: each may register conditions only for the tasks in its scope
+(#442).
+
 ```toml
 [[traces.tokens]]
 name = "dev-1"
@@ -2689,8 +2693,18 @@ for before it exits, and rule 2 wakes the task once it holds. Off by default.
 
 ```bash
 curl -s -X POST http://127.0.0.1:9464/conditions \
-  -H "Authorization: Bearer $KELPIE_CONDITIONS_TOKEN" -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $KELPIE_TRACES_TOKEN_DEV_1" -H "Content-Type: application/json" \
   -d '{"task_id": "T-1", "kind": "pr_merged", "params": {"repo": "owner/name", "pr": 12}}'
+```
+
+```toml
+[conditions]
+enabled = true
+
+[[traces.tokens]]          # the agent's own token: its spans and its registrations
+name = "dev-1"
+token_env = "KELPIE_TRACES_TOKEN_DEV_1"
+owners = ["agent-dev-1"]
 ```
 
 - **Attach-only.** A registered condition attaches to its task inside Kelpie while the task
@@ -2702,12 +2716,34 @@ curl -s -X POST http://127.0.0.1:9464/conditions \
   sets its own status. Register, then set the waiting status and exit: a registration made
   up to 15 minutes before the wait began counts for that wait, and for no later one (register
   again for the next wait); an older one is left over from an earlier wait.
-- **Trust.** One token for every agent: whoever holds it may register for any task. Give it
-  only to the farm's agents; off loopback, put the listener behind TLS (the token is a
-  bearer token).
-- **Before the body is read:** the bearer token (constant-time compare; 401), no `Origin`
-  header (403: a web page), `Content-Length` present and at most 16 KiB (411/413),
-  `Content-Type: application/json` (415).
+- **A token per agent (#442).** Each agent registers with its own
+  [`[[traces.tokens]]`](#tracestokens) token, the one its exporter sends spans with (the
+  entries count here also with `[traces] enabled = false`), and only for its own tasks: a
+  task the board places in that entry's scope, by its owner, role or board, or by one of
+  its sessions (owner, role, board or a `sessions` pattern), exactly as for spans. A task
+  may be named by its id or by its id on its board (`t_1a` for `qr:t_1a`, as Hermes names
+  it); the registration is stored under the full id. A registration for another agent's
+  task, or for a task the board does not show (scopes are read from the last tick, so none
+  are known until the first tick after a start), gets `403` with the same body either way:
+  the answer does not tell whether the task exists. It is counted in
+  `kelpie_conditions_refused_total{reason="out_of_scope"}`, logged and written to the
+  ledger (rule `conditions`, kind `register`, the token's name and the task; one line an
+  hour per token and task, repeats counted on it), so `kelpie why <task>` shows it. A
+  registration attaches only while its token is still configured and the task still in its
+  scope: removing an agent's entry, or moving its task to another agent, also drops what
+  it registered. Kelpie refuses to start when an entry's token is unset, unreadable, weak
+  (the strength rules of OTLP tokens, on loopback too) or equal to another token.
+- **The shared token (deprecated).** `token_env` (`$KELPIE_CONDITIONS_TOKEN`) still works:
+  whoever holds it may register for any task, as before, so an agent holding it can add an
+  unmet condition to another agent's waiting task and hold back its wake. It is optional
+  once per-agent tokens are configured (required only when `token_env` is in the config),
+  and `kelpie doctor` warns ("conditions tokens per agent") while it is set. Moving off it:
+  [security.md](security.md#per-agent-conditions-tokens). Off loopback, put the listener
+  behind TLS (every token is a bearer token).
+- **Before the body is read:** the bearer token (every token compared, in constant time
+  each; 401), no `Origin` header (403: a web page), a per-agent token's rate
+  (`max_per_minute`, a burst of as many; 429 with `Retry-After`), `Content-Length` present
+  and at most 16 KiB (411/413), `Content-Type: application/json` (415).
 - **The body:** `task_id` (1 to 200 characters), `kind` (`ci_status`, `pr_merged`,
   `quota_reset`, `human_task`, `task_status`: the kinds something evaluates) and `params`
   (at most 20 numbers within 2^53, booleans or strings of at most 200 characters; never
@@ -2717,18 +2753,25 @@ curl -s -X POST http://127.0.0.1:9464/conditions \
   stays unknown and holds back the task's wake: register only what this farm evaluates.
 - **Idempotent:** the same task, kind and params again answer `200` with `"duplicate":
   true` and the same `id`, and count from now (a later wait on the same thing); a new one
-  answers `201` with its `id`.
-  Beyond `max_registered` live registrations: `507`, nothing stored. A registration goes
+  answers `201` with its `id`; a repeat by another token (the task's new owner) makes it
+  that token's. Beyond `max_per_token` live registrations of one per-agent token, or
+  `max_registered` in all: `507`, nothing stored. Each token has its own rate and its own
+  share, so a flood from one token does not hold back another's registrations (the shared
+  token counts only toward `max_registered`). A registration goes
   once its task finishes on the board (done, failed, cancelled), or `max_age` after it was
   made. `kelpie why` and the daily report read the registrations without changing them.
 - Single-host `kelpie serve` only for now: not with `[hub]` or `[agent]` (startup refuses).
+- Metrics: `kelpie_conditions_requests_total{code}` and
+  `kelpie_conditions_refused_total{reason}` (`out_of_scope`, `rate_limited`, `token_cap`).
 
 | Key | Default | Meaning |
 | --- | --- | --- |
-| `enabled` | `false` | Take registrations. Needs the token and a database (`[storage] path` not `:memory:`), or `kelpie serve` refuses to start. |
-| `token_env` | `"KELPIE_CONDITIONS_TOKEN"` | The variable holding the bearer token agents send: at least as strong as an OTLP token (`[traces]`), never shown. |
+| `enabled` | `false` | Take registrations. Needs a token (per-agent `[[traces.tokens]]` entries, or the shared one) and a database (`[storage] path` not `:memory:`), or `kelpie serve` refuses to start. |
+| `token_env` | `"KELPIE_CONDITIONS_TOKEN"` | Deprecated. The variable holding the shared token, which may register for any task: at least as strong as an OTLP token (`[traces]`), never shown. Used when set; required only when this key is in the config. |
 | `max_age` | `"7d"` | A registration is dropped this long after it was made, 1m to 90d. |
-| `max_registered` | `1000` | Live registrations kept, 1 to 100000. |
+| `max_registered` | `1000` | Live registrations kept in all, 1 to 100000. |
+| `max_per_token` | `100` (at most `max_registered`) | Live registrations of one per-agent token, 1 to `max_registered`. Keep it well below `max_registered`, so one agent cannot fill it for the others. |
+| `max_per_minute` | `60` | Requests of one per-agent token a minute (a burst of as many), 1 to 10000; 429 beyond. |
 
 ## [view]
 
