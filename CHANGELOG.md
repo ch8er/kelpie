@@ -275,6 +275,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
   Rule 4 still alerts on a paused task as on any block without a condition. Adapters gain
   the optional `SupportsLiftHold` capability; `lift_hold` is not offered to a hub.
 
+- Hermes lifts forgotten pause holds (rule 6): with `[adapters.hermes] allow_lift_holds`
+  (off by default), a `kind = "pause"` hold whose `executor` is `"hermes"` gets its held
+  tasks' blocks cleared through `hermes kanban unblock`, with every guard of an unblock
+  (only the block the snapshot showed, never Kelpie's stop or the circuit breaker), at
+  most 5 a lift (the rest left to a person), act mode only. Hermes records no labels or
+  flags; a pause is a block whose text reads as one, so two pause holds whose patterns
+  both match a task lift it alike.
 ### Changed
 
 - Linear: a task whose time comes from when Kelpie first saw it as it is (no history

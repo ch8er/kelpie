@@ -271,6 +271,9 @@ class HermesSettings:
     # Answers to agents' questions from the chat (#300): off by default; with boards, the
     # default of every board (each may say otherwise).
     chat_answers: bool = False
+    # Rule 6 may clear the blocks of a forgotten pause hold naming Hermes (lift_hold, act
+    # mode only): off by default.
+    lift_holds: bool = False
 
     def answer_boards(self, adapter: str = "hermes") -> AnswerBoards:
         """The boards that opted in to answers from the chat (#300)."""
@@ -328,6 +331,7 @@ class HermesSettings:
             author=self.author,
             state_home=self.state_home,
             state_sources=self.state_sources,
+            lift_holds=self.lift_holds,
         )
         return hermes.HermesAdapter(**{**settings, **kw})
 
@@ -569,11 +573,15 @@ def _load_hermes(adapters: Any) -> HermesSettings | None:
         "state_home",
         "state_sources",
         "chat_answers",
+        "allow_lift_holds",
     }:
         raise ConfigError(f"unknown [adapters.hermes] keys: {sorted(extra)}")
     chat_answers = section.get("chat_answers", False)
     if not isinstance(chat_answers, bool):
         raise ConfigError("[adapters.hermes] chat_answers must be true or false")
+    lift_holds = section.get("allow_lift_holds", False)
+    if not isinstance(lift_holds, bool):
+        raise ConfigError("[adapters.hermes] allow_lift_holds must be true or false")
     boards = _hermes_boards(section)
     paths: dict[str, Path | None] = {}
     for key, default in (("db_path", hermes.DEFAULT_DB), ("spool", hermes.DEFAULT_SPOOL)):
@@ -759,6 +767,7 @@ def _load_hermes(adapters: Any) -> HermesSettings | None:
         None if state_home is False else Path(state_home),
         tuple(dict.fromkeys(x.strip() for x in sources)),
         chat_answers,
+        lift_holds,
     )
 
 

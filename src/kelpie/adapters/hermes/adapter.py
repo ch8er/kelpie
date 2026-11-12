@@ -336,6 +336,8 @@ MAX_ARTIFACT_PATH = 500  # characters of an artifact path kept
 AGENT_UPLOADER = "agent"  # task_attachments.uploaded_by of Hermes' kanban_attach tool
 # Hermes block kinds that wait for an operator (``dependency`` waits in ``todo``).
 TYPED_BLOCKS = ("needs_input", "capability", "transient")
+PAUSE_HOLD = "pause"  # the only hold kind Hermes lifts (rule 6's hold kinds)
+MAX_LIFTS = 5  # blocks one lift_hold clears (each a CLI call inside the tick)
 
 
 class HermesError(RuntimeError):
@@ -712,8 +714,12 @@ class HermesAdapter:
             ActionKind.REASSIGN,
             ActionKind.WIP_COMMIT,
             ActionKind.DELEGATE,
+            ActionKind.LIFT_HOLD,
         }
     )
+    # Rule 6 may clear the blocks of a forgotten pause hold (``lift_hold``, act mode only,
+    # ``[adapters.hermes] allow_lift_holds``): off by default.
+    lift_holds: bool = False
     # spool lines naming a run their writer is not the worker of: the count last warned about
     _writer_warned: int = field(default=0, init=False, repr=False, compare=False)
     # workspace -> snapshot time until which it is not read (its git timed out)
@@ -2126,6 +2132,70 @@ class HermesAdapter:
             raise HermesError(str(exc), public_reason=f"WIP commit failed ({exc})") from exc
         log.info("hermes: %s for task %s", done.describe(), task_id)
         return done.describe()
+
+    def lift_hold(self, hold: str, kind: str, task_ids: Sequence[str], reason: str) -> str:
+        """Lift a forgotten pause hold (rule 6, ``SupportsLiftHold``): clear the block of
+        each held task of this board with :meth:`unblock`, so every guard of an unblock
+        holds (only the block the latest snapshot showed, never Kelpie's own stop, never
+        Hermes' circuit breaker). Hermes records no labels or flags, so only a ``pause`` hold
+        is lifted; with ``lift_holds`` off, another kind, or no held task of this board:
+        ``UnsupportedAction`` (a person is told). A task already unblocked is skipped; one
+        whose block cannot be cleared here is left to a person; none cleared and none left:
+        ``NothingToDo``. At most ``MAX_LIFTS`` unblocks are tried per lift (each is a CLI
+        call inside the tick); the rest are left to a person (the result names them). A
+        failed unblock stops the lift and raises, saying what was cleared (the engine
+        retries; cleared ones are no longer held then). Two pause holds whose
+        patterns both match a task lift it alike: Hermes records nothing else to tell them
+        apart."""
+        if not self.lift_holds:
+            raise UnsupportedAction(f"allow_lift_holds is off for {self.name}")
+        if kind != PAUSE_HOLD:
+            raise UnsupportedAction(
+                f"Hermes lifts pause holds only (it records no labels or flags); hold "
+                f"{hold!r} is a {kind}"
+            )
+        ours = [t for t in dict.fromkeys(task_ids) if t in self._seen]
+        if not ours:
+            raise UnsupportedAction(f"hold {hold!r} holds no task of {self.name}")
+        lifted: list[str] = []
+        kept: list[str] = []
+        failed: Exception | None = None
+        tried = 0  # unblocks that may have reached the CLI: each can take cli_timeout
+        for n, task_id in enumerate(ours):
+            if tried >= MAX_LIFTS:
+                kept += ours[n:]  # each is a CLI call inside the tick: a person does the rest
+                break
+            try:
+                tried += 1
+                self.unblock(task_id, reason)
+            except NothingToDo:
+                continue
+            except UnsupportedAction as exc:
+                tried -= 1  # refused before the CLI
+                log.info("hermes: hold %r: task %s left to a person: %s", hold, task_id, exc)
+                kept.append(task_id)
+            except Exception as exc:  # the CLI failed or timed out: no more calls this tick
+                failed = exc
+                break
+            else:
+                lifted.append(task_id)
+        done = f"cleared the blocks of {', '.join(lifted)}" if lifted else "cleared no block"
+        if failed is not None:
+            raise HermesError(
+                f"hold {hold!r}: an unblock failed ({failed}); {done}",
+                public_reason=f"a block of hold '{hold}' was not cleared; {done}",
+            ) from failed
+        if not lifted:
+            if kept:
+                raise UnsupportedAction(
+                    f"no block of hold {hold!r} can be cleared here ({', '.join(kept)})"
+                )
+            raise NothingToDo(f"no task of hold {hold!r} is blocked any more")
+        shown = ", ".join(kept[:MAX_LIFTS]) + (
+            f" and {len(kept) - MAX_LIFTS} more" if len(kept) > MAX_LIFTS else ""
+        )
+        left = f"; {shown} left to a person" if kept else ""
+        return done + left
 
     def delegate(self, task_id: str, operator: str, title: str, body: str, key: str) -> str:
         """Put a delegation card (#347) on this board with ``hermes kanban create``, assigned
