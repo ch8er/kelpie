@@ -17,6 +17,8 @@ from collections.abc import Mapping
 from types import FrameType
 
 from kelpie.app import App
+from kelpie.conditions_api import PATH as CONDITIONS_PATH
+from kelpie.conditions_api import Answer, ConditionRegistry
 from kelpie.httpguard import GuardedHandler, GuardedServer, Limits
 from kelpie.metrics import Metrics
 from kelpie.traces.ingest import PATH as TRACES_PATH
@@ -35,9 +37,11 @@ class KelpieHTTPServer(GuardedServer):
         metrics: Metrics,
         ingest: TraceIngest | None = None,
         limits: Limits | None = None,
+        conditions: ConditionRegistry | None = None,
     ) -> None:
         self.metrics = metrics
         self.ingest = ingest
+        self.conditions = conditions
         super().__init__(address, Handler, limits)
 
 
@@ -59,6 +63,9 @@ class Handler(GuardedHandler):
 
     def do_POST(self) -> None:
         self.close_connection = True  # one request per connection, like the hub
+        if self.path.split("?")[0] == CONDITIONS_PATH and self.server.conditions is not None:
+            self._register(self.server.conditions)
+            return
         ingest = self.server.ingest
         path = self.path.split("?")[0]
         if path not in (TRACES_PATH, METRICS_PATH) or ingest is None:
@@ -84,6 +91,28 @@ class Handler(GuardedHandler):
             return
         # ``reply.close`` (body left unread) needs nothing more: every connection closes.
         self._send(reply.status, reply.body, reply.content_type, reply.headers)
+
+    def _register(self, registry: ConditionRegistry) -> None:
+        """``POST /conditions``: the token and the headers first, the body only once they
+        pass (the connection keeps its pending slot until then)."""
+        answer = registry.precheck(self.headers)
+        if answer is None:
+            self.admit()
+            length = int(self.headers.get("Content-Length") or 0)
+            try:
+                body = self.read_body(length)
+            except OSError as exc:  # the client stalled past the timeout or went away
+                log.info("condition registration from %s aborted: %s", self.peer(), exc)
+                return
+            if len(body) < length:
+                return  # the client went away
+            try:
+                answer = registry.register(body)
+            except Exception:  # a bug or a broken database must not kill Kelpie
+                log.exception("condition registration failed")
+                answer = Answer(503, {"error": "registrations unavailable, retry later"})
+        headers = {"WWW-Authenticate": "Bearer"} if answer.status == 401 else None
+        self._send(answer.status, answer.encoded(), "application/json", headers)
 
     def _read_body(self, length: int) -> bytes:
         """Ingest calls this only once the export is authorized: it gives its pending slot
@@ -114,8 +143,9 @@ def make_server(
     metrics: Metrics | None = None,
     ingest: TraceIngest | None = None,
     limits: Limits | None = None,
+    conditions: ConditionRegistry | None = None,
 ) -> KelpieHTTPServer:
-    return KelpieHTTPServer((host, port), metrics or Metrics(), ingest, limits)
+    return KelpieHTTPServer((host, port), metrics or Metrics(), ingest, limits, conditions)
 
 
 def run(app: App, server: KelpieHTTPServer) -> None:
@@ -132,7 +162,7 @@ def run(app: App, server: KelpieHTTPServer) -> None:
 
 
 def serve(app: App, host: str = "0.0.0.0", port: int = 9464) -> None:
-    server = make_server(host, port, app.metrics, app.ingest, app.settings.server)
+    server = make_server(host, port, app.metrics, app.ingest, app.settings.server, app.conditions)
 
     def on_signal(signum: int, frame: FrameType | None) -> None:
         log.info("received %s, shutting down", signal.Signals(signum).name)

@@ -23,10 +23,12 @@ a CONNECT tunnel.
 
 ## Listeners
 
-`kelpie serve` listens on the main port (`/v1/traces`, `/v1/metrics`, `/metrics`, `/healthz`;
-loopback by default) and, with `[hub]`, on the hub port. Both go through one set of connection guards
-(`kelpie.httpguard`, configured by [`[server]`](configuration.md#server)), so nobody needs
-a token to hold its threads:
+`kelpie serve` listens on the main port (`/v1/traces`, `/v1/metrics`, `/metrics`, `/healthz`,
+and with `[conditions] enabled` `POST /conditions`, whose one token lets any agent holding
+it register a condition for any task, attached to in-progress and waiting tasks only, never
+to a blocked or ready one; loopback by default) and, with `[hub]`, on the hub port. Both go
+through one set of connection guards (`kelpie.httpguard`, configured by
+[`[server]`](configuration.md#server)), so nobody needs a token to hold its threads:
 
 - **Header deadline.** From accept to the end of the headers (the hub's TLS handshake
   included) a connection has `header_timeout` (3s) in all, however slowly it sends; then

@@ -10,6 +10,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ### Added
 
+- `POST /conditions`: an agent registers the condition its task waits for (task id, kind,
+  params), off by default (`[conditions] enabled`). On the main listener (loopback by
+  default, behind the Host and connection guards), with a bearer token of its own
+  (`[conditions] token_env`, compared in constant time before the body is read), no
+  `Origin`, at most 16 KiB of JSON. Duplicates are idempotent (`200`, same id, counted
+  from now). Attach-only: a registered condition attaches to its task inside Kelpie (in
+  progress or waiting, never blocked or ready) for one wait and the connectors evaluate it;
+  nothing on the board changes. Only kinds something evaluates, and never the keys
+  evaluators write. Registrations are dropped when their task finishes or after `max_age`;
+  `kelpie why` and the report read them. Single-host `kelpie serve` only for now.
 - Rule 6 holds matched by flag or pause, not only by label: `kind = "flag"` (a platform
   flag, the new `Task.flags`) or `kind = "pause"` (a blocked or waiting task whose block is
   a pause: category `pause`, or a reason matching the hold's `pattern`, by default one
@@ -17,9 +27,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
   (`executor`) also gets the new `lift_hold` action past its expiry, announced by its
   alert and carried out only in act mode; nothing acts by default. Rule 6 now has an
   effect, so `kelpie status` and the report say it cannot act unless a connector may lift
-  holds. The GitHub pull request step lifts label holds on PRs as
-  executor `github_pulls`, off by default: `[connectors.github.pulls] allow_lift_holds`,
-  `lift_repos` and a token of its own in `lift_token_env`.
+  holds. The GitHub pull request step lifts label holds on PRs as executor
+  `github_pulls`, off by default: `[connectors.github.pulls] allow_lift_holds`, `lift_repos`
+  and a token of its own in `lift_token_env`.
 - `POST /v1/metrics`: Claude Code's OpenTelemetry cost and token metrics as a spend source,
   behind the same token, `Origin`, size, media type and slot checks as `/v1/traces` (only
   the shared token, not a per-agent one). Only `claude_code.token.usage` and
