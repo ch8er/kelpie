@@ -1039,7 +1039,9 @@ waiting on it, but that you checked and know waits on something no `[[block_cond
 pattern should resolve (a "PR merged" pattern would close it wrongly). Each entry needs an
 expiry, so a reviewed WARN comes back instead of staying hidden: an entry past its `until`,
 or ending more than 90 days after the doctor run, acknowledges nothing, and doctor names it
-("acknowledgements that no longer hold"). Kelpie's rules do not read this section.
+("acknowledgements that no longer hold"). An entry covers the task, not one block: a new
+block on the same task stays acknowledged until the entry expires. Kelpie's rules do not
+read this section.
 
 ```toml
 [doctor]

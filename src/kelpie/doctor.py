@@ -103,18 +103,30 @@ PR_REFS = (
 # A block reads as waiting on the PR it names when the same sentence names what of it is
 # awaited (#417).
 PR_WAIT = re.compile(
-    r"\b(?:wait\w*|await\w*|until|pending|blocked\s+(?:on|by)|depends?\s+on|merge[sd]?|"
-    r"merging|automerge|lands?|landed|landing|review\w*|CI|checks?|green|red|builds?|"
-    r"rebase\w*|conflicts?)\b",
+    r"\b(?:wait(?:s|ing)?|await(?:s|ing)?|until|pending|blocked\s+(?:on|by)|depends?\s+on|"
+    r"merges?|merging|automerge|lands?|landing|review(?:s|ing)?|CI|checks?|green|red|"
+    r"builds?|rebase|rebasing|conflicts?)\b",
     re.IGNORECASE,
 )
 # ... unless the PR is work still to do: "PR #89 not ready for review".
 PR_NOT_READY = re.compile(r"\bnot\s+(?:yet\s+)?ready\b", re.IGNORECASE)
-# Wording that says a block waits on a person, a decision or a pause, wherever it is.
+# A next sentence that goes on about the same PR: "PR #12 opened. Waiting for it to merge."
+PR_FOLLOW_UP = re.compile(r"\b(?:it|its|the\s+PR|merge|merging|CI)\b", re.IGNORECASE)
+# Wording that says a block waits on a pause or a person, wherever it is ...
 NOT_PR_WAIT = re.compile(
-    r"\b(?:paus\w*|decisions?|decide\w*|decompos\w*|architect\w*|agree\w*|"
-    r"sign[\s-]?off|(?:owner|human|operator|person)'?s?\s+(?:approval|answer|input|ok))\b",
+    r"\b(?:paused|pause|pausing|sign[\s-]?off|"
+    r"(?:owner|human|operator|person|CEO)(?:['\u2019]s)?\s+(?:approval|answer|input|ok))\b",
     re.IGNORECASE,
+)
+# ... and on a decision, in a sentence that does not itself wait on the PR.
+NOT_PR_DECISION = re.compile(
+    r"\b(?:decisions?|decide|decomposition|decompose|architect|agree\s+(?:on|owners?))\b",
+    re.IGNORECASE,
+)
+# The prefixes the Hermes adapter writes before a typed block's text (``waiting_human:
+# needs_input: ...``) or an untyped block's kind: not the agent's words, so not wording.
+_BLOCK_PREFIX = re.compile(
+    r"^\s*(?:waiting_human:\s*)?(?:(?:needs_input|capability|transient)\s*:\s*)?", re.IGNORECASE
 )
 # Block categories (``Block.category``, normalised by the adapter) of a block that waits on a
 # person, a decision or a pause, whatever its reason names. Not ``waiting_human``: Hermes
@@ -937,19 +949,31 @@ def _names_a_pr(reason: str) -> bool:
 
 def _waits_on_pr(reason: str, category: str | None = None) -> bool:
     """Whether a block reason that names a PR reads as waiting on that PR (#417): a sentence
-    that names it also names what of it is awaited (``waiting for PR #12 to merge``,
-    ``automerge PR #4``, ``PR #7 CI red``), not as work still to do on it (``PR #89 not
-    ready for review``), and neither the reason nor the block's category says it waits on
-    a person, a decision or a pause. Conservative for a warning: a block that also names a
-    person or a decision is left out even when it names a PR wait too."""
+    that names it, or the next one going on about it, names what of it is awaited
+    (``waiting for PR #12 to merge``, ``automerge PR #4``, ``PR #7 CI red``), not as work
+    still to do on it (``PR #89 not ready for review``); the reason says nowhere that the
+    block waits on a pause or a person's approval, nor, outside that sentence, on a
+    decision; and the block's category is not a person's, a decision's or a pause's. The
+    adapter's prefix of a typed block (``waiting_human: needs_input:``) is not wording."""
     if category is not None and category.strip().lower() in NOT_PR_CATEGORIES:
         return False
-    if NOT_PR_WAIT.search(reason):
+    text = _BLOCK_PREFIX.sub("", reason, count=1)
+    if NOT_PR_WAIT.search(text):
         return False
-    return any(
-        _names_a_pr(sentence) and PR_WAIT.search(sentence) and not PR_NOT_READY.search(sentence)
-        for sentence in _SENTENCE_END.split(reason)
-    )
+    sentences = [s for s in _SENTENCE_END.split(text) if s.strip()]
+    waits = set()
+    for n, sentence in enumerate(sentences):
+        if not _names_a_pr(sentence) or PR_NOT_READY.search(sentence):
+            continue
+        if PR_WAIT.search(sentence):
+            waits.add(n)
+        elif n + 1 < len(sentences):
+            nxt = sentences[n + 1]
+            if not _names_a_pr(nxt) and PR_WAIT.search(nxt) and PR_FOLLOW_UP.search(nxt):
+                waits.add(n + 1)
+    if not waits:
+        return False
+    return not any(NOT_PR_DECISION.search(s) for n, s in enumerate(sentences) if n not in waits)
 
 
 def _pr_blocks_aside(context: int, acked: list[str], lapsed: Mapping[str, str]) -> str:
@@ -964,7 +988,7 @@ def _pr_blocks_aside(context: int, acked: list[str], lapsed: Mapping[str, str]) 
         listed = ", ".join(f"{t}: {lapsed[t]}" for t in shown[:SHOWN])
         more = f" and {len(shown) - SHOWN} more" if len(shown) > SHOWN else ""
         parts.append(f"acknowledgements that no longer hold ({listed}{more})")
-    return f" ({'; '.join(parts)})" if parts else ""
+    return f"; {'; '.join(parts)}" if parts else ""
 
 
 def _natural(text: str) -> list[object]:

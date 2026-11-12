@@ -631,6 +631,10 @@ CONTEXT_ONLY = [
     "Needs decomposition; PR #89 not ready for review. Architect: agree owners and acceptance "
     "boundary.",
     "PR #12 is open; which certificate should it use?",
+    "PR #12 merged. Next: deploy needs credentials",
+    "Reviewer asked on PR #12: which cert?",
+    "Blocked on PR #12, owner\u2019s approval pending",
+    "PR #12 opened. The CEO's approval of the copy comes first.",
 ]
 
 
@@ -642,6 +646,10 @@ CONTEXT_ONLY = [
         "waiting for https://github.com/example/app/pull/7",
         "PR #7 CI red, waiting on a rerun",
         "Fix pushed. PR #44 in review.",
+        "PR #12 opened. Waiting for it to merge.",
+        "Architecture refactor in PR #12, waiting for CI",
+        "Agreed fix in PR #12; waiting for CI",
+        "waiting_human: needs_input: waiting for PR #12 to merge",
     ],
 )
 def test_reasons_that_wait_on_a_pr(reason: str) -> None:
@@ -655,6 +663,8 @@ def test_reasons_that_name_a_pr_only_as_context(reason: str) -> None:
     from kelpie.doctor import _names_a_pr, _waits_on_pr
 
     assert _names_a_pr(reason) and not _waits_on_pr(reason)
+    # As the Hermes adapter writes a typed block: its prefix is not the agent's wording.
+    assert not _waits_on_pr(f"waiting_human: needs_input: {reason}", "waiting_human")
 
 
 @pytest.mark.parametrize("category", ["decision", "Pause", "person"])
@@ -668,17 +678,20 @@ def test_a_block_category_of_a_person_decision_or_pause_waits_on_no_pr(category:
 
 def test_pr_blocks_named_only_as_context_do_not_warn(farm: Farm) -> None:
     farm.make_healthy()
-    for n, reason in enumerate(CONTEXT_ONLY, start=2):
+    # Typed (needs_input, the helper's default) and untyped blocks alike.
+    for n, reason in enumerate(CONTEXT_ONLY[:4], start=2):
+        blocked(farm, f"t_{n}", reason)
+    for n, reason in enumerate(CONTEXT_ONLY[:4], start=12):
         blocked(farm, f"t_{n}", reason, kind="")
     check = farm.checks()["PR blocks have conditions"]
     assert check.status == "PASS"
-    assert "no block reason on the board waits on a PR (4 more name a PR only as context)" in (
+    assert "no block reason on the board waits on a PR; 8 more name a PR only as context" in (
         check.detail
     )
-    blocked(farm, "t_9", "waiting for PR #12 to merge", kind="")
+    blocked(farm, "t_9", "waiting for PR #12 to merge")
     check = farm.checks()["PR blocks have conditions"]
     assert check.status == "WARN"
-    assert "1 block reason(s) wait on a PR (t_9) (4 more name a PR only as context)" in (
+    assert "1 block reason(s) wait on a PR (t_9); 8 more name a PR only as context" in (
         check.detail
     )
 
@@ -734,6 +747,23 @@ def test_acknowledged_pr_blocks_stop_warning_until_they_expire(farm: Farm) -> No
             "note must be",
         ),
         ("doctor = 1\n", "[doctor] must be a table"),
+        ('[doctor]\npr_block_acks = [{ task = "t", until = 09:00:00 }]\n', "until must be"),
+        (
+            '[doctor]\npr_block_acks = [{ task = "' + "t" * 201 + '", until = 2026-12-01 }]\n',
+            "task must be",
+        ),
+        (
+            '[doctor]\npr_block_acks = [{ task = "t", until = 2026-12-01, note = "'
+            + "n" * 301
+            + '" }]\n',
+            "note must be",
+        ),
+        (
+            "[doctor]\npr_block_acks = ["
+            + ", ".join(f'{{ task = "t{n}", until = 2026-12-01 }}' for n in range(201))
+            + "]\n",
+            "at most 200",
+        ),
     ],
 )
 def test_bad_doctor_settings_are_refused(tmp_path: Path, body: str, error: str) -> None:
@@ -753,13 +783,15 @@ def test_doctor_ack_dates_are_read_in_the_report_timezone(tmp_path: Path) -> Non
         '[report]\ntimezone = "Europe/Berlin"\n[doctor]\npr_block_acks = [\n'
         '  { task = "a", until = 2026-12-01 },\n'
         '  { task = "b", until = "2026-12-01T09:00" },\n'
-        '  { task = "c", until = 2026-12-01T09:00:00Z },\n]\n'
+        '  { task = "c", until = 2026-12-01T09:00:00Z },\n'
+        '  { task = "d", until = "2026-12-01T09:00+02:00" },\n]\n'
     )
-    a, b, c = load_settings(path).doctor.pr_block_acks
+    a, b, c, d = load_settings(path).doctor.pr_block_acks
     berlin = ZoneInfo("Europe/Berlin")
     assert a.until == datetime(2026, 12, 2, tzinfo=berlin)  # through that day
     assert b.until == datetime(2026, 12, 1, 9, tzinfo=berlin)
     assert c.until == datetime(2026, 12, 1, 9, tzinfo=UTC)
+    assert d.until == datetime(2026, 12, 1, 7, tzinfo=UTC)
 
 
 def test_pr_blocks_without_a_github_connector_warn(farm: Farm) -> None:

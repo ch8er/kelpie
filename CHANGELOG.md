@@ -143,8 +143,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 - `kelpie doctor` "PR blocks have conditions" warns only about blocks that read as waiting
   on the PR they name (its merge, review or CI), not about every mention (#417): a PR named
-  only as context, a block that waits on a person, a decision or a pause, or whose
-  category says so, is counted apart. A reviewed exception is acknowledged per task with
+  only as context, or a block whose wording says it waits on a person, a decision or a
+  pause, is counted apart (so is a block whose category says so, though no adapter sets
+  such a category yet). A reviewed exception is acknowledged per task with
   an expiry in the new `[doctor] pr_block_acks`.
 - **The database schema is now 12**: `kelpie serve` migrates an older database at start.
   Older Kelpie versions (0.1.0a3 and before) refuse a database once it is migrated, and
