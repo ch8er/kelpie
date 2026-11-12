@@ -660,6 +660,8 @@ def test_host_states_are_held_open_while_the_source_is_blind() -> None:
         SOURCE_STATE,  # the blind warning itself resolves when readings come back
         "resources:llm_quota:anthropic",  # providers are read elsewhere
         "resources:auth:anthropic",
+        "resources:llm_quota:heavy",  # a quota named "heavy" is not a host's heavy state
+        "resources:auth:heavy",
         "resources:ci_minutes:github",
         "other_rule:disk:host-a:/",
         "resources:nonsense",

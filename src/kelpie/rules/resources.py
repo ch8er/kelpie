@@ -122,6 +122,7 @@ DEFAULT_THRESHOLDS: Mapping[ResourceKind, Thresholds] = {
 }
 # Kinds read from the hosts (Prometheus): blind together while host resources cannot be read.
 HOST_KINDS = frozenset(DEFAULT_THRESHOLDS)
+_PROVIDER_KINDS = frozenset({ResourceKind.LLM_QUOTA, ResourceKind.AUTH, ResourceKind.CI_MINUTES})
 # Kinds where a heavy task adds to the pressure.
 PRESSURE_KINDS = frozenset({ResourceKind.MEMORY, ResourceKind.LOAD, ResourceKind.CPU})
 _RANK = {Severity.INFO: 0, Severity.WARNING: 1, Severity.CRITICAL: 2}
@@ -324,19 +325,26 @@ class Resources:
 
     def holds(self, state_id: str, snapshot: Snapshot) -> bool:
         """While host resources cannot be read, an open host state stays open: the rule
-        cannot tell whether it cleared. The blind warning itself and provider states are
-        not held."""
+        cannot tell whether it cleared. That includes a host's heavy-task state, on purpose:
+        it needs the host's pressure, which cannot be seen. The blind warning itself and
+        provider states are not held. A held state is not refreshed, so once readings are
+        back it resolves on its first reading under the threshold."""
         if snapshot.resources_failure is None or state_id == SOURCE_STATE:
             return False
         rule, _, rest = state_id.partition(":")
         if rule != NAME:
             return False
-        if rest.endswith(":heavy") or rest == "heavy:unplaced":
+        head, _, tail = rest.partition(":")
+        if head in _PROVIDER_KINDS:
+            # A quota or credential, even one named "heavy" (a host named after a provider
+            # kind is ambiguous: its heavy state resolves as before, unheld).
+            return False
+        if tail == "heavy" or rest == "heavy:unplaced":
             return True
         try:
-            kind = ResourceKind(rest.partition(":")[0])
+            kind = ResourceKind(head)
         except ValueError:
-            return False  # a host named after no kind: its heavy state is matched above
+            return False
         return kind in HOST_KINDS
 
     def resolved(self, state_id: str, snapshot: Snapshot) -> str | None:

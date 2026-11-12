@@ -227,12 +227,6 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ### Changed
 
-- While host resources cannot be read (Prometheus down, unreachable or refusing the
-  token), rule 7's disk, memory, load, process and heavy-task alerts that are already open
-  stay open instead of resolving as "no recent reading any more" next to the "host checks
-  are blind" warning. Once readings are back, each resolves or carries on as its reading
-  says (#454). Rules may define `holds(state_id, snapshot)` to keep a state they cannot
-  see open.
 - Internal, no behaviour change (#248 D8, D13): one copy of GitHub's time parsing in the
   CI connector (`ci_runs.parse_time`) and of the glob test of budgets and prices
   (`core.prices.is_glob`).
@@ -252,6 +246,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ### Fixed
 
+- While host resources cannot be read (Prometheus down, unreachable or refusing the
+  token), rule 7's disk, memory, load, process and heavy-task alerts that are already open
+  stay open instead of resolving as "no recent reading any more" next to the "host checks
+  are blind" warning. Once readings are back, each resolves or carries on as its reading
+  says (#454). Rules may define `holds(state_id, snapshot)` to keep a state they cannot
+  see open.
 - Docs: the Hermes quickstart names the rules that can act on Hermes (it said only `stop`
   existed), the OpenClaw quickstart's doctor legend includes WARN, the multi-host
   check says when `kelpie_agent_up` turns 1, and the Hermes README's `human_decisions`
