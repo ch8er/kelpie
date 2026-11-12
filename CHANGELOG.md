@@ -33,8 +33,6 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
   retried create makes no second card; the card's id read from `--json`), and
   `delegation` may run in act mode on Hermes behind the act checklist. Not with `[hub]`
   yet (refused at startup). An operator that is a person or Kelpie is refused.
-  retried create makes no second card; the card's id read from `--json`), and `delegation` may run in act mode on Hermes behind the act checklist. Not
-  with `[hub]` yet (refused at startup).
 - `POST /conditions`: an agent registers the condition its task waits for (task id, kind,
   params), off by default (`[conditions] enabled`). On the main listener (loopback by
   default, behind the Host and connection guards), with a bearer token of its own
