@@ -10,7 +10,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ### Added
 
-- Rules see each task's recent observed status history (#PR): `Snapshot.status_history`,
+- Rules see each task's recent observed status history (#462): `Snapshot.status_history`,
   the status changes `kelpie serve` records (#157) over the last 7 days per task (at most
   32, with the status the window began in), read back from the database at start.
   `kelpie.rules._history` reads time-to-accept and bounces back from review or done from
