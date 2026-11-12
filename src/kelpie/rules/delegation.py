@@ -69,7 +69,8 @@ from kelpie.rules import register
 from kelpie.rules._alerts import alert_params
 from kelpie.rules._params import human
 
-NAME = RULE
+NAME = "delegation"
+assert NAME == RULE
 DAY = timedelta(days=1)
 UNMADE_AFTER = 3  # failed creates after which a card counts as one that cannot be made
 HOUR = timedelta(hours=1)
