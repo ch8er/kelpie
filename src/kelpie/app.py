@@ -3066,7 +3066,7 @@ def act_gaps(settings: Settings, adapters: Sequence[PlatformAdapter]) -> dict[st
     for planned in PLANNED:
         if planned.name not in REGISTRY or planned.name in blocked:
             continue
-        platform = planned.effects - CI_WRITES
+        platform = planned.effects - CONNECTOR_WRITES
         if platform and (said := _gaps(adapters, platform)):
             gaps[planned.name] = said
     return gaps
@@ -3215,7 +3215,7 @@ def acting_rules(settings: Settings, loaded: LoadedRules) -> list[str]:
     if settings.engine.dry_run:
         return []
     # What act_blockers calls a rule's platform effects.
-    on_boards = {p.name for p in PLANNED if p.effects - CI_WRITES}
+    on_boards = {p.name for p in PLANNED if p.effects - CONNECTOR_WRITES}
     return sorted(
         s.name
         for s in loaded.statuses

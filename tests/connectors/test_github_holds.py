@@ -54,8 +54,16 @@ def test_the_label_is_taken_off_each_pr() -> None:
 def test_a_label_already_gone_is_nothing_to_do() -> None:
     path = "/repos/example/repo/issues/51/labels/merge%20first"
     client = Client({path: GitHubError("not_found", "gone", 404)})
-    assert lifter(client).execute(lift(["example/repo#51"])) is ActionResult.NOTHING_TO_DO
-    assert lifter(Client()).execute(lift([])) is ActionResult.NOTHING_TO_DO
+    # Removed nothing: gone already, or a repository the token cannot see: a person is told.
+    assert lifter(client).execute(lift(["example/repo#51"])) is ActionResult.REFUSED
+    other = "/repos/example/repo/issues/52/labels/merge%20first"
+    partly = Client({path: GitHubError("not_found", "gone", 404)})
+    assert lifter(partly).execute(lift(["example/repo#51", "example/repo#52"])) is (
+        ActionResult.DONE
+    )
+    assert partly.calls[-1] == ("DELETE", other)
+    # On no PR (held board tasks only): their board owns the label, a person is told.
+    assert lifter(Client()).execute(lift([])) is ActionResult.REFUSED
 
 
 @pytest.mark.parametrize(
@@ -84,6 +92,9 @@ def test_github_refusals_refuse_and_transient_trouble_raises() -> None:
     flaky = Client({path: GitHubError("server", "502", 502)})
     with pytest.raises(GitHubError):
         lifter(flaky).execute(lift(["example/repo#51"]))
+    limited = Client({path: GitHubError("rate_limited", "secondary limit", 403)})
+    with pytest.raises(GitHubError):  # GitHub's secondary rate limit answers 403: retried
+        lifter(limited).execute(lift(["example/repo#51"]))
 
 
 @pytest.mark.parametrize(
@@ -164,3 +175,16 @@ def test_bottlenecks_can_act_only_with_lifting_allowed(tmp_path: Any) -> None:
     )
     blocker = act_blockers(closed, [])["bottlenecks"]
     assert "allow_lift_holds is off" in blocker.reason
+
+
+def test_a_lift_is_no_platform_effect(tmp_path: Any) -> None:
+    from kelpie.app import act_gaps
+    from kelpie.rules import PLANNED
+
+    class Board:
+        name = "claude-code"
+        actions = frozenset({ActionKind.COMMENT})
+
+    gaps = act_gaps(_settings(tmp_path), [Board()])  # type: ignore[list-item]
+    assert "bottlenecks" not in gaps
+    assert ActionKind.LIFT_HOLD in next(p for p in PLANNED if p.name == "bottlenecks").effects

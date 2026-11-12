@@ -430,10 +430,10 @@ gate agent work.
 | --- | --- | --- |
 | `label` | *required* | The hold's name: for a `label` hold, the label that marks held tasks (on the task or its PR). Unique. |
 | `kind` | `"label"` | `label`: a label on the task or its PR. `flag`: a platform flag on the task (`Task.flags`, which adapters fill; none does yet). `pause`: a blocked or waiting task whose block is a pause (category `pause`, else its reason matches `pattern`). A flag or pause hold is not a PR label to watch, and a task labelled with its name is held by it too. |
-| `pattern` | `^\s*pause(d\b\|\s*:)` | `pause` holds only: a regular expression (case-insensitive, at most 500 characters) over the block reason, e.g. `"paused by the owner"`. |
+| `pattern` | `^\s*pause(d\b\|\s*:)` | `pause` holds only: a regular expression (case-insensitive, at most 200 characters) over the block reason, e.g. `"paused by the owner"`. It runs over agent-written reasons every tick, so the rules of `[connectors.github.pulls] task_code` apply: no capturing groups (use `(?:…)`), no repeated group that itself repeats, no backreferences or lookarounds, and it must not match an empty string. |
 | `owner` | unset | Who owns the hold; named in the alert. |
 | `expires_after` | `hold_expiry`, else `"4h"` | Expected length. A hold's age is how long its oldest queued task has not moved, or since the label went on a PR (`[connectors.github.pulls]`), or for a pause since its oldest block was set. |
-| `executor` | unset | The adapter or connector that owns the hold and lifts it past its expiry: rule 6 then emits `lift_hold` to it instead of the alert. Like every action it runs only in `act` (rule 6 runs in `observe` by default) and without dry-run; an executor that cannot lift it turns it into an alert. Today only `"github_pulls"` lifts holds: a label hold on PRs, with `[connectors.github.pulls] allow_lift_holds`. Unset: Kelpie only alerts. |
+| `executor` | unset | The adapter or connector that owns the hold and lifts it past its expiry: rule 6 then emits `lift_hold` to it (once per hold, until the hold is back) beside the hold's alert, which says what became of the lift. Like every action it runs only in `act` (rule 6 runs in `observe` by default) and without dry-run; an executor that cannot lift it (no board adapter lifts holds yet, and the GitHub lifter refuses a hold on no PR) leaves a person to. Today only `"github_pulls"` lifts holds: a label hold on PRs, with `[connectors.github.pulls] allow_lift_holds`. Unset: Kelpie only alerts. |
 
 ### 7. resources
 

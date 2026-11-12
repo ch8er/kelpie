@@ -5,9 +5,9 @@ description: >
   The merge hold of incident 14 as a PR label, with an owner configured to lift it:
   executor github_pulls (the GitHub pull request step, which needs allow_lift_holds and a
   token of its own). Past its expiry the rule asks that executor to take the label off the
-  held PRs (lift_hold), instead of only alerting; the engine still runs it only in act mode
-  and turns it into an alert when the executor cannot. A hold with no executor still only
-  alerts.
+  held PRs (lift_hold, once), and the hold's alert announces it, so the alert says what
+  became of the lift; the engine runs the lift only in act mode and a person hears when the
+  executor cannot. A hold with no executor still only alerts, and announces nothing.
 rule: bottlenecks
 config:
   min_idle_time: "30m"
@@ -29,17 +29,22 @@ snapshot:
     - {repo: example/repo, number: 51, branch: "hermes/T-1441", task_ids: [T-1441], labels: [merge-first], mergeable: false, updated_at: "2026-03-02T12:00:00+00:00", labeled: [{label: merge-first, at: "2026-03-02T12:00:00+00:00"}]}
     - {repo: example/repo, number: 52, branch: "release/notes", labels: [merge-first], mergeable: false, updated_at: "2026-03-02T12:00:00+00:00", labeled: [{label: merge-first, at: "2026-03-02T12:00:00+00:00"}]}
 expected_actions:
-  - kind: lift_hold
-    executor: github_pulls
+  - kind: alert
     reason_contains: "past its expected 2h 30m"
     params:
       hold: merge-first
       owner: human-owner
+      announces: "bottlenecks:lift:merge-first"
+  - kind: lift_hold
+    executor: github_pulls
+    params:
+      hold: merge-first
+      hold_kind: label
       lift_prs: ["example/repo#51", "example/repo#52"]
   - kind: alert
     params: {hold: docs-freeze}
 not_expected_actions:
-  - kind: alert
-    params: {hold: merge-first}
   - kind: lift_hold
     params: {hold: docs-freeze}
+  - kind: alert
+    params: {hold: docs-freeze, announces: "bottlenecks:lift:docs-freeze"}

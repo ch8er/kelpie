@@ -113,7 +113,9 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from kelpie.core.actions import Action, ActionKind, Severity
+from kelpie.core.alerts import ANNOUNCES
 from kelpie.core.model import ConditionKind, OwnerKind, PullRequest, Snapshot, Status, Task
+from kelpie.core.pr_links import compile_task_code as safe_pattern
 from kelpie.core.serde import parse_duration
 from kelpie.rules import register
 from kelpie.rules._alerts import alert_params, count
@@ -134,7 +136,7 @@ NAME = "bottlenecks"
 PLANNED_AGENT_TASKS = "planned_agent_tasks"
 
 _RUNNABLE = frozenset({Status.READY, Status.IN_PROGRESS, Status.REVIEW, Status.ACCEPTED})
-MAX_PATTERN = 500  # characters of a pause hold's pattern
+MAX_PATTERN = 200  # characters of a pause hold's pattern (as a task_code)
 MAX_REASON = 2000  # characters of a block reason a pause pattern reads
 _FROZEN = frozenset({Status.BLOCKED, Status.WAITING})  # wait for the outside world
 _SHOWN = 5  # ids kept from each end of a long chain
@@ -299,7 +301,7 @@ HOLD_KINDS = (LABEL, FLAG, PAUSE)
 # reason starts with "paused" / "pause:" (case-insensitive).
 DEFAULT_PAUSE = re.compile(r"^\s*pause(?:d\b|\s*:)", re.IGNORECASE)
 PAUSE_CATEGORIES = frozenset({"pause", "paused"})
-MAX_LIFT_PRS = 50  # pull requests a lift names; more stay for the next tick
+MAX_LIFT_PRS = 50  # pull requests a lift names (the GitHub lifter's own cap: keep them equal)
 
 
 def is_paused(task: Task, pattern: re.Pattern[str] | None = None) -> bool:
@@ -903,10 +905,10 @@ class Bottlenecks:
                 if hold.kind == LABEL
                 else []
             )
-            lift = hold.executor is not None
+            lift_key = f"{NAME}:lift:{label}"
             actions.append(
                 Action(
-                    ActionKind.LIFT_HOLD if lift else ActionKind.ALERT,
+                    ActionKind.ALERT,
                     NAME,
                     f"Hold '{label}' looks forgotten: its {_work(len(ids), len(pr_refs), '')} "
                     f"({_names(ids + pr_refs)}) "
@@ -916,11 +918,11 @@ class Bottlenecks:
                     key=f"{NAME}:hold:{label}",
                     state=f"{NAME}:hold:{label}",
                     since=expired_at,
-                    executor=hold.executor,
                     params={
                         "hold": label,
                         **({"hold_kind": hold.kind} if hold.kind != LABEL else {}),
-                        **({"lift_prs": lift_prs} if lift else {}),
+                        # the lift below: the alert says what became of it
+                        **({ANNOUNCES: lift_key} if hold.executor is not None else {}),
                         "owner": hold.owner,
                         "held_tasks": ids[: _SHOWN * 2],
                         "held_count": len(ids) + len(pr_refs),
@@ -935,6 +937,24 @@ class Bottlenecks:
                     },
                 )
             )
+            if hold.executor is not None:
+                # Its owner lifts it, in act mode only; once per hold until it is back.
+                actions.append(
+                    Action(
+                        ActionKind.LIFT_HOLD,
+                        NAME,
+                        f"Hold '{label}' is past its expected {_human(expiry)}: lift it.",
+                        executor=hold.executor,
+                        key=lift_key,
+                        once=True,
+                        params={
+                            "hold": label,
+                            "hold_kind": hold.kind,
+                            "lift_prs": lift_prs,
+                            "held_tasks": ids[:MAX_LIFT_PRS],
+                        },
+                    )
+                )
         return actions
 
     def _human_gated(
@@ -1123,10 +1143,10 @@ def _hold(raw: Any) -> Hold:
             raise ValueError(f"holds.{label}.pattern applies to pause holds only")
         if not isinstance(text, str) or not text or len(text) > MAX_PATTERN:
             raise ValueError(f"holds.{label}.pattern must be a regular expression")
-        try:
-            pattern = re.compile(text, re.IGNORECASE)
-        except re.error as exc:
-            raise ValueError(f"holds.{label}.pattern: {exc}") from None
+        try:  # it runs over agent-written reasons every tick: no backtracking patterns
+            pattern = re.compile(safe_pattern(text).pattern, re.IGNORECASE)
+        except ValueError as exc:
+            raise ValueError(f"holds.{label}.pattern {exc}") from None
     executor = raw.pop("executor", None)
     if executor is not None and (not isinstance(executor, str) or not executor.strip()):
         raise ValueError(f"holds.{label}.executor must name an adapter or connector")

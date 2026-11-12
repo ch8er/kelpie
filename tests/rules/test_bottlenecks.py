@@ -1496,3 +1496,11 @@ def test_only_label_holds_are_pr_labels_to_watch() -> None:
         }
     )
     assert found == ["a", "b"]
+
+
+@pytest.mark.parametrize("pattern", ["(a+)+$", "(?=x)paused", r"(\w)\1", "a*"])
+def test_a_pause_pattern_that_could_backtrack_or_match_nothing_is_refused(pattern: str) -> None:
+    from kelpie.rules.bottlenecks import build
+
+    with pytest.raises(ValueError, match=re.escape("holds.h.pattern")):
+        build({"holds": [{"label": "h", "kind": "pause", "pattern": pattern}]})
