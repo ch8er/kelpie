@@ -35,34 +35,41 @@ VERDICTS = (
 def delegation(ctx: SectionContext) -> Section | None:
     events = [e for e in map(event_of, ctx.inputs.actions) if e is not None]
     cards = {
-        e.card_id for e in events if e.kind == "card" and e.outcome == "executed" and e.card_id
+        e.card_id
+        for e in events
+        if e.kind == "card" and e.outcome == "executed" and e.card_id and e.at < ctx.end
     }
     today = [e for e in events if ctx.start <= e.at < ctx.end]
     made = [e for e in today if e.kind == "card" and e.outcome == "executed"]
     suggested = [e for e in today if e.kind == "card" and e.outcome == "suggested"]
     held = [e for e in today if e.kind == "held"]
+    known = {v for v, _ in VERDICTS}
     said = Counter(
-        e.verdict for e in today if e.kind == "verdict" and e.outcome != "failed" and e.verdict
+        e.verdict
+        for e in today
+        if e.kind == "verdict" and e.outcome != "failed" and e.verdict in known
     )
     owners = ctx.owners
+
+    def card_of(task_id: str | None, session_id: str | None) -> str | None:
+        return owners.task_of(task_id, session_id) if owners else task_id
+
     on_cards = [
-        u
-        for u in usage(ctx.spans, ctx.counted)
-        if (owners.task_of(u.task_id, u.session_id) if owners else u.task_id) in cards
+        u for u in usage(ctx.spans, ctx.counted) if card_of(u.task_id, u.session_id) in cards
     ]
     if not (made or suggested or held or said or on_cards):
-        return None
-    lines = [_summary(made, suggested, held)]
+        return None  # nothing within the day
+    lines: list[str] = [_summary(made, suggested, held)] if made or suggested or held else []
     if said:
-        lines += ["", "| Verdict | Cards |", "| --- | ---: |"]
+        lines += ["", "| Verdict | Count |", "| --- | ---: |"]
         lines += [f"| {text} | {said[v]} |" for v, text in VERDICTS if said[v]]
     if on_cards:
         spend = ctx.price(on_cards)
         money = f" (${spend.usd:,.2f})" if spend.usd else ""
         lines += [
             "",
-            f"Operator agents spent {spend.tokens:,} tokens{money} on Kelpie's cards "
-            f"({len({u.task_id or u.session_id for u in on_cards})} card(s) or session(s)).",
+            f"Agents spent {spend.tokens:,} tokens{money} on Kelpie's cards "
+            f"(on {len({card_of(u.task_id, u.session_id) for u in on_cards})} card(s)).",
         ]
     if made:
         who = Counter(e.operator or "?" for e in made)

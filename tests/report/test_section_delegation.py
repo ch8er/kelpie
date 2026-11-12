@@ -41,8 +41,8 @@ def entry(
     )
 
 
-def report(*actions: LedgerEntry, spans: tuple[Span, ...] = ()) -> str:
-    inputs = ReportInputs(day=DAY, tz=UTC, actions=actions, spans=spans)
+def report(*actions: LedgerEntry, spans: tuple[Span, ...] = (), **kw: Any) -> str:
+    inputs = ReportInputs(day=DAY, tz=UTC, actions=actions, spans=spans, **kw)
     return render_markdown(build_report(inputs))
 
 
@@ -107,5 +107,67 @@ def test_cards_holds_verdicts_and_the_operators_tokens() -> None:
     assert "would have handed 1 more (suggest mode)" in text
     assert "| fixed, verified | 1 |" in text
     assert "not fixed" not in text  # its send failed: not said
-    assert "Operator agents spent 1,500 tokens" in text
+    assert "Agents spent 1,500 tokens" in text and "(on 1 card(s))" in text
     assert "Cards by operator: ops-1 1." in text
+
+
+def llm(task_id: str | None, session_id: str | None = None, tokens: int = 100) -> Span:
+    return Span(
+        f"TR-{task_id}-{session_id}",
+        f"SP-{task_id}-{session_id}",
+        "chat",
+        SpanKind.LLM,
+        NOON,
+        end=NOON + timedelta(minutes=1),
+        task_id=task_id,
+        session_id=session_id,
+        model="claude-sonnet-4",
+        input_tokens=tokens,
+        output_tokens=0,
+    )
+
+
+def test_tokens_on_older_cards_through_sessions_and_on_named_boards() -> None:
+    from kelpie.core.model import Session
+
+    old = entry(
+        ActionKind.DELEGATE,
+        Outcome.EXECUTED,
+        BASE,
+        at=START - timedelta(hours=5),
+        detail="card qr:t_8 for ops-1",
+    )
+    session = Session("S-9", "qr:t_8", "ops-1", NOON - timedelta(minutes=5))
+    text = section(
+        report(
+            old, spans=(llm("qr:t_8", tokens=100), llm(None, "S-9", tokens=50)), sessions=(session,)
+        )
+    )
+    assert "Agents spent 150 tokens" in text and "(on 1 card(s))" in text
+    assert "Kelpie handed" not in text  # nothing handed over within the day
+
+
+def test_nothing_within_the_day_is_no_section() -> None:
+    before = START - timedelta(hours=3)
+    assert "Delegation to operator agents" not in report(
+        entry(ActionKind.DELEGATE, Outcome.EXECUTED, BASE, at=before, detail="card t_7 for ops-1"),
+        entry(ActionKind.ALERT, Outcome.ALERTED, {**BASE, "verdict": "verified"}, at=before),
+    )
+
+
+def test_kept_and_unknown_verdicts() -> None:
+    text = section(
+        report(
+            entry(ActionKind.ALERT, Outcome.ALERTED, {**BASE, "attempt": 0, "verdict": "kept"}),
+        )
+    )
+    assert "| held, then kept with the person | 1 |" in text
+    assert "Delegation to operator agents" not in report(
+        entry(ActionKind.ALERT, Outcome.ALERTED, {**BASE, "verdict": "weird"})
+    )
+
+
+def test_cards_not_carried_out_do_not_count() -> None:
+    for outcome in (Outcome.OBSERVED, Outcome.DRY_RUN, Outcome.SUPPRESSED, Outcome.FAILED):
+        markdown = report(entry(ActionKind.DELEGATE, outcome, BASE, detail="card t_1 for ops-1"))
+        assert "Kelpie handed 1" not in markdown
