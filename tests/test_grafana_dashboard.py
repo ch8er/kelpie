@@ -248,8 +248,29 @@ def test_template_variables_used_are_defined() -> None:
     assert used <= defined, sorted(used - defined)
     assert {"board", "host"} <= defined
     for v in _variables():
+        if v["type"] != "query":
+            continue
         # "All" must match series without the label too (one board, a single host).
         assert v["includeAll"] and v["allValue"] == ".*", v["name"]
+
+
+def test_langfuse_links_follow_the_variable() -> None:
+    """Links to traces in Langfuse, when its URL is set: a text variable, empty by
+    default (no host is assumed), the dashboard's link and the trace panels' links."""
+    (var,) = [v for v in _variables() if v["name"] == "langfuse"]
+    assert var["type"] == "textbox" and var["query"] == "" and var["current"]["value"] == ""
+    (link,) = [x for x in _dashboard()["links"] if x["title"] == "Traces in Langfuse"]
+    assert link["url"] == "${langfuse}" and link["targetBlank"]
+    linked = {p["title"] for p in _panels() if p.get("links")}
+    assert linked == {
+        "Spans per minute received and rejected",
+        "Spans in the snapshot",
+        "Trace forwarding per minute",
+        "Unattributed and unpriced tokens",
+    }
+    for p in _panels():
+        for panel_link in p.get("links", []):
+            assert panel_link["url"] == "${langfuse}" and panel_link["targetBlank"]
 
 
 def _labels_by_metric() -> dict[str, set[str]]:

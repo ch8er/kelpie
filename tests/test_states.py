@@ -408,6 +408,34 @@ def test_board_dependence_can_be_per_state() -> None:
     assert {s.id for s in e.states.store.open_states()} == {"resources:laptop:heavy"}
 
 
+def test_a_rule_can_hold_an_unreported_state_open() -> None:
+    class Held(Toggle):
+        held = True
+
+        def holds(self, state: str, snapshot: Snapshot) -> bool:
+            return self.held
+
+    class Broken(Toggle):
+        def holds(self, state: str, snapshot: Snapshot) -> bool:
+            raise RuntimeError("bug")
+
+    alerter, rule = FakeAlerter(), Held(replace(alert(), task_id=None))
+    e = engine(rule, alerter)
+    tick(e, T0)
+    rule.on = False
+    assert e.tick(lambda: Snapshot(now=T0 + H)) == []  # held: not resolved
+    assert len(e.states.store.open_states()) == 1
+    rule.held = False
+    assert [d.outcome for d in e.tick(lambda: Snapshot(now=T0 + 2 * H))] == [Outcome.ALERTED]
+    assert e.states.store.open_states() == []
+    # A hook that raises holds nothing.
+    alerter, broken = FakeAlerter(), Broken(replace(alert(), task_id=None))
+    e = engine(broken, alerter)
+    tick(e, T0)
+    broken.on = False
+    assert [d.outcome for d in e.tick(lambda: Snapshot(now=T0 + H))] == [Outcome.ALERTED]
+
+
 def test_rules_see_the_open_states() -> None:
     """The engine tells rules which states are open, so they can hold one (hysteresis)."""
     seen: list[tuple[str, ...]] = []
