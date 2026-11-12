@@ -77,6 +77,7 @@ from kelpie.core.model import Status
 from kelpie.core.ports import PlatformAdapter
 from kelpie.core.snooze import marker_snooze
 from kelpie.core.spend import SpendMode
+from kelpie.doctorconfig import ack_problem
 from kelpie.resources.prometheus import PrometheusClient, QueryError
 from kelpie.snooze import local_board
 from kelpie.traces.auth import loose_mode, token_copies, trust_problem
@@ -99,6 +100,29 @@ PR_REFS = (
         re.IGNORECASE,
     ),
 )
+# A block reads as waiting on the PR it names when the same sentence names what of it is
+# awaited (#417).
+PR_WAIT = re.compile(
+    r"\b(?:wait\w*|await\w*|until|pending|blocked\s+(?:on|by)|depends?\s+on|merge[sd]?|"
+    r"merging|automerge|lands?|landed|landing|review\w*|CI|checks?|green|red|builds?|"
+    r"rebase\w*|conflicts?)\b",
+    re.IGNORECASE,
+)
+# ... unless the PR is work still to do: "PR #89 not ready for review".
+PR_NOT_READY = re.compile(r"\bnot\s+(?:yet\s+)?ready\b", re.IGNORECASE)
+# Wording that says a block waits on a person, a decision or a pause, wherever it is.
+NOT_PR_WAIT = re.compile(
+    r"\b(?:paus\w*|decisions?|decide\w*|decompos\w*|architect\w*|agree\w*|"
+    r"sign[\s-]?off|(?:owner|human|operator|person)'?s?\s+(?:approval|answer|input|ok))\b",
+    re.IGNORECASE,
+)
+# Block categories (``Block.category``, normalised by the adapter) of a block that waits on a
+# person, a decision or a pause, whatever its reason names. Not ``waiting_human``: Hermes
+# gives it to every typed block, and agents block with ``needs_input`` to get past Hermes'
+# block loop guard while a PR merges (``kelpie.rules._tasks.asks_a_person``).
+NOT_PR_CATEGORIES = frozenset({"human", "person", "decision", "pause", "paused"})
+# A sentence ends at . ; ! or ? followed by a space or the end (so a link's dots do not).
+_SENTENCE_END = re.compile(r"[.;!?](?:\s+|$)")
 SHOWN = 5  # task ids named in a detail (rule names: SHOWN_RULES)
 MAX_GITHUB_REPOS = 20  # GitHub is asked about at most this many repositories
 CI_SOURCES = {STATUSES: "statuses", CHECK_RUNS: "check-runs", ACTIONS: "Actions runs"}
@@ -779,25 +803,44 @@ def check_pr_blocks(settings: Settings, adapter: HermesAdapter, now: datetime) -
     blocks (the platform's own, with error text) do not. Each is then resolved as ``kelpie
     serve`` does: a block pattern must match, its ``pr`` group must name a PR of a repository
     in ``[connectors.github] repos``. Links other connectors add (human tasks) are not
-    considered."""
+    considered.
+
+    Only blocks that read as waiting on the PR count (#417): a sentence that names the PR
+    also says what of it is awaited (merge, review, CI, ...), and nothing in the reason says
+    the block waits on a person, a decision or a pause, nor does the block's category. A
+    PR named only as context ("release run done (PR #437); needs the owner's approval")
+    would be closed wrongly by a "PR merged" pattern. ``[doctor] pr_block_acks`` silences
+    reviewed exceptions per task until their expiry."""
     name = _board("PR blocks have conditions", adapter)
     try:
         # The board only: no spool, no git (worktrees readable already asked git), no ps.
         tasks = replace(adapter, git_state=False, spool=None, tools=None).snapshot(now).tasks
     except (HermesError, sqlite3.Error) as exc:
         return _skip(name, f"board not readable: {exc}")
-    blocks = {
-        t.id: t.block.reason
+    mentions = {
+        t.id: t.block
         for t in tasks
         if t.status is Status.BLOCKED
         and t.block is not None
         and not t.block.reason.lower().startswith("guard:")
         and _names_a_pr(t.block.reason)
     }
+    waiting = {tid: b.reason for tid, b in mentions.items() if _waits_on_pr(b.reason, b.category)}
+    acks = {a.task: a for a in settings.doctor.pr_block_acks}
+    lapsed = {
+        tid: problem
+        for tid in waiting
+        if tid in acks and (problem := ack_problem(acks[tid], now)) is not None
+    }
+    acked = sorted((tid for tid in waiting if tid in acks and tid not in lapsed), key=_natural)
+    blocks = {tid: r for tid, r in waiting.items() if tid not in acks or tid in lapsed}
     named = sorted(blocks, key=_natural)
+    aside = _pr_blocks_aside(len(mentions) - len(waiting), acked, lapsed)
     if not named:
-        return _pass(name, "no block reason on the board names a PR")
-    found = f"{len(named)} block reason(s) name a PR ({_named(named)})"
+        if not mentions:
+            return _pass(name, "no block reason on the board names a PR")
+        return _pass(name, "no block reason on the board waits on a PR" + aside)
+    found = f"{len(named)} block reason(s) wait on a PR ({_named(named)}){aside}"
     github = settings.github
     if github is None:
         return _warn(
@@ -890,6 +933,38 @@ def check_snooze_markers(settings: Settings, now: datetime) -> Check:
 
 def _names_a_pr(reason: str) -> bool:
     return any(p.search(reason) for p in PR_REFS)
+
+
+def _waits_on_pr(reason: str, category: str | None = None) -> bool:
+    """Whether a block reason that names a PR reads as waiting on that PR (#417): a sentence
+    that names it also names what of it is awaited (``waiting for PR #12 to merge``,
+    ``automerge PR #4``, ``PR #7 CI red``), not as work still to do on it (``PR #89 not
+    ready for review``), and neither the reason nor the block's category says it waits on
+    a person, a decision or a pause. Conservative for a warning: a block that also names a
+    person or a decision is left out even when it names a PR wait too."""
+    if category is not None and category.strip().lower() in NOT_PR_CATEGORIES:
+        return False
+    if NOT_PR_WAIT.search(reason):
+        return False
+    return any(
+        _names_a_pr(sentence) and PR_WAIT.search(sentence) and not PR_NOT_READY.search(sentence)
+        for sentence in _SENTENCE_END.split(reason)
+    )
+
+
+def _pr_blocks_aside(context: int, acked: list[str], lapsed: Mapping[str, str]) -> str:
+    """What the PR blocks check left out, and acknowledgements that no longer hold."""
+    parts = []
+    if context:
+        parts.append(f"{context} more name a PR only as context")
+    if acked:
+        parts.append(f"{len(acked)} acknowledged in [doctor] pr_block_acks ({_named(acked)})")
+    if lapsed:
+        shown = sorted(lapsed, key=_natural)
+        listed = ", ".join(f"{t}: {lapsed[t]}" for t in shown[:SHOWN])
+        more = f" and {len(shown) - SHOWN} more" if len(shown) > SHOWN else ""
+        parts.append(f"acknowledgements that no longer hold ({listed}{more})")
+    return f" ({'; '.join(parts)})" if parts else ""
 
 
 def _natural(text: str) -> list[object]:

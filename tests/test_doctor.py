@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 import threading
@@ -13,6 +14,7 @@ from pathlib import Path
 
 import pytest
 
+from kelpie.app import load_settings
 from kelpie.cli import main
 from kelpie.core.storage import SqliteSpanStore
 from kelpie.doctor import SHOWN_RULES, Check, run_checks
@@ -622,12 +624,150 @@ def test_reasons_that_name_no_pr(reason: str) -> None:
     assert not _names_a_pr(reason)
 
 
+# The three shapes of #417 (a PR named only as context) and look-alikes.
+CONTEXT_ONLY = [
+    "Release run done (PR #437). Needs the owner's approval of the checklist and release notes.",
+    "Project paused by the owner. Fix pushed, PR #101 open. After the pause, return to review.",
+    "Needs decomposition; PR #89 not ready for review. Architect: agree owners and acceptance "
+    "boundary.",
+    "PR #12 is open; which certificate should it use?",
+]
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [
+        "waiting for PR #12 to merge",
+        "automerge PR #412",
+        "waiting for https://github.com/example/app/pull/7",
+        "PR #7 CI red, waiting on a rerun",
+        "Fix pushed. PR #44 in review.",
+    ],
+)
+def test_reasons_that_wait_on_a_pr(reason: str) -> None:
+    from kelpie.doctor import _waits_on_pr
+
+    assert _waits_on_pr(reason)
+
+
+@pytest.mark.parametrize("reason", CONTEXT_ONLY)
+def test_reasons_that_name_a_pr_only_as_context(reason: str) -> None:
+    from kelpie.doctor import _names_a_pr, _waits_on_pr
+
+    assert _names_a_pr(reason) and not _waits_on_pr(reason)
+
+
+@pytest.mark.parametrize("category", ["decision", "Pause", "person"])
+def test_a_block_category_of_a_person_decision_or_pause_waits_on_no_pr(category: str) -> None:
+    from kelpie.doctor import _waits_on_pr
+
+    assert not _waits_on_pr("waiting for PR #12 to merge", category)
+    # Hermes' typed blocks (waiting_human) carry PR waits too: the reason decides.
+    assert _waits_on_pr("waiting for PR #12 to merge", "waiting_human")
+
+
+def test_pr_blocks_named_only_as_context_do_not_warn(farm: Farm) -> None:
+    farm.make_healthy()
+    for n, reason in enumerate(CONTEXT_ONLY, start=2):
+        blocked(farm, f"t_{n}", reason, kind="")
+    check = farm.checks()["PR blocks have conditions"]
+    assert check.status == "PASS"
+    assert "no block reason on the board waits on a PR (4 more name a PR only as context)" in (
+        check.detail
+    )
+    blocked(farm, "t_9", "waiting for PR #12 to merge", kind="")
+    check = farm.checks()["PR blocks have conditions"]
+    assert check.status == "WARN"
+    assert "1 block reason(s) wait on a PR (t_9) (4 more name a PR only as context)" in (
+        check.detail
+    )
+
+
+def test_acknowledged_pr_blocks_stop_warning_until_they_expire(farm: Farm) -> None:
+    farm.make_healthy()
+    blocked(farm, "t_2", "waiting for PR #12 to merge")
+    blocked(farm, "t_3", "automerge PR #13")
+    later = (NOW + timedelta(days=7)).date().isoformat()
+    farm.extra = (
+        "[doctor]\npr_block_acks = [\n"
+        f'  {{ task = "t_2", until = {later}, note = "reviewed: waits on a vendor" }},\n'
+        f'  {{ task = "t_3", until = "{later}" }},\n'
+        "]\n"
+    )
+    check = farm.checks()["PR blocks have conditions"]
+    assert check.status == "PASS"
+    assert "acknowledged in [doctor] pr_block_acks (t_2, t_3)" in check.detail
+    # Expired, or reaching too far ahead: the WARN comes back and says why.
+    past = (NOW - timedelta(days=2)).date().isoformat()
+    far = (NOW + timedelta(days=200)).date().isoformat()
+    farm.extra = (
+        "[doctor]\npr_block_acks = [\n"
+        f'  {{ task = "t_2", until = {past} }},\n'
+        f'  {{ task = "t_3", until = {far} }},\n'
+        "]\n"
+    )
+    check = farm.checks()["PR blocks have conditions"]
+    assert check.status == "WARN" and "2 block reason(s) wait on a PR (t_2, t_3)" in check.detail
+    assert "t_2: expired" in check.detail and "t_3: ends more than 90 days ahead" in check.detail
+
+
+@pytest.mark.parametrize(
+    ("body", "error"),
+    [
+        ("[doctor]\nfoo = 1\n", "unknown [doctor] keys"),
+        ("[doctor]\npr_block_acks = 3\n", "must be a list of tables"),
+        ('[doctor]\npr_block_acks = [{ task = "t_2" }]\n', "always expires"),
+        ('[doctor]\npr_block_acks = [{ task = "", until = 2026-12-01 }]\n', "task must be"),
+        ('[doctor]\npr_block_acks = [{ task = "t", until = "soon" }]\n', "until must be"),
+        ('[doctor]\npr_block_acks = [{ task = "t", until = 5 }]\n', "until must be"),
+        (
+            '[doctor]\npr_block_acks = [{ task = "t", until = 2026-12-01, x = 1 }]\n',
+            "unknown [doctor] pr_block_acks[0] keys",
+        ),
+        (
+            '[doctor]\npr_block_acks = [{ task = "t", until = 2026-12-01 },'
+            ' { task = "t", until = 2026-12-02 }]\n',
+            "repeats task",
+        ),
+        (
+            '[doctor]\npr_block_acks = [{ task = "t", until = 2026-12-01, note = 1 }]\n',
+            "note must be",
+        ),
+        ("doctor = 1\n", "[doctor] must be a table"),
+    ],
+)
+def test_bad_doctor_settings_are_refused(tmp_path: Path, body: str, error: str) -> None:
+    from kelpie.app import ConfigError
+
+    path = tmp_path / "kelpie.toml"
+    path.write_text(body)
+    with pytest.raises(ConfigError, match=re.escape(error)):
+        load_settings(path)
+
+
+def test_doctor_ack_dates_are_read_in_the_report_timezone(tmp_path: Path) -> None:
+    from zoneinfo import ZoneInfo
+
+    path = tmp_path / "kelpie.toml"
+    path.write_text(
+        '[report]\ntimezone = "Europe/Berlin"\n[doctor]\npr_block_acks = [\n'
+        '  { task = "a", until = 2026-12-01 },\n'
+        '  { task = "b", until = "2026-12-01T09:00" },\n'
+        '  { task = "c", until = 2026-12-01T09:00:00Z },\n]\n'
+    )
+    a, b, c = load_settings(path).doctor.pr_block_acks
+    berlin = ZoneInfo("Europe/Berlin")
+    assert a.until == datetime(2026, 12, 2, tzinfo=berlin)  # through that day
+    assert b.until == datetime(2026, 12, 1, 9, tzinfo=berlin)
+    assert c.until == datetime(2026, 12, 1, 9, tzinfo=UTC)
+
+
 def test_pr_blocks_without_a_github_connector_warn(farm: Farm) -> None:
     farm.make_healthy()
     blocked(farm, "t_2", "automerge PR #412")
     blocked(farm, "t_3", "which certificate?")
     check = farm.checks()["PR blocks have conditions"]
-    assert check.status == "WARN" and "1 block reason(s) name a PR (t_2)" in check.detail
+    assert check.status == "WARN" and "1 block reason(s) wait on a PR (t_2)" in check.detail
     assert "[connectors.github] is not configured" in check.detail
     assert "fix: add [connectors.github]" in check.render()
     farm.extra = GITHUB.replace("[connectors.github]\n", "[connectors.github]\nenabled = false\n")

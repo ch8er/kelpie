@@ -148,6 +148,7 @@ from kelpie.core.storage import (
     SqliteSpanStore,
 )
 from kelpie.core.transitions import MemoryTransitionStore, TransitionRecorder
+from kelpie.doctorconfig import DoctorSettings, load_doctor
 from kelpie.httpguard import Limits, load_server
 from kelpie.instructions.config import InstructionSettings, load_instructions, platform_sources
 from kelpie.instructions.watch import InstructionWatch
@@ -340,6 +341,7 @@ class Settings:
     snooze: SnoozeSettings = field(default_factory=SnoozeSettings)  # [snooze]
     server: Limits = field(default_factory=Limits)  # [server]: every listener's guards
     view: ViewSettings = field(default_factory=ViewSettings)  # [view]: read-only farm view
+    doctor: DoctorSettings = field(default_factory=DoctorSettings)  # [doctor]: doctor only
 
     @property
     def spend(self) -> SpendConfig:
@@ -383,6 +385,7 @@ def load_settings(path: Path | None) -> Settings:
         "snooze",
         "server",
         "view",
+        "doctor",
     }
     if unknown:
         raise ConfigError(f"unknown config sections: {sorted(unknown)}")
@@ -430,6 +433,7 @@ def load_settings(path: Path | None) -> Settings:
         snooze = load_snooze(data.get("snooze"), report.tz)
         server = load_server(data.get("server"))
         view = load_view(data.get("view"))
+        doctor = load_doctor(data.get("doctor"), report.tz)
     except ValueError as exc:
         raise ConfigError(str(exc)) from exc
     settings = Settings(
@@ -459,6 +463,7 @@ def load_settings(path: Path | None) -> Settings:
         snooze=snooze,
         server=server,
         view=view,
+        doctor=doctor,
     )
     _check_propose_token(settings)
     return settings
