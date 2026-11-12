@@ -282,6 +282,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
   most 5 a lift (the rest left to a person), act mode only. Hermes records no labels or
   flags; a pause is a block whose text reads as one, so two pause holds whose patterns
   both match a task lift it alike.
+- Delegation cards on GitHub Issues (#347): `delegate_to = { "github-issues" = "<agent>" }`
+  hands a problem to one of `[adapters.github_issues] agents` as a new issue in the task's
+  repository (the board's `label`, the card quoted inert, the key on its last line), and
+  starts the agent on it as on any issue. A card Kelpie's token opened for the key is found
+  again instead of made twice. The operator is checked at startup; Linear refuses cards.
 ### Changed
 
 - Linear: a task whose time comes from when Kelpie first saw it as it is (no history

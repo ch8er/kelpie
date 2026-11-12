@@ -19,6 +19,8 @@ quoted inert (:func:`note`):
   issue: refused, a human decides.
 - ``reassign``: the new agent is started first, then the one holding it taken off
   (unassigned, its label removed); only an agent of this adapter that the board allows.
+- ``delegate`` (GitHub Issues): a card for an operator agent (#347), an issue in the
+  task's repository that starts the agent, found again by its key line.
 - ``lift_hold`` (``lift_holds``, off by default): rule 6's pause hold past its expiry, named
   with this adapter as its ``executor`` and named after one of the board's pause labels:
   that label comes off each held task of this adapter that still carries it. A pause state
@@ -31,6 +33,7 @@ before anything changes (``UnsupportedAction``), so a human is alerted instead.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import re
 from collections.abc import Callable, Iterable, Mapping, Sequence
@@ -64,6 +67,9 @@ MAX_LIFTS = 4  # tasks one lift_hold changes (a label and a note each, inside a 
 PAUSE_KIND = "pause"  # the only hold kind an issue tracker lifts (rule 6's hold kinds)
 WAIT_KINDS = frozenset({"backoff", "rate_limited", "stale", "budget"})
 MAX_QUOTE = 2000  # characters of a rule's reason quoted in a comment
+MAX_CARD = 8000  # characters of a delegation card quoted in its issue
+CARD_KEY = "kelpie-delegation: "  # the key line of a card (kelpie.core.delegation)
+_CARD_LINE = re.compile(re.escape(CARD_KEY) + r"[0-9a-f]{32}")
 MENTION_TEXT = "please pick this issue up again (Kelpie restarts its work)."
 JOINER = "\u2060"  # word joiner: invisible, breaks "@name" for bots that match raw text
 _TICKS = re.compile(r"`+")
@@ -92,18 +98,62 @@ class Tracker(Protocol):
     def reserve(self, writes: int, agents: Sequence[Agent] = ()) -> None: ...
 
 
+def inert_title(text: str) -> str:
+    """A card's title as GitHub shows it: no mention pings, one line."""
+    return " ".join(text.replace("@", "@" + JOINER).split())
+
+
+def card_line(key: str) -> str:
+    """A card's key line: a digest of the key, so it is one short line that links and
+    pings nothing on GitHub, whatever the key holds (task ids, config text)."""
+    return CARD_KEY + hashlib.sha256(key.encode()).hexdigest()[:32]
+
+
+def is_card(item: Item) -> bool:
+    """Whether ``item``'s description ends a card the way Kelpie writes one (anyone can
+    write the line; a look-alike only keeps Kelpie from delegating about that issue)."""
+    lines = item.body.splitlines()
+    return bool(lines) and _CARD_LINE.fullmatch(lines[-1]) is not None
+
+
+def _started_on(agent: Agent, item: Item) -> bool:
+    """Whether every part of ``agent``'s start shows on ``item`` (its assignee and label)."""
+    assigned = {login_key(a) for a in item.assignees}
+    if agent.assignee is not None and login_key(agent.assignee) not in assigned:
+        return False
+    labels = {x.casefold() for x in item.labels}
+    return agent.label is None or agent.label.casefold() in labels
+
+
+def _waiting[T](read: Callable[[], T]) -> T:
+    """``read()``, with the tracker asking Kelpie to wait turned into ``Deferred`` (not a
+    failed attempt: nothing was written)."""
+    try:
+        return read()
+    except IssuesError as exc:
+        if exc.kind in WAIT_KINDS:
+            raise Deferred(f"issues: the tracker cannot be asked now ({exc.kind})") from exc
+        raise
+
+
+def card_text(what: str, card: str, line: str) -> str:
+    """A delegation card's description: Kelpie's words, the card quoted inert (as in
+    :func:`note`, up to ``MAX_CARD`` characters), then the key ``line`` on its own."""
+    return note(what, card, MAX_CARD) + f"\n\n{line}"
+
+
 def signed(text: str) -> str:
     return text.rstrip() + SIGNATURE
 
 
-def note(what: str, quoted: str) -> str:
+def note(what: str, quoted: str, limit: int = MAX_QUOTE) -> str:
     """A comment: Kelpie's own words (``what``: fixed text and names from the config), then
     the rule's reason in a code block. The reason can quote text anyone wrote (titles, block
     reasons, labels); in a code block its mentions, issue references (``Fixes #n``), links
     and HTML do nothing for GitHub. Bots that match the raw text (``@claude`` for the Claude
     Code Action, ``/command`` lines) would still see them, so every ``@`` is followed by an
     invisible word joiner and every line is indented: it starts no agent and pings nobody."""
-    text = quoted[:MAX_QUOTE].replace("@", "@" + JOINER)
+    text = quoted[:limit].replace("@", "@" + JOINER)
     text = "\n".join("  " + line for line in text.splitlines())
     longest = max((len(run) for run in _TICKS.findall(text)), default=0)
     fence = "`" * max(3, longest + 1)
@@ -129,6 +179,7 @@ class IssuesAdapter:
             ActionKind.COMMENT,
             ActionKind.REASSIGN,
             ActionKind.LIFT_HOLD,
+            ActionKind.DELEGATE,  # GitHub Issues only (Linear refuses it, and at startup)
         }
     )
     # Kinds no issue task draws: no sessions to stop, no worktrees to commit, no parked task
@@ -142,6 +193,7 @@ class IssuesAdapter:
     _owners: dict[str, str] = field(default_factory=dict, init=False, repr=False)
     _known: set[str] = field(default_factory=set, init=False, repr=False)  # last read's tasks
     _board_of: dict[str, str] = field(default_factory=dict, init=False, repr=False)
+    _cards: set[str] = field(default_factory=set, init=False, repr=False)  # cards (is_card)
     _problem: str | None = field(default=None, init=False, repr=False)
     # Per issue: how it looked (open, labels, assignees, linked pull requests) and since when.
     _seen: dict[str, tuple[object, datetime]] = field(default_factory=dict, init=False, repr=False)
@@ -207,6 +259,7 @@ class IssuesAdapter:
         }
         self._known = {t.id for t in mapped.tasks}
         self._board_of = {t.id: by_id[t.id].board for t in mapped.tasks}
+        self._cards = {t.id for t in mapped.tasks if is_card(by_id[t.id])}
         return Snapshot(
             now=now,
             tasks=mapped.tasks,
@@ -333,6 +386,60 @@ class IssuesAdapter:
         self, task_id: str, message: str, *, branch: str | None = None, draft_pr: bool = False
     ) -> None:
         raise UnsupportedAction("issue agents commit on their own machines; Kelpie cannot")
+
+    def delegate(self, task_id: str, operator: str, title: str, body: str, key: str) -> str:
+        """Open a delegation card (#347) for ``operator``, one of this adapter's agents, in
+        the repository of ``task_id`` (``SupportsDelegate``), and start the agent on it the
+        way it is started (assigned, labelled or mentioned). The card carries the board's
+        ``label``, so it is a task here and Kelpie watches it; its text is Kelpie's own
+        words with the card quoted inert (:func:`note`), then the key line, which makes the
+        create idempotent: a card Kelpie's token opened with that line is returned (its
+        agent started again if the issue no longer shows it) instead of a second one.
+
+        ``UnsupportedAction`` before any write: a tracker that cannot open issues (Linear,
+        for now), an operator that is no agent of this adapter, one the board does not
+        allow or that cannot be started, or a task not of the last read."""
+        create = getattr(self.tracker, "create_card", None)
+        find = getattr(self.tracker, "find_card", None)
+        if create is None or find is None:
+            raise UnsupportedAction(f"{self.name} cannot open delegation cards yet")
+        agent = self.agents.get(operator.strip())
+        if agent is None:
+            raise UnsupportedAction(f"{operator!r} is not an agent of {self.name}; no card made")
+        _startable(agent)
+        board = self._boards.get(self._board_of.get(task_id, ""))
+        if task_id not in self._known or board is None:
+            raise UnsupportedAction(f"{task_id} was not a task of {self.name} at the last read")
+        if board.agents and agent.name not in board.agents:
+            raise UnsupportedAction(f"{board.key} does not take tasks for {agent.name}")
+        if task_id in self._cards:
+            raise UnsupportedAction(f"{task_id} is a delegation card; no card about a card")
+        line = card_line(key)
+        made = _waiting(lambda: find(board.key, line))
+        if made is not None:
+            item = _waiting(lambda: self.tracker.fetch(made))
+            if item.open and agent.mention is None and not _started_on(agent, item):
+                self.tracker.reserve(RESERVE, (agent,))
+                self._start(agent, item)  # a create whose start failed: start it now
+            return made
+        self.tracker.reserve(RESERVE, (agent,))
+        text = card_text(f"Kelpie hands a problem to {agent.name}.", body, line)
+        labels = [board.label] if board.label is not None else []
+        made = create(board.key, inert_title(title), text, labels)
+        try:
+            self._start(agent, self.tracker.fetch(made))
+        except (IssuesError, Deferred) as exc:
+            reason = getattr(exc, "public_reason", None) or str(exc)
+            then = (
+                f"start {agent.name} on it by hand ({agent.mention})"
+                if agent.mention is not None and agent.assignee is None and agent.label is None
+                else "Kelpie starts it on the retry"
+            )
+            raise IssuesError(
+                f"card {made} opened, {agent.name} not started: {exc}",
+                f"card {made} was opened but {agent.name} was not started ({reason}); {then}",
+            ) from exc
+        return made
 
     def lift_hold(self, hold: str, kind: str, task_ids: Sequence[str], reason: str) -> str:
         """Take the hold's own pause label off its held tasks (``SupportsLiftHold``).

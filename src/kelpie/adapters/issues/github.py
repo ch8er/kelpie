@@ -89,6 +89,8 @@ MAX_TITLE = 300
 MAX_LABELS = 100
 MAX_LABEL = 50
 MAX_NUMBER = 10**9
+MAX_NEW_TITLE = 256  # characters of a new issue's title (GitHub's limit)
+CARD_LOOKBACK = 50  # issues Kelpie's token opened last, searched for a card's key
 MAX_COMMENT = 60_000  # characters of a comment (GitHub's limit is 65536)
 TRUSTED = frozenset({"OWNER", "MEMBER", "COLLABORATOR"})  # GitHub's author_association
 EVENT_KINDS = frozenset({"labeled", "unlabeled", "assigned", "unassigned", "closed", "reopened"})
@@ -211,6 +213,7 @@ class GitHubIssues:
     sleep: Callable[[float], None] = field(default=time.sleep, repr=False)
     monotonic: Callable[[], float] = field(default=time.monotonic, repr=False)
     _gate: WriteGate | None = field(default=None, init=False, repr=False)
+    _me: str | None = field(default=None, init=False, repr=False)  # the token's login
 
     @property
     def gate(self) -> WriteGate:
@@ -536,6 +539,56 @@ class GitHubIssues:
         repo, number = self._target(item_id)
         path = f"/repos/{repo}/issues/{number}/comments"
         self._send("POST", repo, path, {"body": body[:MAX_COMMENT]})
+
+    def find_card(self, repo: str, line: str) -> str | None:
+        """The issue of ``repo`` that Kelpie's token opened (``creator``: its login, asked
+        once) whose description has ``line`` on a line of its own, newest first among the
+        last ``CARD_LOOKBACK`` it opened (open or closed); None when there is none. Raises
+        :class:`IssuesError` when GitHub cannot say (the login, or the list), so a card is
+        never made twice for one key."""
+        self._target(f"{repo}#1")  # a board of this tracker, or refused
+        query = {
+            "creator": self._my_login(),
+            "state": "all",
+            "sort": "created",
+            "direction": "desc",
+            "per_page": str(CARD_LOOKBACK),
+        }
+        found = self._get(f"/repos/{repo}/issues", query, fresh=True)
+        if not isinstance(found, list):
+            raise IssuesError(
+                f"GET /repos/{repo}/issues: not a list", "GitHub answered something else"
+            )
+        for issue in found:
+            if not isinstance(issue, Mapping) or "pull_request" in issue:
+                continue
+            body, number = issue.get("body"), _number(issue.get("number"))
+            if number is not None and isinstance(body, str) and line in body.splitlines():
+                return f"{repo}#{number}"
+        return None
+
+    def create_card(self, repo: str, title: str, body: str, labels: Sequence[str]) -> str:
+        """Open an issue in ``repo`` (one reserved write); its id."""
+        self._target(f"{repo}#1")
+        data: dict[str, Any] = {"title": title[:MAX_NEW_TITLE], "body": body[:MAX_COMMENT]}
+        if labels:
+            data["labels"] = [*labels]
+        made = self._send("POST", repo, f"/repos/{repo}/issues", data)
+        number = _number(made.get("number")) if isinstance(made, Mapping) else None
+        if number is None:
+            raise IssuesError(
+                f"POST /repos/{repo}/issues: no issue number", "GitHub named no new issue"
+            )
+        return f"{repo}#{number}"
+
+    def _my_login(self) -> str:
+        if self._me is None:
+            me = self._get("/user", {})
+            login = _login(me)
+            if login is None:
+                raise IssuesError("GET /user: no login", "the token's account could not be read")
+            self._me = login
+        return self._me
 
     def reopen(self, item_id: str) -> None:
         repo, number = self._target(item_id)
