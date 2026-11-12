@@ -10,6 +10,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ### Added
 
+- Daily report: each of the top 3 recommendations says whether it is only *proposed* or
+  *accepted*, and how to accept it (`kelpie fix` with the `--rule`, `--command` or `--role`
+  the line shows). Accepted means a fix noted for it in the days the report reads, with
+  `kelpie fix` or an equivalent the report already reads (the rule's mode changed to act,
+  an output filter seen in traces); its before/after is shown even when the fix is older
+  than the day before. The day's bottleneck, when it is a queue or review stage, competes
+  for the top 3 ("Relieve the <role> bottleneck in <stage>"), worth its task-hours beyond
+  the next role and stage, unless rule 6 has its own line in the cost of chaos. Section
+  advice carries the new `Advice.accept` key (`FixKey`).
 - Daily report: the "Farm throughput" section opens with the day's bottleneck, the role
   and waiting stage where tasks waited the most task-hours, with its share, the role's
   utilization and the runner-up; a new "Unanswered asks" section counts the agent-hours

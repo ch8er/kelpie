@@ -94,6 +94,12 @@ def _escape_pipes(value: str) -> str:
     )
 
 
+def flat(value: str) -> str:
+    """``value`` as a line of the report shows it (:func:`_flat`): a command shown in code
+    copies back as written only when this leaves it unchanged."""
+    return _flat(value)
+
+
 def _flat(value: str) -> str:
     """No control or format characters (bidi, zero-width), all whitespace one space."""
     kept = "".join(c for c in value if unicodedata.category(c) not in {"Cc", "Cf"} or c.isspace())

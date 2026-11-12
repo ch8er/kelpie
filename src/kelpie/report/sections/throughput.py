@@ -12,7 +12,14 @@ from kelpie.report import md
 from kelpie.report.attribution import CallOwners, call_owners
 from kelpie.report.daily import wait_causes
 from kelpie.report.rework import rework_tokens
-from kelpie.report.sections import Section, SectionContext, Spend, register_section
+from kelpie.report.sections import (
+    Advice,
+    FixKey,
+    Section,
+    SectionContext,
+    Spend,
+    register_section,
+)
 from kelpie.report.throughput import (
     Bottleneck,
     RoleThroughput,
@@ -129,6 +136,49 @@ def _bottleneck_lines(found: Bottleneck | None) -> list[str]:
     ]
 
 
+# What relieves a bottleneck, by its stage (theory of constraints: relieve the constraint).
+# "waiting" is left to the report's biggest wait, which names the cause tasks waited for, and
+# "ownerless" to orphan_status' line of the cost of chaos ("Reduce ownerless tasks").
+_RELIEF = {
+    "queue": (
+        "add an agent to the role or move its ready work to a role with free agents (rule 6 "
+        "names idle roles)"
+    ),
+    "review": (
+        "review only the changes since the last round, add a reviewer, or let PRs that "
+        "passed review merge without another pass"
+    ),
+}
+
+
+def bottleneck_advice(found: Bottleneck | None) -> Advice | None:
+    """The day's bottleneck as a candidate for the top 3 recommendations; None without
+    one, for tasks of no known role, or when its stage is waiting for conditions or
+    ownerless (other advice covers those: :data:`_RELIEF`). It is worth the task-hours
+    waited there beyond the next role and stage (all of them without one): ordinary
+    queueing is not lost time, the constraint's excess is. Keyed to rule 6
+    (``bottlenecks``) and the role, which a fix noted for it names; the report drops it
+    when rule 6 has a line in the cost of chaos (:func:`kelpie.report.daily`)."""
+    if found is None or found.stage not in _RELIEF or found.role == UNKNOWN_ROLE:
+        return None
+    nxt = found.runner_up[2] if found.runner_up is not None else 0.0
+    excess = found.hours - nxt
+    if excess <= 0:
+        return None
+    stage = STAGE_NAMES[found.stage].lower()
+    beyond = f", {excess:.1f} more than the next role and stage" if found.runner_up else ""
+    return Advice(
+        title=f"Relieve the {md.short_text(found.role)} bottleneck in {stage}",
+        detail=(
+            f"tasks of the role waited {found.hours:.1f} task-hours in {stage}{beyond} "
+            f"({found.share:.0%} of all task-hours waited in any role and stage); "
+            f"{_RELIEF[found.stage]}"
+        ),
+        hours=excess,
+        accept=FixKey(rule="bottlenecks", role=found.role),
+    )
+
+
 @register_section("throughput")
 def throughput_section(ctx: SectionContext) -> Section | None:
     inputs = ctx.inputs
@@ -160,7 +210,9 @@ def throughput_section(ctx: SectionContext) -> Section | None:
     est = " (estimate)" if inputs.estimated and inputs.spend is None else ""
     if ctx.spend.unknown_usd > 0:
         est += " (estimate, mode not set)"
-    lines = _bottleneck_lines(bottleneck(roles))
+    found = bottleneck(roles)
+    lines = _bottleneck_lines(found)
+    relief = bottleneck_advice(found)
     lines += [
         "Per role, for the day. Utilization: agent-hours with a session running over agents "
         "x hours (the live `kelpie_role_agents_with_work` counts agents with any open task "
@@ -246,7 +298,7 @@ def throughput_section(ctx: SectionContext) -> Section | None:
             )
             lines.append(f"- {md.text(r.role)}: {causes_text}")
     lines += ["", _stage_source(roles, ctx)]
-    return Section(TITLE, tuple(lines))
+    return Section(TITLE, tuple(lines), () if relief is None else (relief,))
 
 
 def _stage_source(roles: list[RoleThroughput], ctx: SectionContext) -> str:

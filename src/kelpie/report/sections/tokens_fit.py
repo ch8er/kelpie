@@ -17,7 +17,7 @@ from collections.abc import Iterable, Mapping, Sequence
 
 from kelpie.core.spans import TokenUsage, counted_llm, last_at, span_key
 from kelpie.report import md
-from kelpie.report.sections import Advice, Section, SectionContext, register_section
+from kelpie.report.sections import Advice, FixKey, Section, SectionContext, register_section
 from kelpie.report.sections._config import keys_of, settings_from
 from kelpie.traces.fit import (
     UNKNOWN_ROLE,
@@ -185,6 +185,7 @@ def _fragment_advice(found: Sequence[Fragment], price: _Prices, cfg: FitSettings
                 ),
                 usd=price.cacheable(per),
                 tasks=tuple(sorted({t for f in fs for t in f.tasks})),
+                accept=FixKey(role=role),
             )
         )
     return out
@@ -309,6 +310,7 @@ def _fit_advice(fit: _Fit, price: _Prices) -> list[Advice]:
                 ),
                 usd=saved,
                 tasks=r.tasks,
+                accept=FixKey(role=r.role),
             )
         )
     return out
@@ -368,6 +370,7 @@ def _review_advice(rounds: Sequence[ReviewRound], price: _Prices, cfg: FitSettin
                 ),
                 usd=price.input(_review_tokens(rs)),
                 tasks=tuple(sorted({r.task_id for r in rs})),
+                accept=FixKey(role=role),
             )
         )
     return out

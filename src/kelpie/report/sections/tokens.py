@@ -20,7 +20,7 @@ from kelpie.core.model import Snapshot, Status
 from kelpie.core.spans import TokenUsage, counted_llm, last_at, span_key
 from kelpie.report import md
 from kelpie.report.daily import session_of
-from kelpie.report.sections import Advice, Section, SectionContext, register_section
+from kelpie.report.sections import Advice, FixKey, Section, SectionContext, register_section
 from kelpie.report.sections._config import keys_of, settings_from
 from kelpie.traces.tokens import (
     MISS_KINDS,
@@ -320,6 +320,7 @@ def _growth_advice(growth: Sequence[Growth], price: _Prices, cfg: TokenSettings)
                 ),
                 usd=price.usd(u for g in found for u in g.excess),
                 tasks=tuple(sorted({g.session.task_id for g in found if g.session.task_id})),
+                accept=FixKey(role=role),
             )
         )
     return out
@@ -383,6 +384,7 @@ def _restart_advice(found: Sequence[Restart], price: _Prices, cfg: TokenSettings
                 ),
                 usd=price.usd(u for r in rs for u in r.usage()),
                 tasks=tuple(sorted({r.session.task_id for r in rs if r.session.task_id})),
+                accept=FixKey(role=role),
             )
         )
     return out

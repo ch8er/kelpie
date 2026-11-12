@@ -45,9 +45,11 @@ Each board counted as the farm is, over its own tasks, sessions and alerts: cost
 
 ## Top 3 recommendations
 
-1. **Reduce blocks that outlived their cause** (10.0 hours lost): check which block reasons Kelpie could not tie to a condition. Tasks: `svc:t_9`.
-2. **Reduce ownerless tasks** (6.0 hours lost): give ownerless statuses an owner: route them to a role or let orphan_status reassign them. Tasks: `app-a:t_2`.
-3. **Reduce activity without progress** (about $1.76/day, 4.0 hours lost): longer heartbeat interval, a cheaper model for maintenance calls, bounded sessions with a handoff file. Tasks: `svc:t_9`.
+1. **Reduce blocks that outlived their cause** (10.0 hours lost): check which block reasons Kelpie could not tie to a condition. Tasks: `svc:t_9`. *Proposed*: not accepted yet (note it with `kelpie fix --rule stale_blocks "<what changed>"`).
+2. **Reduce ownerless tasks** (6.0 hours lost): give ownerless statuses an owner: route them to a role or let orphan_status reassign them. Tasks: `app-a:t_2`. *Proposed*: not accepted yet (note it with `kelpie fix --rule orphan_status "<what changed>"`).
+3. **Reduce activity without progress** (about $1.76/day, 4.0 hours lost): longer heartbeat interval, a cheaper model for maintenance calls, bounded sessions with a handoff file. Tasks: `svc:t_9`. *Proposed*: not accepted yet (note it with `kelpie fix --rule no_progress "<what changed>"`).
+
+A *proposed* recommendation has no fix noted for it in the days this report reads: once the change is made, note it with the `kelpie fix` command shown and the report checks its effect before/after. An *accepted* one has a fix noted (`kelpie fix`, a rule's mode change, or an output filter seen in traces), measured under "Before/after of recent fixes".
 
 ## Before/after of recent fixes
 
