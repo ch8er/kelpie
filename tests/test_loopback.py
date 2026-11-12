@@ -137,3 +137,4 @@ def test_the_core_check_resolves_nothing_and_never_raises() -> None:
     assert is_loopback("::ffff:127.0.0.1", mapped=True)
     assert not is_loopback("::ffff:127.0.0.1")
     assert not is_loopback("::ffff:10.0.0.1", mapped=True)
+    assert not is_loopback(2130706433)  # type: ignore[arg-type]  # not a str: never raises
