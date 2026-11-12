@@ -30,6 +30,8 @@ from kelpie.core.alerts import (
 )
 from kelpie.core.alerts import Transition as AlertTransition
 from kelpie.core.config import EngineConfig, Mode
+from kelpie.core.delegation import RULE as DELEGATION
+from kelpie.core.delegation import Policy, held_for_operator, resolved_by_operator
 from kelpie.core.executors import ConnectorExecutor, Executor, PlatformExecutor
 from kelpie.core.host_sleep import SleepWatch, merge_sleeps
 from kelpie.core.incidents import FOLDED_UNDER, Outage, is_outage_state
@@ -66,6 +68,7 @@ _HANDLED = {
     Outcome.OBSERVED,
     Outcome.DRY_RUN,
     Outcome.DROPPED,
+    Outcome.DELEGATED,
 }
 
 
@@ -686,6 +689,13 @@ class Engine:
         if action.kind in _ALERT_ACTIONS:
             keys = _announces(action)
             lines = [line for k in keys for line in self._lines.get(k, ())]
+            if not lines and (operator := self._for_operator(action, snapshot)) is not None:
+                log.info("held back for the operator agent %s: %s", operator, action)
+                # the rule reads it back (``held``): a problem it holds is told about
+                self._detail = f"held for {operator}" + (
+                    f"; state {action.state}" if action.state is not None else ""
+                )
+                return Outcome.DELEGATED
             if any(not executed for k in keys for _, executed, _, _ in self._held.get(k, ())):
                 # It carries a failure: that needs a human, whatever the alert's severity.
                 action = replace(action, severity=_higher(action.severity, _NEEDS_HUMAN))
@@ -708,6 +718,38 @@ class Engine:
             sent = self._effect_message(action, snapshot, kind=Did.SUGGESTED, did=line)
             return Outcome.SUGGESTED if sent else Outcome.DROPPED
         return self._dispatch(action, snapshot)
+
+    def _for_operator(self, action: Action, snapshot: Snapshot) -> str | None:
+        """The operator agent an alert is held back for (#347), or None: only while the
+        delegation rule acts (never under dry-run), for a lasting problem the operator may
+        have (``held_for_operator``) or the "resolved" notice of one it holds a card about
+        (``resolved_by_operator``). A problem that cannot be handed over is the rule's to
+        tell the person about; a critical one always reaches the person."""
+        policy = getattr(self._by_name.get(DELEGATION), "policy", None)
+        if not isinstance(policy, Policy) or not policy.enabled or action.rule == DELEGATION:
+            return None
+        if self.config.dry_run or self.config.mode_for(DELEGATION) is not Mode.ACT:
+            return None
+        try:
+            if action.state is not None:
+                # the rule's own key, before the transition's suffix (``<key>|<opened>|...``)
+                own = (action.key or "").split("|", 1)[0]
+                kind = None if own == action.state else own.split(":", 1)[0] or None
+                return held_for_operator(
+                    policy,
+                    action.rule,
+                    kind,
+                    action.state,
+                    str(action.severity),
+                    action.task_id,
+                    snapshot,
+                )
+            state = action.params.get("state")
+            if isinstance(state, str) and (action.key or "").startswith("resolved:"):
+                return resolved_by_operator(state, action.task_id, snapshot)
+        except Exception:  # never lose an alert to a bug here
+            log.exception("could not tell whether the operator has %s", action)
+        return None
 
     def route(self, action: Action, snapshot: Snapshot) -> Executor | None:
         if action.executor:

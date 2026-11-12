@@ -33,6 +33,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
   retried create makes no second card; the card's id read from `--json`), and
   `delegation` may run in act mode on Hermes behind the act checklist. Not with `[hub]`
   yet (refused at startup). An operator that is a person or Kelpie is refused.
+- Delegation, third part (#347): verification and the person's messages. A delegated
+  problem is "fixed, verified" only when Kelpie's own state for it has been closed for
+  `hold`; a card the operator closes while the problem stays gives "agent says fixed,
+  still broken" and a second card; a blocked card, a failed last attempt or a missed
+  pick-up or finish deadline gives "not fixed, yours now". In act mode the engine holds
+  back the alerts (and the resolved notice) of a problem the operator has, recorded as
+  `delegated` in the ledger, so the person hears once on hand-off and once at the end; a
+  problem it held back that the rule does not hand over is said to be the person's, and
+  the circuit breaker alerts once. Critical problems always reach the person.
 - `POST /conditions`: an agent registers the condition its task waits for (task id, kind,
   params), off by default (`[conditions] enabled`). On the main listener (loopback by
   default, behind the Host and connection guards), with a bearer token of its own

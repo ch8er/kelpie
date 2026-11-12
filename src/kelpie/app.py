@@ -2548,13 +2548,26 @@ def _with_delegation(loop: ControlLoop, loaded: LoadedRules, store: LedgerStore)
         snapshot = source()
         after = snapshot.now - policy.history
         try:
+            entries = [*store.by_rule(DELEGATION, after), *store.delegated(after)]
             problems, resolved, events = delegation_history(
-                store.open_states(), store.closed_states(after), store.by_rule(DELEGATION, after)
+                store.open_states(), store.closed_states(after), entries
             )
         except Exception as exc:
             log.error("delegation history not read: %s; nothing is delegated", type(exc).__name__)
-            return replace(snapshot, problems=(), resolved_problems=(), delegations=())
-        return replace(snapshot, problems=problems, resolved_problems=resolved, delegations=events)
+            return replace(
+                snapshot,
+                problems=(),
+                resolved_problems=(),
+                delegations=(),
+                delegation_read=False,  # the engine holds nothing back
+            )
+        return replace(
+            snapshot,
+            problems=problems,
+            resolved_problems=resolved,
+            delegations=events,
+            delegation_read=True,
+        )
 
     loop.snapshot_source = read
 

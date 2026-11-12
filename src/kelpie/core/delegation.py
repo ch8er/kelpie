@@ -38,7 +38,15 @@ from typing import Any
 from kelpie.core.actions import ActionKind
 from kelpie.core.incidents import is_outage_state
 from kelpie.core.ledger import LedgerEntry, Outcome
-from kelpie.core.model import DelegationEvent, Problem, ResolvedProblem, Task
+from kelpie.core.model import (
+    DelegationEvent,
+    Owner,
+    OwnerKind,
+    Problem,
+    ResolvedProblem,
+    Snapshot,
+    Task,
+)
 from kelpie.core.serde import parse_duration
 from kelpie.core.states import OpenState
 
@@ -140,32 +148,55 @@ def why_not(
     now: datetime,
     *,
     person: bool = False,
+    owners: Sequence[Owner] = (),
 ) -> str | None:
     """Why ``problem`` may not be handed to an operator by its class, severity, freshness
     and board, or None when it may (the loop guards come on top:
-    :mod:`kelpie.rules.delegation`). ``person``: the task is held by a person."""
-    cls = policy.problem_class(problem.rule, problem.kind)
-    if cls is not ProblemClass.AGENT:
-        return f"{problem.rule} is {cls.value}-only"
-    if is_outage_state(problem.id):
-        return "an outage is a person's"
-    if problem.severity == "critical":
-        return "critical: it goes to a person at once"
-    if problem.severity != "warning":
-        return "a notice is never delegated"
+    :mod:`kelpie.rules.delegation`). ``person``: the task is held by a person; ``owners``
+    the farm's owners (people among them are never operators, and hold their tasks)."""
     if problem.mode == "observe":
         return "announced in observe mode only"
     if problem.last_seen is None or problem.last_seen < now - FRESH:
         return "not reported lately"
+    if person:
+        return "a person's task"
+    return claim_why_not(
+        policy, problem.rule, problem.kind, problem.id, problem.severity, task, owners
+    )
+
+
+def claim_why_not(
+    policy: Policy,
+    rule: str,
+    kind: str | None,
+    state_id: str,
+    severity: str,
+    task: Task | None,
+    owners: Sequence[Owner] = (),
+) -> str | None:
+    """The part of :func:`why_not` an alert itself tells (its rule, kind, state, severity and
+    task), which the engine also asks before it holds an alert back for the operator."""
+    cls = policy.problem_class(rule, kind)
+    if cls is not ProblemClass.AGENT:
+        return f"{rule} is {cls.value}-only"
+    if is_outage_state(state_id):
+        return "an outage is a person's"
+    if severity == "critical":
+        return "critical: it goes to a person at once"
+    if severity != "warning":
+        return "a notice is never delegated"
     if task is None:
         return "no task on a board"
-    if person:
+    people = {o.id.casefold() for o in owners if o.kind is OwnerKind.HUMAN}
+    if any((who or "").casefold() in people for who in (task.owner_id, task.assignee)):
         return "a person's task"
     operator = policy.operator_for(task)
     if operator is None:
         return f"no delegate_to for board {task.source or '(none)'}"
     if is_operator(task, task.source or "", operator):
         return "the operator's own task"
+    if operator_ids(task.source or "", operator) & people:
+        return f"the operator {operator} is a person on this farm"
     return None
 
 
@@ -380,6 +411,22 @@ def event_of(entry: LedgerEntry) -> DelegationEvent | None:
     """A delegation rule's ledger entry as the rule reads it back: a ``delegate`` is a card,
     an alert with ``params.verdict`` a verdict; anything else (or a malformed entry, or one
     the ledger held back) is None."""
+    if entry.outcome is Outcome.DELEGATED:
+        found = HELD_DETAIL.fullmatch(entry.detail or "")
+        if found is None:
+            return None  # a held "resolved" notice: the verdict tells the person
+        state = found[2]
+        incident = f"task:{entry.task_id}" if entry.task_id else f"problem:{state}"
+        return DelegationEvent(
+            state,
+            incident,
+            0,
+            "held",
+            entry.at,
+            str(entry.outcome),
+            task_id=entry.task_id,
+            operator=found[1],
+        )
     if entry.rule != RULE or entry.outcome is Outcome.SUPPRESSED:
         return None
     params = entry.params
@@ -407,6 +454,8 @@ def event_of(entry: LedgerEntry) -> DelegationEvent | None:
             card_id=found[1] if found else None,
         )
     verdict = params.get("verdict")
+    if entry.outcome not in (Outcome.ALERTED, Outcome.SUGGESTED, Outcome.FAILED):
+        return None  # a verdict nobody was told (observe, dry-run, dropped): said again
     if entry.kind in (ActionKind.ALERT, ActionKind.ESCALATE) and isinstance(verdict, str):
         return DelegationEvent(
             problem,
@@ -434,3 +483,95 @@ def history(
         tuple(resolved_of(s, at) for s, at in closed),
         events,
     )
+
+
+# --- the guards the rule and the engine share --------------------------------------------
+
+EXECUTED = "executed"
+VERIFIED = "verified"
+KEPT = "kept"  # a held problem the rule did not hand over: the person was told it is theirs
+# Verdicts that give an incident back to the person (no new card within the cooldown).
+GAVE_UP = frozenset({"not_fixed", "not_picked_up", "not_finished"})
+# Verdicts that count as a failed verification (the circuit breaker).
+FAILED = GAVE_UP | {"still_broken"}
+HELD_DETAIL = re.compile(r"held for (\S{1,100}); state (\S.{0,400})")
+DAY = timedelta(days=1)
+
+
+def breaker_open(policy: Policy, events: Sequence[DelegationEvent], now: datetime) -> bool:
+    """Whether ``breaker_failures`` verifications failed within a day: all delegation stops."""
+    failed = sum(
+        1
+        for e in events
+        if e.kind == "verdict"
+        and e.outcome != "failed"
+        and e.verdict in FAILED
+        and e.at > now - DAY
+    )
+    return failed >= policy.breaker_failures
+
+
+def given_back(
+    policy: Policy, incident: str, events: Sequence[DelegationEvent], now: datetime
+) -> bool:
+    """Whether the incident went back to the person within the cooldown."""
+    return any(
+        e.kind == "verdict"
+        and e.incident == incident
+        and (e.verdict in GAVE_UP or e.verdict == KEPT)
+        and e.at > now - policy.cooldown
+        for e in events
+    )
+
+
+def open_card(incident: str, events: Sequence[DelegationEvent]) -> DelegationEvent | None:
+    """The card carried out for the incident that has no verdict yet, if any."""
+    judged = {(e.problem, e.attempt) for e in events if e.kind == "verdict"}
+    cards = [
+        e
+        for e in events
+        if e.kind == "card"
+        and e.outcome == EXECUTED
+        and e.incident == incident
+        and (e.problem, e.attempt) not in judged
+    ]
+    return max(cards, key=lambda e: e.at, default=None)
+
+
+def held_for_operator(
+    policy: Policy,
+    rule: str,
+    kind: str | None,
+    state_id: str,
+    severity: str,
+    task_id: str | None,
+    snapshot: Snapshot,
+) -> str | None:
+    """The operator an alert about state ``state_id`` is held back for (the engine sends it
+    to nobody), or None when the person must get it: a problem the operator may have (its
+    class, severity and board), not given back to the person, the circuit breaker closed.
+    The rule hands it over, says so (one message on hand-off), and tells the person at the
+    end; when it cannot hand it over it says that instead."""
+    if not policy.enabled or not snapshot.delegation_read:
+        return None
+    task = snapshot.task(task_id) if task_id else None
+    if claim_why_not(policy, rule, kind, state_id, severity, task, snapshot.owners) is not None:
+        return None
+    assert task is not None
+    events = snapshot.delegations
+    incident = f"task:{task.id}"
+    if breaker_open(policy, events, snapshot.now) or given_back(
+        policy, incident, events, snapshot.now
+    ):
+        return None
+    return policy.operator_for(task)
+
+
+def resolved_by_operator(state_id: str, task_id: str | None, snapshot: Snapshot) -> str | None:
+    """The operator holding an open card about state ``state_id``: its "resolved" notice is
+    held back (the rule's "fixed, verified" says it, after the hold period)."""
+    if not snapshot.delegation_read:
+        return None
+    incident = f"task:{task_id}" if task_id else f"problem:{state_id}"
+    card = open_card(incident, snapshot.delegations)
+    return card.operator if card is not None and card.problem == state_id else None

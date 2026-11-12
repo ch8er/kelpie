@@ -131,6 +131,11 @@ Fixture conventions:
 | 7 | `07-returns-through-review.yaml` | `return_causes` | every return filed under review: `alert` flaky test `ProfileTests.testAvatarUpload` (t_7301, t_7302); no dominant-cause alert for the six review findings (55%), no hot files |
 | 7 | `07-live-tasks-same-files.yaml` | `conflict_warning` | `comment` T-711 and T-712 naming each other and the shared files; `wait` T-712 (started later) until T-711 is done; nothing for T-713 (only the expected-shared changelog in common) or the finished T-714 |
 | 8 | `08-block-outlived-cause.yaml` | `stale_blocks` | `unblock` T-801, reason mentions the 3h delay; T-802 (PR not merged) stays blocked |
+| 8 | `08-delegate-stale-block.yaml` | `delegation` | `delegate` the stale block on T-801 to ops-1 (attempt 1); nothing for a needs-you item, a disk alert or the operator's own task |
+| 8 | `08-delegate-never-human-or-critical.yaml` | `delegation` | `delegate` only the ownerless warning on T-815; nothing for a human class, critical, a notice, an outage or a board with no operator |
+| 8 | `08-delegate-two-attempts.yaml` | `delegation` | second card for T-822; no third card for T-821 (given back), none while T-823's card is open, none about a card |
+| 8 | `08-delegate-fixed-verified.yaml` | `delegation` | "fixed, verified" for T-841 after the hold; nothing for T-842 inside it |
+| 8 | `08-delegate-closed-still-broken.yaml` | `delegation` | "agent says fixed, still broken" for T-861, "not fixed, yours now" for T-862's last attempt; nothing for T-863 inside the hold |
 | 9 | `09-sequential-chain-idle.yaml` | `bottlenecks` | `alert` suggesting parallelization, idle agents and `critical_path_length`; nothing for reviewer work T-906, no `escalate` |
 | 10 | `10-review-queue-bottleneck.yaml` | `bottlenecks` | `alert` for the overloaded reviewer role (4 queued reviews) with the idle developers that its own queue cannot absorb; nothing for the developer role or the review T-1001 already being worked on |
 | 10 | `10-reviewer-polls-ci.yaml` | `wait_condition` | `comment` T-1001 (register a condition and exit); no `requeue` |

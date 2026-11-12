@@ -3,10 +3,11 @@ incident: 8
 title: "Delegation: at most two attempts per incident, then the person"
 description: >
   The operator closed two cards about the block on T-821 today and Kelpie's check still
-  failed both times, so a third card would only loop: none is made (the person has the
-  problem). T-822 had one failed attempt, so it gets its second and last card. T-823 has a
-  card that is still open, so no new card is made for it. T-824 is itself a delegation card
-  (a problem about a card stays with the person).
+  failed both times; the second verdict gave it back to the person ("not fixed, yours now"),
+  so a third card would only loop: none is made within the cooldown. T-822 had one failed
+  attempt, so it gets its second and last card. T-823 has a card that is still open, so no
+  new card is made for it. T-824 is itself a delegation card (a problem about a card stays
+  with the person).
 rule: delegation
 config:
   classes: {stale_blocks: agent}
@@ -31,7 +32,7 @@ snapshot:
     - {problem: "stale-block:T-821", incident: "task:T-821", attempt: 1, kind: card, at: "2026-03-02T09:00:00+00:00", outcome: executed, task_id: T-821, operator: ops-1, card_id: T-831}
     - {problem: "stale-block:T-821", incident: "task:T-821", attempt: 1, kind: verdict, at: "2026-03-02T11:00:00+00:00", outcome: alerted, task_id: T-821, verdict: still_broken}
     - {problem: "stale-block:T-821", incident: "task:T-821", attempt: 2, kind: card, at: "2026-03-02T11:00:00+00:00", outcome: executed, task_id: T-821, operator: ops-1, card_id: T-832}
-    - {problem: "stale-block:T-821", incident: "task:T-821", attempt: 2, kind: verdict, at: "2026-03-02T14:00:00+00:00", outcome: alerted, task_id: T-821, verdict: still_broken}
+    - {problem: "stale-block:T-821", incident: "task:T-821", attempt: 2, kind: verdict, at: "2026-03-02T14:00:00+00:00", outcome: alerted, task_id: T-821, verdict: not_fixed}
     - {problem: "stale-block:T-822", incident: "task:T-822", attempt: 1, kind: card, at: "2026-03-02T10:00:00+00:00", outcome: executed, task_id: T-822, operator: ops-1, card_id: T-833}
     - {problem: "stale-block:T-822", incident: "task:T-822", attempt: 1, kind: verdict, at: "2026-03-02T13:00:00+00:00", outcome: alerted, task_id: T-822, verdict: still_broken}
     - {problem: "stale-block:T-823", incident: "task:T-823", attempt: 1, kind: card, at: "2026-03-02T15:00:00+00:00", outcome: executed, task_id: T-823, operator: ops-1, card_id: T-824}

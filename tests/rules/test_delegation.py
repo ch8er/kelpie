@@ -95,7 +95,7 @@ def run(
         problems=tuple(problems),
         delegations=tuple(events or ()),
     )
-    return list(Delegation(policy).evaluate(snap))
+    return [a for a in Delegation(policy).evaluate(snap) if a.kind is ActionKind.DELEGATE]
 
 
 # --- what may be delegated ---------------------------------------------------------------
@@ -116,7 +116,7 @@ def test_a_warning_of_an_agent_class_is_delegated_once_per_attempt() -> None:
     assert action.key == f"delegate:stale:T-1:{opened}:1"
     assert action.executor is None  # routed by the task's board
     assert action.params["operator"] == "ops-1" and action.params["attempt"] == 1
-    assert action.reason == "Handed to ops-1 (attempt 1): T-1 is blocked on a merged PR."
+    assert action.reason == "For ops-1 (attempt 1): T-1 is blocked on a merged PR."
     assert action.params["card"]["key"] == f"kelpie-stale:T-1:{opened}:1"
 
 
@@ -154,7 +154,7 @@ def test_a_persons_task_is_not_delegated() -> None:
         owners=(Owner("alice", "ceo", OwnerKind.HUMAN),),
         problems=(problem(),),
     )
-    assert list(Delegation(POLICY).evaluate(snap)) == []
+    assert [a for a in Delegation(POLICY).evaluate(snap) if a.kind is ActionKind.DELEGATE] == []
 
 
 def test_on_a_hub_the_board_and_the_operator_are_namespaced() -> None:
@@ -190,7 +190,8 @@ def test_one_open_card_per_incident() -> None:
 def test_a_suggested_or_failed_card_is_not_open() -> None:
     (action,) = run([problem()], events=[card(outcome="suggested", card_id=None)])
     assert action.params["attempt"] == 1
-    (action,) = run([problem()], events=[card(outcome="failed", card_id=None)])
+    failed = card(outcome="failed", card_id=None, ago=timedelta(minutes=10))
+    (action,) = run([problem()], events=[failed])
     assert action.params["attempt"] == 1
 
 
@@ -269,7 +270,7 @@ def test_a_person_assigned_task_is_not_delegated() -> None:
         owners=(Owner("alice", "ceo", OwnerKind.HUMAN),),
         problems=(problem(),),
     )
-    assert list(Delegation(POLICY).evaluate(snap)) == []
+    assert [a for a in Delegation(POLICY).evaluate(snap) if a.kind is ActionKind.DELEGATE] == []
 
 
 def test_card_values_stay_on_their_line() -> None:
@@ -541,7 +542,7 @@ def test_an_operator_the_farm_knows_as_a_person_is_skipped() -> None:
         owners=(Owner("ops-1", "ceo", OwnerKind.HUMAN),),
         problems=(problem(),),
     )
-    assert list(Delegation(POLICY).evaluate(snap)) == []
+    assert [a for a in Delegation(POLICY).evaluate(snap) if a.kind is ActionKind.DELEGATE] == []
 
 
 def test_a_person_operator_is_matched_whatever_its_case() -> None:
@@ -554,4 +555,4 @@ def test_a_person_operator_is_matched_whatever_its_case() -> None:
         owners=(Owner("ops-1", "ceo", OwnerKind.HUMAN),),
         problems=(problem(),),
     )
-    assert list(Delegation(upper).evaluate(snap)) == []
+    assert [a for a in Delegation(upper).evaluate(snap) if a.kind is ActionKind.DELEGATE] == []

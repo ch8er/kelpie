@@ -1013,14 +1013,15 @@ class ResolvedProblem:
 class DelegationEvent:
     """What the delegation rule did about a problem (#347), from the ledger (filled on the
     server): ``kind`` ``card`` (a card handed to ``operator``; ``card_id`` once the board
-    made it) or ``verdict`` (``verified``, ``still_broken``, ``not_fixed``, ...).
+    made it), ``verdict`` (``verified``, ``still_broken``, ``not_fixed``, ``kept``, ...) or
+    ``held`` (the engine held an alert about ``problem`` back for the operator).
     ``outcome`` is the ledger's (``executed``, ``suggested``, ``observed``, ``failed``,
     ...): only an executed card is on the operator's queue."""
 
     problem: str
     incident: str
     attempt: int
-    kind: Literal["card", "verdict"]
+    kind: Literal["card", "verdict", "held"]
     at: datetime
     outcome: str
     task_id: str | None = None
@@ -1165,6 +1166,9 @@ class Snapshot:
     problems: tuple[Problem, ...] = ()
     resolved_problems: tuple[ResolvedProblem, ...] = ()
     delegations: tuple[DelegationEvent, ...] = ()
+    # Whether the server read that history this tick: without it the engine holds nothing
+    # back for the operator (fails closed: every alert reaches the person).
+    delegation_read: bool = False
     _spans_by_session: dict[str, tuple[Span, ...]] | None = field(
         default=None, init=False, repr=False, compare=False
     )

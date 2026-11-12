@@ -57,6 +57,9 @@ class Outcome(StrEnum):
     DROPPED = "dropped"  # should have reached a human, but no alerter is configured
     SUPPRESSED = "suppressed"  # held back by the ledger
     DEFERRED = "deferred"  # the executor could not take it this tick; never recorded
+    # An alert held back because the operator agent has the problem (#347); the delegation
+    # rule tells the person on hand-off and at the end.
+    DELEGATED = "delegated"
     # A chat answer (#300) claimed and recorded, its write not finished yet; a crash leaves
     # it so, for a person to look at (``kelpie why``, ``kelpie doctor``).
     PENDING = "pending"

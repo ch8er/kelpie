@@ -617,6 +617,13 @@ class SqliteLedgerStore:
             (rule, _ts(after)),
         )
 
+    def delegated(self, after: datetime) -> list[LedgerEntry]:
+        """The alerts the engine held back for an operator agent after ``after`` (#347)."""
+        return self._query(
+            f"SELECT {_COLUMNS} FROM actions WHERE outcome = ? AND at > ? ORDER BY at, id",
+            ("delegated", _ts(after)),
+        )
+
     def closed_states(self, after: datetime) -> list[tuple[OpenState, datetime]]:
         """The alert states closed after ``after``, each with when, oldest first."""
         sql = (
