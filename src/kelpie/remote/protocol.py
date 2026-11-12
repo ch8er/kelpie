@@ -28,6 +28,7 @@ from kelpie.core.model import ConditionKind, Dependency, Snapshot, Span
 from kelpie.core.ports import (
     PlatformAdapter,
     SupportsClose,
+    SupportsDelegate,
     SupportsReassign,
     SupportsStop,
     SupportsWait,
@@ -104,6 +105,7 @@ _CAPABILITIES: tuple[tuple[type, ActionKind], ...] = (
     (SupportsWait, ActionKind.WAIT),
     (SupportsReassign, ActionKind.REASSIGN),
     (SupportsClose, ActionKind.CLOSE),
+    (SupportsDelegate, ActionKind.DELEGATE),
 )
 PLATFORM_ACTIONS = BASE_ACTIONS | {kind for _, kind in _CAPABILITIES}
 # The params each kind may carry, with their type; any other key is dropped.
@@ -112,7 +114,17 @@ _PARAMS: dict[ActionKind, dict[str, type]] = {
     ActionKind.WIP_COMMIT: {"branch": str, "draft_pr": bool},
     ActionKind.REASSIGN: {"owner_id": str},
     ActionKind.WAIT: {"conditions": list},
+    # A delegation card (#347): the operator's profile and the card's text.
+    ActionKind.DELEGATE: {"operator": str, "card": dict},
 }
+# A delegation card on the wire: its title, body and idempotency key. The body is the
+# rule's own text (other agents' words already quoted as data) and ends with the key line
+# the agent's adapter finds the card by (``kelpie.core.delegation.card_for``).
+MAX_CARD_TITLE = 200
+MAX_CARD_BODY = 16 * 1024
+MAX_CARD_KEY = 512
+CARD_KEY_LINE = "kelpie-delegation: "
+_OPERATOR = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,99}")  # core.delegation's profile names
 # Actions whose target is a session, not a task.
 _NEEDS_SESSION = frozenset({ActionKind.STOP})
 
@@ -570,6 +582,12 @@ def wire_params(kind: ActionKind, params: Mapping[str, Any]) -> dict[str, Any]:
             raise ProtocolError(f"{kind}: {key} must be a {tp.__name__}")
         if key == "conditions":
             out[key] = _conditions(value)
+        elif key == "card":
+            out[key] = _card(value)
+        elif key == "operator":
+            if not _OPERATOR.fullmatch(value):
+                raise ProtocolError(f"{kind}: operator must be a profile name")
+            out[key] = value
         elif key == "branch":
             if not _branch(value):
                 raise ProtocolError(f"{kind}: branch must be a git branch name")
@@ -584,7 +602,31 @@ def wire_params(kind: ActionKind, params: Mapping[str, Any]) -> dict[str, Any]:
         raise ProtocolError("reassign: owner_id is required")
     if kind is ActionKind.WAIT and not out.get("conditions"):
         raise ProtocolError("wait: conditions are required")
+    if kind is ActionKind.DELEGATE and ("operator" not in out or "card" not in out):
+        raise ProtocolError("delegate: operator and card are required")
     return out
+
+
+def _card(raw: dict[str, Any]) -> dict[str, str]:
+    """A delegation card's ``title``, ``body`` and ``key``, checked: no other keys, bounded
+    sizes, no control characters (the body keeps its line breaks), and the body's last line
+    is the key line, so the card the agent makes is the one it finds again by its key."""
+    if set(raw) != {"title", "body", "key"}:
+        raise ProtocolError("delegate: card must have exactly title, body and key")
+    title, body, key = raw["title"], raw["body"], raw["key"]
+    if not isinstance(title, str) or not title.strip() or len(title) > MAX_CARD_TITLE:
+        raise ProtocolError(f"delegate: card title must be 1 to {MAX_CARD_TITLE} characters")
+    if _ID_CONTROL.search(title):
+        raise ProtocolError("delegate: card title must be printable")
+    if not isinstance(key, str) or not key or len(key) > MAX_CARD_KEY or _ID_CONTROL.search(key):
+        raise ProtocolError(f"delegate: card key must be 1 to {MAX_CARD_KEY} printable characters")
+    if not isinstance(body, str) or len(body) > MAX_CARD_BODY or _CONTROL.search(body):
+        raise ProtocolError(
+            f"delegate: card body must be printable text of at most {MAX_CARD_BODY} characters"
+        )
+    if body.rstrip("\n").rsplit("\n", 1)[-1] != f"{CARD_KEY_LINE}{key}":
+        raise ProtocolError("delegate: card body must end with its key line")
+    return {"title": title, "body": body, "key": key}
 
 
 def encode_action(action: WireAction) -> dict[str, Any]:

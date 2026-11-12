@@ -2085,11 +2085,7 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
             adapter.clock = clock
     _refuse_unimplemented_actions(settings, loaded, adapters)
     _check_operators(settings, delegation_policy(loaded))
-    if settings.hub is not None and delegation_policy(loaded) is not None:
-        raise ConfigError(
-            "[engine.rules.delegation] needs the boards' adapters inside kelpie serve: with "
-            "[hub] the boards are the agents', and delegation is not supported there yet"
-        )
+    _check_hub_operators(settings, delegation_policy(loaded))
     hub = _build_hub(settings, adapters, clock)
     registry = condition_registry(settings, clock)
     enrich, connectors = connector_steps(settings, metrics, clock, registry=registry)
@@ -2529,6 +2525,35 @@ def _check_operators(settings: Settings, policy: Policy | None) -> None:
         raise ConfigError(
             f"[engine.rules.delegation] delegate_to {bad}: an operator is an agent profile, "
             "not a human owner, Kelpie or Hermes' default CLI author (user)"
+        )
+
+
+def _check_hub_operators(settings: Settings, policy: Policy | None) -> None:
+    """With ``[hub]``, a ``delegate_to`` board is ``<agent>/<adapter>`` (an agent's board as
+    the hub names it) or a named board: refuse ``<agent>/...`` for an agent the hub does not
+    know, which could never delegate (a typo would leave delegation silently off), and a
+    board key without an agent outside the hub (``hermes``), which names no hub board."""
+    if policy is None or settings.hub is None:
+        return
+    from kelpie.remote.protocol import ADAPTER_NAMES
+
+    agents = {a.name for a in settings.hub.agents}
+    bad = sorted(
+        b
+        for b in policy.delegate_to
+        if "/" in b
+        and (b.split("/", 1)[0] not in agents or b.split("/", 1)[1] not in ADAPTER_NAMES)
+    )
+    if bad:
+        raise ConfigError(
+            f"[engine.rules.delegation] delegate_to {bad}: with [hub] a board is "
+            f"<agent>/<adapter>, an agent of [[hub.agents]] ({', '.join(sorted(agents))}) and "
+            f"an adapter ({', '.join(sorted(ADAPTER_NAMES))})"
+        )
+    if bare := sorted(b for b in policy.delegate_to if "/" not in b and b in ADAPTER_NAMES):
+        raise ConfigError(
+            f"[engine.rules.delegation] delegate_to {bare}: with [hub] an adapter's board is "
+            '<agent>/<adapter>, e.g. "laptop/hermes"'
         )
 
 

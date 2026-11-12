@@ -176,8 +176,21 @@ the protocol.
 - An action on the wire is `{id, adapter, kind, rule, reason, task_id, params, ttl}`.
   `params` are checked per kind (`stop`: `session_id`; `wip_commit`: `branch` — a git ref
   name, no leading `-` — and `draft_pr`; `reassign`: `owner_id`; `wait`: at most 32
-  `conditions` of `{id, kind, params}` with scalar params); other keys are dropped; the
-  reason is cut at 4 KiB and control characters are removed.
+  `conditions` of `{id, kind, params}` with scalar params; `delegate`: `operator`, a
+  profile name, and `card`, exactly `{title, body, key}` — a printable title of at most 200
+  characters, a key of at most 512, a body of at most 16 KiB without control characters
+  but line breaks, whose last line is `kelpie-delegation: <key>`); other keys are dropped;
+  the reason is cut at 4 KiB and control characters are removed.
+- **Delegation** (#347): a `delegate` goes to the agent whose board holds the task, like
+  any task action (an action naming another host's task is never sent). The card speaks
+  the agent's own ids: the hub writes the task as `t_1a`, not `laptop:t_1a`, in its title
+  and body, but leaves the key line as the rule wrote it (the agent's adapter finds a card
+  made before by it, so a retry never makes a second card). The agent answers
+  `card <id> for <operator>` and the hub puts the card's id in the agent's namespace
+  (`laptop:t_9`), so delegation finds the card on the merged board and verifies the fix
+  there. The loop guards, verdicts and messages run on the server, as on a single host;
+  the agent's adapter still refuses a person or Kelpie as operator. An agent that should
+  never make cards leaves `delegate` out of `[agent] actions`.
 - The adapter's own guards still apply: an `UnsupportedAction` comes back as "not
   executed".
 
