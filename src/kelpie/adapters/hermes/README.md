@@ -5,10 +5,11 @@ reads the Kanban board and a spool of tool calls; rules 1–4 run in `observe` (
 mode. The actions implemented are `stop` (see [Stopping a run](#stopping-a-run)), `wait`
 (park a task on conditions), the wake of a task Kelpie parked, and `comment` (see
 [Parking, waking, commenting](#parking-waking-commenting)), `unblock` and `reassign` (see
-[Unblocking and reassigning](#unblocking-and-reassigning)). WIP commit is not, so a rule other
-than `loop_breaker`, `wait_condition`, `conflict_warning`, `dispatch_gate`, `stale_blocks`
-and `orphan_status` in `act` mode with `dry_run = false` stops Kelpie at startup when Hermes
-is configured (`orphan_status` closes no parent on Hermes: that stays an alert).
+[Unblocking and reassigning](#unblocking-and-reassigning)), and a local WIP commit that is
+never pushed (see [WIP commits](#wip-commits)). A rule other than `checkpoints`,
+`loop_breaker`, `wait_condition`, `conflict_warning`, `dispatch_gate`, `stale_blocks` and
+`orphan_status` in `act` mode with `dry_run = false` stops Kelpie at startup when Hermes is
+configured (`orphan_status` closes no parent on Hermes: that stays an alert).
 
 ## Config
 
@@ -650,6 +651,81 @@ an agent that adds a driver in between could still get it run once (a narrow rac
 Kelpie as a separate unprivileged user that cannot read the secrets of other services and
 has nothing in its own `~/.gitconfig` that runs programs; set `git_state = false` if that
 is not good enough.
+
+#### WIP commits
+
+The `checkpoints` rule (in `act` mode) asks for a WIP commit when a session ended with
+uncommitted changes. On Hermes that commit is **local and never pushed** (#399, option 1):
+the work survives in the task's branch, and the next session in the same worktree resumes
+from it. `wip_ci = "draft_pr"` is refused (no push, so no draft PR; a person is told); use
+the default `skip_ci`. Committing is the only write Kelpie makes in a worktree, and it is
+held to more than the read side:
+
+- Only for a task with no run (no `task_runs` row without `ended_at`, not `running`, no
+  `current_run_id`): a new session has the changes otherwise, and nothing is done. Only
+  its `worktree` workspace, used by no other unfinished task, owned by the user Kelpie runs
+  as, with a trusted `.git` layout (above), and only with `git_state` on.
+- A fixed environment: the read side's (only `PATH` and `HOME`, no prompts, no fetching,
+  `GIT_ALLOW_PROTOCOL=none`, `GIT_CONFIG_NOSYSTEM=1`) plus `GIT_CONFIG_GLOBAL=/dev/null`
+  (no global config at all), author and committer `Kelpie <kelpie@kelpie.invalid>`,
+  `GIT_EDITOR=:` and `GIT_PAGER=cat`; every call gets the read side's `-c` overrides
+  (`core.hooksPath=/dev/null`: no hook runs, `core.fsmonitor=false`, ...) plus
+  `commit.gpgSign=false`, `gc.auto=0`, `maintenance.auto=false`, `protocol.allow=never`.
+- Refused, with the reason in the log and an alert to a person (the changes stay where they
+  are): `include.*`, `includeIf.*`, `hook.*` (config-defined hooks, which
+  `core.hooksPath` does not turn off) or any `filter.*` in the worktree's own config
+  (listed with `--no-includes`); a symbolic link where the commit writes or git reads
+  config in the git directory (`objects` and its fan-out directories, `objects/pack`,
+  `refs`, `refs/heads` and every component of the branch's ref and reflog path, `logs`,
+  `logs/HEAD`, `HEAD`, `index`, `packed-refs`, `config`, `config.worktree`, `info`,
+  `info/exclude`, `info/attributes`), or a hard-linked ref or reflog (checked before any
+  write and again right before `add` and `update-ref`: git would write through it, outside
+  the repository); the branch checked out in another worktree of the repository too; a changed file whose `filter` attribute is set (Git LFS: with its
+  driver off, git would store the raw file); `HEAD` detached, on another branch than the
+  one rule 5 checked, or without a commit yet; a merge, rebase, cherry-pick, revert,
+  sequencer or bisect in progress, or an `index.lock`; submodules (a `.gitmodules` or a
+  gitlink in the index, checked with `ls-files -s` before any `status`, since `status` would
+  run a child git in each submodule under the submodule's own, unchecked config); unmerged
+  files; an untracked nested repository; more than 1000 changed entries, or more than
+  8 Mi characters of `ls-files` or `status` output; a changed file over 25 MiB. A clean
+  worktree is nothing to do. The config is checked again right before `add`. All git calls
+  of one WIP commit end within `4 × git_timeout`.
+- The commands: `config -z --no-includes --show-scope --list`, `rev-parse
+  --absolute-git-dir`, `worktree list --porcelain -z`, `ls-files -s -z`, `status --porcelain=v2 -z --branch
+  --untracked-files=all --ignore-submodules=all`,
+  `check-attr -z --stdin filter` on the changed paths, `add -A` (the agent's own index, so
+  it matches the commit afterwards), `write-tree`, `commit-tree --no-gpg-sign` with the
+  message on standard input, and `update-ref --no-deref refs/heads/<branch> <new> <old>`, a
+  compare-and-swap: a branch that moved since the `status` is left alone and the attempt
+  fails. `git commit` is not used (hooks, templates, editors and signing hang off it), and
+  nothing contacts a remote.
+- The ledger keeps what was committed ("local commit `<id>` on `<branch>` (N changed
+  entries)"), and the next snapshot reports it as the session's `last_commit`.
+
+**Which user.** WIP commits need Kelpie to run as the user that owns the worktrees: another
+owner's worktree is refused, and with no global config no `safe.directory` entry applies.
+That is a trade-off against the read side's advice to run Kelpie as a separate user: agents
+running as Kelpie's user can read Kelpie's config, environment and keys (the park key, the
+traces token), so the git measures above only stop an agent from making Kelpie *run* a
+program through git (an escape from an agent sandbox that cannot run it itself), not from
+reading Kelpie's secrets. Where that matters, keep `checkpoints` out of `act` mode on Hermes
+and run Kelpie as its own user (WIP commits are then refused and become alerts).
+
+Residual risks: git still parses the hostile repository, as on the read side. Linked
+worktrees of one repository share its `config`: an agent running in a sibling worktree
+could add a filter driver after the first config check, so that `status` (which runs clean
+filters on stat-dirty files) or `add` runs it; the second check right before `add` narrows
+that window, it does not close it (as on the read side). The same goes for a symbolic link
+placed between the last link check and the write that follows it. An absolute
+`core.excludesFile` in the worktree's config is read from wherever it points. A worker Hermes starts on the task between the run check and the commit
+races with it (`add` fails on its index lock, `update-ref` on a moved branch). `HOME` is
+passed on, so a `~` in the worktree's `core.excludesFile` and git's default
+`~/.config/git/ignore` are read from Kelpie's home: they decide which files are added,
+nothing runs. Agents can later push the WIP commit like any other commit on their branch;
+the message carries `[skip ci]` with the default `wip_ci` (its first line is cut to 200
+characters and always ends with the `[skip ci]` the message holds). A repository that keeps
+its refs in a reftable (`extensions.refStorage`) is refused. A refusal's reason is in
+Kelpie's log; the alert says the WIP commit was not made.
 
 Operations:
 

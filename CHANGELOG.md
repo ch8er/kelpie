@@ -10,6 +10,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ### Added
 
+- Hermes makes WIP commits (#399, option 1): `checkpoints` in `act` mode commits a dirty
+  worktree locally on the task branch after its session ended, and never pushes. Git runs
+  with a fixed environment (no global or system config, no hooks, no signing, a fixed
+  author `Kelpie <kelpie@kelpie.invalid>`) through plumbing with a compare-and-swap on the
+  branch; a worktree with includes or filter drivers in its config, a filter attribute on a
+  changed file (LFS), an operation in progress, unmerged files, submodule changes, a nested
+  repository, another branch or a very large file is refused and a person is told. The
+  ledger keeps the commit. `wip_ci = "draft_pr"` is unsupported on Hermes. `checkpoints`
+  may now run in `act` mode on Hermes.
 - Delegation to an operator agent, first part (#347): the `delegation` rule and its policy
   in `[engine.rules.delegation]`: problem classes (`agent`, `human`, `kelpie`) per rule as
   config data with an empty default, `delegate_to` per board, and the loop guards (one open

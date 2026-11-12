@@ -80,11 +80,10 @@ def argv(log: Path) -> list[list[str]]:
 # --- declared capabilities ---------------------------------------------------------------
 
 
-def test_unblock_and_reassign_are_declared_and_wip_commit_is_not() -> None:
+def test_unblock_reassign_and_wip_commit_are_declared() -> None:
     kinds = declared_actions(HermesAdapter())
     assert kinds is not None
-    assert {ActionKind.UNBLOCK, ActionKind.REASSIGN} <= kinds
-    assert ActionKind.WIP_COMMIT not in kinds
+    assert {ActionKind.UNBLOCK, ActionKind.REASSIGN, ActionKind.WIP_COMMIT} <= kinds
     assert isinstance(HermesAdapter(), SupportsReassign)
     assert HermesBoards.actions == kinds
 

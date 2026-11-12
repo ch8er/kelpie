@@ -102,12 +102,14 @@ class PlatformExecutor:
             case ActionKind.COMMENT:
                 adapter.comment(tid, action.reason)
             case ActionKind.WIP_COMMIT:
-                adapter.wip_commit(
+                made = adapter.wip_commit(
                     tid,
                     action.reason,
                     branch=action.params.get("branch"),
                     draft_pr=bool(action.params.get("draft_pr", False)),
                 )
+                # what was committed, for the ledger and the message
+                return made if isinstance(made, str) and made.strip() else True
             case ActionKind.REASSIGN if action.params.get("owner_id") and isinstance(
                 adapter, SupportsReassign
             ):

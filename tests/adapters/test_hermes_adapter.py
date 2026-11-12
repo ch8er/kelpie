@@ -409,11 +409,6 @@ def test_list_tasks_and_get_task(board: Board) -> None:
     assert list(a.events(NOW)) == []
 
 
-def test_wip_commit_is_not_implemented(board: Board) -> None:
-    with pytest.raises(NotImplementedError, match="observe or suggest"):
-        adapter(board).wip_commit("t_1", "m")
-
-
 def tool_line(at: datetime, **kw: object) -> str:
     rec = {
         "type": "tool",

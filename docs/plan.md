@@ -208,7 +208,7 @@ Three weeks, three steps: the core with traces and the first adapter, the full r
 - [x] Repository, `CLAUDE.md`, cloud environment, fixtures from the farm incidents
 - [ ] Core: model of tasks, statuses, owners, conditions and resources — in use by every rule; the model gaps item is open (shared conditions, block categories, status history, session hosts)
 - [x] Traces: OTLP intake following GenAI semantic conventions, storage, export to Langfuse
-- [ ] Checkpoints: commit reminders, WIP commit on exit, resume from the last commit — the resume note carries a short git log and reaches the next Hermes session's prompt through the comment thread; the Hermes adapter makes no WIP commit yet
+- [ ] Checkpoints: commit reminders, WIP commit on exit, resume from the last commit — the resume note carries a short git log and reaches the next Hermes session's prompt through the comment thread; the Hermes adapter makes the WIP commit locally and never pushes it (#399)
 - [x] Hermes adapter: hooks and reading `kanban.db`
 - [x] Rules: exit contract, "wait for condition", orphan statuses, stale blocks
 

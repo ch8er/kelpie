@@ -391,7 +391,7 @@ def test_build_app_wires_the_pull_requests_step(
 
 
 class _WipCommits:
-    """A platform adapter that carries out WIP commits (no shipped adapter does yet)."""
+    """A platform adapter that carries out WIP commits (stands in for Hermes' local ones)."""
 
     name = "wip"
     actions = frozenset({ActionKind.WIP_COMMIT})
@@ -409,6 +409,21 @@ def test_checkpoints_warning_only_where_wip_commits_are_made(
     unchecked = CONFIG + "[engine.rules.checkpoints]\nwip_without_pr_check = true\n"
     build_app(load_settings(write(tmp_path, unchecked))).close()
     assert "checkpoints makes no WIP commits" not in caplog.text
+
+
+def test_draft_pr_wip_commits_are_warned_about_on_hermes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Hermes commits WIP locally and never pushes: a draft PR cannot be made (#399)."""
+    monkeypatch.setenv("GITHUB_TOKEN", TOKEN)
+    caplog.set_level("INFO")
+    hermes = CONFIG + f'[adapters.hermes]\ndb_path = "{tmp_path / "kanban.db"}"\nspool = false\n'
+    draft = hermes + '[engine.rules.checkpoints]\nwip_ci = "draft_pr"\n'
+    build_app(load_settings(write(tmp_path, draft))).close()
+    assert "Hermes commits WIP locally and never pushes" in caplog.text
+    caplog.clear()
+    build_app(load_settings(write(tmp_path, hermes))).close()
+    assert "never pushes" not in caplog.text
 
 
 def test_checkpoints_warning_on_a_hub(

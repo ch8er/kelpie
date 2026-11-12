@@ -2069,6 +2069,13 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
             "that a branch has no open PR (or set wip_without_pr_check = true where task "
             "branches never carry PRs)"
         )
+    if getattr(checkpoints, "wip_ci", None) == "draft_pr" and any(
+        isinstance(a, hermes.HermesAdapter | HermesBoards) for a in adapters
+    ):
+        log.warning(
+            "checkpoints wip_ci = draft_pr: Hermes commits WIP locally and never pushes, so "
+            "its WIP commits are refused and become alerts; use wip_ci = skip_ci"
+        )
     for adapter in adapters:  # Kelpie's park and stop markers are issued on the app's clock
         if isinstance(adapter, hermes.HermesAdapter | HermesBoards):
             adapter.clock = clock
@@ -3050,9 +3057,11 @@ def _open_span_store(db_path: Path | None) -> SpanStore:
 
 
 # Rules whose effects on a platform are actions the Hermes adapter carries out: stop, wait
-# (park), wake of a parked task, comment (plus alerts). Update with the adapter.
+# (park), wake of a parked task, comment, a local WIP commit (plus alerts). Update with the
+# adapter.
 HERMES_ACT_RULES = frozenset(
     {
+        "checkpoints",
         "loop_breaker",
         "wait_condition",
         "conflict_warning",
