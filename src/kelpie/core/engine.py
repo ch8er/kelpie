@@ -733,7 +733,8 @@ class Engine:
         try:
             if action.state is not None:
                 # the rule's own key, before the transition's suffix (``<key>|<opened>|...``)
-                kind = (action.key or "").split("|", 1)[0].split(":", 1)[0] or None
+                own = (action.key or "").split("|", 1)[0]
+                kind = None if own == action.state else own.split(":", 1)[0] or None
                 return held_for_operator(
                     policy,
                     action.rule,

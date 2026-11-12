@@ -454,8 +454,8 @@ def event_of(entry: LedgerEntry) -> DelegationEvent | None:
             card_id=found[1] if found else None,
         )
     verdict = params.get("verdict")
-    if entry.outcome in (Outcome.OBSERVED, Outcome.DRY_RUN):
-        return None  # a verdict nobody was told: said again once the rule acts
+    if entry.outcome not in (Outcome.ALERTED, Outcome.SUGGESTED):
+        return None  # a verdict nobody was told (observe, dry-run, failed): said again
     if entry.kind in (ActionKind.ALERT, ActionKind.ESCALATE) and isinstance(verdict, str):
         return DelegationEvent(
             problem,

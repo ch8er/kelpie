@@ -491,3 +491,58 @@ def test_the_breaker_tells_the_person_about_each_held_problem() -> None:
     assert [a.params["kept"] for a in kept] == ["delegation is stopped by the circuit breaker"]
     assert Delegation(POLICY).boards("delegation:breaker") is False
     assert Delegation(POLICY).boards("stale:T-1") is True
+
+
+def test_a_verdict_nobody_got_is_said_again() -> None:
+    from kelpie.core.config import Mode as M
+    from kelpie.core.delegation import event_of
+    from kelpie.core.ledger import LedgerEntry
+
+    params = {"problem": "stale:T-1", "incident": "task:T-1", "attempt": 1, "verdict": "verified"}
+
+    def entry(outcome: Outcome) -> LedgerEntry:
+        return LedgerEntry(
+            NOW, "f", "s", "delegation", ActionKind.ALERT, M.ACT, outcome, "r", params=params
+        )
+
+    for outcome in (Outcome.FAILED, Outcome.DROPPED, Outcome.OBSERVED, Outcome.DRY_RUN):
+        assert event_of(entry(outcome)) is None
+    assert event_of(entry(Outcome.ALERTED)) is not None
+
+
+def test_a_card_that_cannot_be_made_gives_the_held_problem_back() -> None:
+    held = replace(card(), kind="held", attempt=0, outcome="delegated", at=NOW - timedelta(hours=3))
+    failed = replace(card(ago=timedelta(minutes=70)), outcome="failed", card_id=None)
+    actions = run([task()], [problem()], [held, failed])
+    (kept,) = [a for a in actions if "kept" in a.params]
+    assert kept.params["kept"] == "the card could not be made"
+    assert not [a for a in actions if a.kind is ActionKind.DELEGATE]
+    soon = replace(failed, at=NOW - timedelta(minutes=10))
+    assert [a.kind for a in run([task()], [problem()], [held, soon])] == [ActionKind.DELEGATE]
+    refused = replace(failed, outcome="not_executed")
+    assert [a.params.get("kept") for a in run([task()], [problem()], [held, refused])] == [
+        "the card could not be made"
+    ]
+
+
+def test_only_holds_of_this_opening_count() -> None:
+    old = replace(card(), kind="held", attempt=0, outcome="delegated", at=NOW - timedelta(days=2))
+    crit = problem(severity="critical")
+    assert run([task()], [crit], [old]) == []
+    now_held = replace(old, at=NOW - timedelta(hours=1))
+    assert [a.params.get("kept") for a in run([task()], [crit], [now_held])] == [
+        "critical: it goes to a person at once"
+    ]
+
+
+def test_two_problems_on_one_task_get_one_card() -> None:
+    actions = run([task()], [problem(), problem(id="other:T-1")])
+    assert len([a for a in actions if a.kind is ActionKind.DELEGATE]) == 1
+
+
+def test_a_card_kelpie_cannot_see_waits_for_the_finish_deadline() -> None:
+    unseen = replace(card(ago=timedelta(hours=2)), card_id=None)
+    assert verdicts(run([task()], [problem()], [unseen])) == []
+    late = replace(unseen, at=NOW - timedelta(hours=7))
+    (said,) = [a for a in run([task()], [problem()], [late]) if "verdict" in a.params]
+    assert said.params["verdict"] == "not_finished" and "its id was not read" in said.reason

@@ -96,14 +96,15 @@ class Delegation:
             actions.append(_breaker(policy, min(at for at in failed if at > now - DAY)))
         # Problems the engine held back for the operator: each ends in a message to the person
         # (a hand-off, a verdict, or "it is yours" below), whatever happened since.
-        held = {e.problem for e in events if e.kind == "held"}
-        told = {
-            e.problem
+        held = [e for e in events if e.kind == "held"]
+        told = [
+            e
             for e in events
             if e.kind == "verdict"
             and (e.verdict in GAVE_UP or e.verdict == KEPT)
             and e.at > now - policy.cooldown
-        }
+        ]
+        carded: set[str] = set()  # incidents handed over this tick: one open card each
         card_tasks = {c.card_id for c in carried if c.card_id}
         left = min(
             policy.max_per_hour - sum(1 for c in carried if c.at > now - HOUR),
@@ -113,7 +114,7 @@ class Delegation:
             task = snapshot.task(problem.task_id) if problem.task_id else None
             operator = policy.operator_for(task) if task is not None else None
             why: str | None
-            if _open(problem, carried, verdicts):
+            if _open(problem, carried, verdicts) or incident_of(problem) in carded:
                 continue  # with the operator: its card's verdict tells the person
             if stopped:
                 why = "delegation is stopped by the circuit breaker"
@@ -131,6 +132,8 @@ class Delegation:
                 if _open(problem, carried, verdicts):
                     continue  # with the operator: its verdict tells the person
                 why = f"{policy.max_attempts} attempts were made within {human(policy.cooldown)}"
+            elif self._unmade(problem, attempt, events, now):
+                why = "the card could not be made"
             elif left <= 0:
                 why = "the hourly or daily limit of cards is reached"
             else:
@@ -139,10 +142,29 @@ class Delegation:
                 card = card_for(problem, task, operator, attempt, f"kelpie-{key}")
                 actions.append(_delegate(problem, task.id, operator, attempt, key, card.params()))
                 left -= 1
+                carded.add(incident_of(problem))
                 continue
-            if problem.id in held and problem.id not in told:
+            # only what was held, and told, since this opening of the problem
+            if any(e.problem == problem.id and e.at >= problem.opened_at for e in held) and not any(
+                e.problem == problem.id and e.at >= problem.opened_at for e in told
+            ):
                 actions.append(_kept(problem, operator, why))
         return actions
+
+    def _unmade(
+        self, problem: Problem, attempt: int, events: Sequence[DelegationEvent], now: datetime
+    ) -> bool:
+        """Whether this attempt's card cannot be made: no executor would carry it out, or
+        creating it kept failing for ``pickup_within``."""
+        tries = [
+            e
+            for e in events
+            if e.kind == "card" and e.problem == problem.id and e.attempt == attempt
+        ]
+        if any(e.outcome == "not_executed" for e in tries):
+            return True
+        failed = [e.at for e in tries if e.outcome == "failed"]
+        return bool(failed) and now >= min(failed) + self.policy.pickup_within
 
     def boards(self, state: str) -> bool:
         """The circuit breaker is no board's state: an unread board does not keep it open."""
@@ -205,6 +227,8 @@ class Delegation:
             elif now >= card.at + policy.finish_within:
                 why = f"{_card(card)} was not finished within {human(policy.finish_within)}"
                 found.append(_verdict(card, "not_finished", _yours(card, problem, why)))
+            elif card.card_id is None:
+                continue  # Kelpie cannot see the card: only the finish deadline applies
             elif now >= card.at + policy.pickup_within and not _picked(ctask, snapshot):
                 why = f"nobody picked up {_card(card)} within {human(policy.pickup_within)}"
                 found.append(_verdict(card, "not_picked_up", _yours(card, problem, why)))
@@ -259,7 +283,7 @@ def _delegate(
     return Action(
         ActionKind.DELEGATE,
         NAME,
-        f"Handed to {operator} (attempt {attempt}): {headline}".rstrip(": "),
+        f"For {operator} (attempt {attempt}): {headline}".rstrip(": "),
         task_id=task_id,
         key=f"delegate:{key}",
         severity=Severity.WARNING,

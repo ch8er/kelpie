@@ -921,13 +921,15 @@ ops-1; card t_9a for ops-1."), one at the end, and nothing in between:
   problem is still reported; the next card follows (attempt 2);
 - **Not fixed, yours now**: the operator blocked the card (its reason quoted), closed the
   last allowed attempt while the problem stays, nobody picked the card up within
-  `pickup_within`, or it was not finished within `finish_within`; from then on the
+  `pickup_within` (when Kelpie cannot see the card because its id was not read, only the
+  finish deadline applies), or it was not finished within `finish_within`; from then on the
   problem's alerts reach the person again, and no new card is made within `cooldown`;
 - **Kelpie did not hand this to ops-1 (why); it is yours**: a problem the engine held back
   (the ledger's `delegated` entries) that the rule does not hand over, whatever the reason:
   the hourly or daily limit, the attempts used, the circuit breaker, a person who took the
   task, the task given back, a problem about one of Kelpie's own cards, one older than the
-  history. From then on its alerts reach the person.
+  history, a card that could not be made. From then on its alerts reach the person, and no
+  card is made for that task within `cooldown`.
 
 If the server cannot read the delegation history in a tick, nothing is held back in it.
 Turning delegation off (or out of act mode) while cards are open leaves their problems'

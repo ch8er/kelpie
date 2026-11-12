@@ -30,7 +30,7 @@ expected_actions:
   - kind: delegate
     task_id: T-801
     severity: warning
-    reason_contains: "Handed to ops-1 (attempt 1)"
+    reason_contains: "For ops-1 (attempt 1)"
     params: {problem: "stale-block:T-801", incident: "task:T-801", attempt: 1, operator: ops-1, problem_rule: stale_blocks}
 not_expected_actions:
   - kind: delegate
