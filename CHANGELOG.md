@@ -10,6 +10,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ### Added
 
+- Rule 6 holds matched by flag or pause, not only by label: `kind = "flag"` (a platform
+  flag, the new `Task.flags`) or `kind = "pause"` (a blocked or waiting task whose block is
+  a pause: category `pause`, or a reason matching the hold's `pattern`, by default one
+  starting with "paused"). A hold that names its owner (`executor`) gets the new
+  `lift_hold` action past its expiry instead of the alert, carried out only in act mode;
+  nothing acts by default. The GitHub pull request step lifts label holds on PRs as
+  executor `github_pulls`, off by default: `[connectors.github.pulls] allow_lift_holds`,
+  `lift_repos` and a token of its own in `lift_token_env`.
 - `POST /v1/metrics`: Claude Code's OpenTelemetry cost and token metrics as a spend source,
   behind the same token, `Origin`, size, media type and slot checks as `/v1/traces` (only
   the shared token, not a per-agent one). Only `claude_code.token.usage` and

@@ -73,7 +73,17 @@ MAX_PAGES = 3  # open PRs read per repository: at most 300
 STALE_SCANS = 3  # a repository's PRs are dropped after this many scans without a fresh list
 UNKNOWN_WARN = 10  # scans in a row without whole lists before a warning
 LABEL_RETRY = timedelta(minutes=30)  # an unknown label time is asked again after this
-_KEYS = {"enabled", "poll_interval", "max_details", "task_code", "closed_lookback"}
+_KEYS = {
+    "enabled",
+    "poll_interval",
+    "max_details",
+    "task_code",
+    "closed_lookback",
+    "allow_lift_holds",
+    "lift_repos",
+    "lift_token_env",
+}
+_ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 # GitHub's mergeable_state: only "clean" is mergeable now. "unstable" (non-required checks
 # failing) counts as not mergeable and anything else ("unknown", "has_hooks") as unknown: a
 # PR is ready work only when GitHub is sure.
@@ -90,6 +100,12 @@ class PullSettings:
     max_details: int = DEFAULT_MAX_DETAILS
     task_code: re.Pattern[str] | None = None  # task codes in task titles, besides the id
     closed_lookback: timedelta = DEFAULT_CLOSED_LOOKBACK  # closed PRs listed this far back
+    # Rule 6 may take a forgotten hold's label off its PRs (``lift_hold``, act mode only,
+    # :mod:`kelpie.connectors.github.holds`): off by default; then only on ``lift_repos``,
+    # with the token in ``$lift_token_env`` (one of its own).
+    allow_lift_holds: bool = False
+    lift_repos: tuple[str, ...] = ()
+    lift_token_env: str | None = None
 
 
 def load_pulls(raw: Any) -> PullSettings:
@@ -124,7 +140,28 @@ def load_pulls(raw: Any) -> PullSettings:
             pattern = compile_task_code(code)
         except ValueError as exc:
             raise ValueError(f"[connectors.github.pulls] task_code {exc}") from None
-    return PullSettings(enabled, interval, details, pattern, lookback)
+    allow = raw.get("allow_lift_holds", False)
+    if not isinstance(allow, bool):
+        raise ValueError("[connectors.github.pulls] allow_lift_holds must be true or false")
+    repos = raw.get("lift_repos", [])
+    if not isinstance(repos, list) or not all(
+        isinstance(r, str) and re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", r) for r in repos
+    ):
+        raise ValueError('[connectors.github.pulls] lift_repos must be a list of "owner/name"')
+    env = raw.get("lift_token_env")
+    if env is not None and (not isinstance(env, str) or not _ENV_NAME.fullmatch(env)):
+        raise ValueError(
+            "[connectors.github.pulls] lift_token_env must be an environment variable name"
+        )
+    if allow and not repos:
+        raise ValueError(
+            "[connectors.github.pulls] allow_lift_holds needs lift_repos (an allow-list)"
+        )
+    if allow and env is None:
+        raise ValueError(
+            "[connectors.github.pulls] allow_lift_holds needs lift_token_env (a token of its own)"
+        )
+    return PullSettings(enabled, interval, details, pattern, lookback, allow, tuple(repos), env)
 
 
 @dataclass(frozen=True, slots=True)

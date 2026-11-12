@@ -1,0 +1,42 @@
+id: "14-forgotten-flag-hold"
+incident: 14
+title: "A freeze flag on ready tasks was forgotten"
+description: >
+  The platform marks frozen tasks with a flag, not a label. Three ready tasks carry the
+  release-freeze flag since this morning; the freeze was meant to last two hours. A rule 6
+  hold of kind flag matches the flag, so the ready work is held, not dispatch's to hand
+  out, and once past the expiry Kelpie alerts with the owner and the idle developers. A task
+  merely labelled release-freeze (no flag) is not part of a flag hold's age.
+rule: bottlenecks
+config:
+  min_idle_time: "30m"
+  idle_alert_after: "30m"
+  holds:
+    - {label: release-freeze, kind: flag, owner: release-manager, expires_after: "2h"}
+snapshot:
+  now: "2026-03-02T17:00:00+00:00"
+  owners:
+    - {id: agent-dev-1, role: developer}
+    - {id: agent-dev-2, role: developer}
+  tasks:
+    - {id: T-1431, title: "Changelog", status: ready, status_since: "2026-03-02T12:00:00+00:00", role: developer, flags: [release-freeze]}
+    - {id: T-1432, title: "Version bump", status: ready, status_since: "2026-03-02T12:30:00+00:00", role: developer, flags: [release-freeze]}
+    - {id: T-1433, title: "Tag notes", status: ready, status_since: "2026-03-02T13:00:00+00:00", role: developer, flags: [release-freeze, other-flag]}
+  sessions:
+    - {id: S-1431, task_id: T-1430, owner_id: agent-dev-1, started_at: "2026-03-02T09:00:00+00:00", ended_at: "2026-03-02T12:00:00+00:00", final_status: done}
+    - {id: S-1432, task_id: T-1429, owner_id: agent-dev-2, started_at: "2026-03-02T09:00:00+00:00", ended_at: "2026-03-02T12:00:00+00:00", final_status: done}
+expected_actions:
+  - kind: alert
+    severity: warning
+    reason_contains: "past its expected 2h"
+    params:
+      hold: release-freeze
+      hold_kind: flag
+      owner: release-manager
+      held_tasks: [T-1431, T-1432, T-1433]
+      held_minutes: 300
+      idle_agents: [agent-dev-1, agent-dev-2]
+not_expected_actions:
+  # Held work is the hold alert's, not "idle with ready work".
+  - kind: alert
+    params: {likely_cause: dispatch}

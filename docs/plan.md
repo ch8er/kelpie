@@ -215,7 +215,7 @@ Three weeks, three steps: the core with traces and the first adapter, the full r
 **Week 2, Oct 22–28** (started early, Week 1 finished on Oct 15)
 
 - [x] Before the rules: span dedup by tool-call id, quickstart for Hermes and `kelpie doctor`, so the live run can start in parallel
-- [ ] Rules: ping-pong, role bottlenecks, environment resources, CI economy — all four act; open: holds by flag or pause and lifted in act mode, rule 9's fail-fast cancel in the GitHub connector
+- [ ] Rules: ping-pong, role bottlenecks, environment resources, CI economy — all four act; open: rule 9's fail-fast cancel in the GitHub connector
 - [x] Rules: loop and budget breaker (10), activity without progress (11)
 - [ ] Budgets and spend: budget config, thresholds, burn-rate forecast, spend from traces, Claude Code metrics and provider cost APIs — all but one spend source: provider cost reports check the bill but do not feed budgets
 - [x] Resource reading via Prometheus and node_exporter for any machine: laptop, cloud VM, container — works; an unreachable Prometheus is alerted once per cause

@@ -1,0 +1,45 @@
+id: "14-hold-lifted-by-its-owner"
+incident: 14
+title: "A forgotten PR-label hold is lifted by the connector that owns it"
+description: >
+  The merge hold of incident 14 as a PR label, with an owner configured to lift it:
+  executor github_pulls (the GitHub pull request step, which needs allow_lift_holds and a
+  token of its own). Past its expiry the rule asks that executor to take the label off the
+  held PRs (lift_hold), instead of only alerting; the engine still runs it only in act mode
+  and turns it into an alert when the executor cannot. A hold with no executor still only
+  alerts.
+rule: bottlenecks
+config:
+  min_idle_time: "30m"
+  idle_alert_after: "30m"
+  holds:
+    - {label: merge-first, owner: human-owner, expires_after: "2h30m", executor: github_pulls}
+    - {label: docs-freeze, owner: docs-owner, expires_after: "1h"}
+snapshot:
+  now: "2026-03-02T17:00:00+00:00"
+  owners:
+    - {id: human-owner, role: owner, kind: human}
+    - {id: agent-dev-1, role: developer}
+  tasks:
+    - {id: T-1441, title: "Settings page", status: review, status_since: "2026-03-02T10:00:00+00:00", role: developer, branch: "hermes/T-1441"}
+    - {id: T-1442, title: "Docs index", status: ready, status_since: "2026-03-02T12:00:00+00:00", role: developer, labels: [docs-freeze]}
+  sessions:
+    - {id: S-1441, task_id: T-1440, owner_id: agent-dev-1, started_at: "2026-03-02T09:00:00+00:00", ended_at: "2026-03-02T11:00:00+00:00", final_status: done}
+  pull_requests:
+    - {repo: example/repo, number: 51, branch: "hermes/T-1441", task_ids: [T-1441], labels: [merge-first], mergeable: false, updated_at: "2026-03-02T12:00:00+00:00", labeled: [{label: merge-first, at: "2026-03-02T12:00:00+00:00"}]}
+    - {repo: example/repo, number: 52, branch: "release/notes", labels: [merge-first], mergeable: false, updated_at: "2026-03-02T12:00:00+00:00", labeled: [{label: merge-first, at: "2026-03-02T12:00:00+00:00"}]}
+expected_actions:
+  - kind: lift_hold
+    executor: github_pulls
+    reason_contains: "past its expected 2h 30m"
+    params:
+      hold: merge-first
+      owner: human-owner
+      lift_prs: ["example/repo#51", "example/repo#52"]
+  - kind: alert
+    params: {hold: docs-freeze}
+not_expected_actions:
+  - kind: alert
+    params: {hold: merge-first}
+  - kind: lift_hold
+    params: {hold: docs-freeze}

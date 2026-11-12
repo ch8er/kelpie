@@ -104,7 +104,14 @@ PLANNED: tuple[PlannedRule, ...] = (
         effects=_fx(_K.UNBLOCK),
     ),
     PlannedRule("ping_pong", 5, _P0, "More than K review rounds -> escalate", (12,)),
-    PlannedRule("bottlenecks", 6, _P0, "Idle time per role, holds, human gates", (9, 10, 14, 16)),
+    PlannedRule(
+        "bottlenecks",
+        6,
+        _P0,
+        "Idle time per role, holds, human gates",
+        (9, 10, 14, 16),
+        effects=_fx(_K.LIFT_HOLD),  # by the executor a hold names as its owner
+    ),
     PlannedRule("resources", 7, _P0, "Disk, memory, processes, quotas, auth expiry", (3, 4, 6)),
     PlannedRule(
         "ci_economy",

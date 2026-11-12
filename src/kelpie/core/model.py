@@ -255,6 +255,9 @@ class Task:
     # files of different repositories never conflict.
     repo: str | None = None
     labels: tuple[str, ...] = ()
+    # Flags the platform sets on the task apart from its labels (a freeze, a do-not-merge
+    # mark), normalised by the adapter; rule 6's flag holds match them.
+    flags: tuple[str, ...] = ()
     returns: tuple[Return, ...] = ()
     host: str | None = None  # where the task runs, if the adapter knows (a config name)
     body: str | None = None  # the task's description, if the adapter knows it

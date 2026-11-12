@@ -60,6 +60,8 @@ from kelpie.connectors.github import (
     load_github,
 )
 from kelpie.connectors.github.billing import KEEP_FOR
+from kelpie.connectors.github.client import GitHubClient, valid_token
+from kelpie.connectors.github.holds import HoldLifter
 from kelpie.connectors.github.pulls import PullRequestSync
 from kelpie.connectors.human_tasks import (
     HumanTaskConnector,
@@ -1138,7 +1140,11 @@ def hold_labels(bottlenecks: Mapping[str, Any]) -> list[str]:
     found = [x for x in labels if isinstance(x, str)] if isinstance(labels, list) else []
     holds = bottlenecks.get("holds", [])
     for hold in holds if isinstance(holds, list) else []:
-        if isinstance(hold, Mapping) and isinstance(hold.get("label"), str):
+        if (
+            isinstance(hold, Mapping)
+            and isinstance(hold.get("label"), str)
+            and hold.get("kind", "label") == "label"  # a flag or pause is no label
+        ):
             found.append(hold["label"])
     return sorted(set(found))
 
@@ -2798,8 +2804,11 @@ def _github_steps(
             ", ".join(sorted(connector.repos)),
             ", ".join(sorted(watch)) or "none",
         )
+    lifters: list[ActionConnector] = []
+    if github.pulls is not None and github.pulls.enabled and github.pulls.allow_lift_holds:
+        lifters.append(_hold_lifter(github, clock, others))
     if ci is None:
-        return steps, []
+        return steps, lifters
     log.info(
         "[connectors.github.ci] builds of %s; cancel_build %s",
         ", ".join(ci.settings.repos),
@@ -2815,7 +2824,53 @@ def _github_steps(
             ci.settings.billing_interval,
             ci.settings.billing_token_env,
         )
-    return [*steps, ("github_ci", ci)], [ci]
+    return [*steps, ("github_ci", ci)], [ci, *lifters]
+
+
+def _hold_lifter(
+    github: GitHubSettings, clock: Callable[[], datetime], others: Sequence[str]
+) -> ActionConnector:
+    """``lift_hold`` on PR labels (:mod:`kelpie.connectors.github.holds`), with the token in
+    ``[connectors.github.pulls] lift_token_env``: required, valid, and none of the other
+    GitHub tokens (read, cancel, billing, propose, the issues adapter's). ConfigError
+    otherwise; the message names variables, never values."""
+    pulls = github.pulls
+    assert pulls is not None and pulls.lift_token_env is not None  # load_pulls
+    where = "[connectors.github.pulls]"
+    token = os.environ.get(pulls.lift_token_env, "").strip()
+    if not token:
+        raise ConfigError(f"{where} lift_token_env: ${pulls.lift_token_env} is not set")
+    if not valid_token(token):
+        raise ConfigError(f"{where} ${pulls.lift_token_env} contains characters not allowed")
+    ci = github.ci
+    names = [
+        github.token_env,
+        *(
+            [ci.cancel_token_env, ci.billing_token_env, ci.propose_token_env]
+            if ci is not None
+            else []
+        ),
+        *others,
+    ]
+    for name in names:
+        if name and os.environ.get(name, "").strip() == token:
+            raise ConfigError(
+                f"{where} ${pulls.lift_token_env} holds the same token as ${name}: lifting "
+                "holds needs a token of its own"
+            )
+    known = {r.lower() for r in github.repos}
+    if stray := [r for r in pulls.lift_repos if r.lower() not in known]:
+        raise ConfigError(f"{where} lift_repos must be in [connectors.github] repos: {stray}")
+    log.info(
+        "%s lift_hold allowed on %s, token from $%s",
+        where,
+        ", ".join(pulls.lift_repos),
+        pulls.lift_token_env,
+    )
+    client = GitHubClient(
+        github.api_url, token, timeout=github.timeout, cache_ttl=github.cache_ttl, clock=clock
+    )
+    return HoldLifter(client, pulls.lift_repos)
 
 
 def check_exposure(settings: Settings, host: str) -> None:
@@ -2933,6 +2988,7 @@ _VERBS: dict[ActionKind, str] = {
     ActionKind.STOP: "stop runs",
     ActionKind.CANCEL_BUILD: "cancel builds",
     ActionKind.PROPOSE_CI_CONFIG: "propose CI changes",
+    ActionKind.LIFT_HOLD: "lift holds",
 }
 _PLATFORMS = {
     "hermes": "Hermes",
@@ -2965,11 +3021,17 @@ def act_blockers(settings: Settings, adapters: Sequence[PlatformAdapter]) -> dic
     judged there."""
     ci = settings.github.ci if settings.github is not None and settings.github.enabled else None
     ci_on = ci is not None and ci.enabled
+    github = settings.github if settings.github is not None and settings.github.enabled else None
+    pulls = github.pulls if github is not None else None
     allowed = frozenset(
         k
         for k, on in (
             (ActionKind.CANCEL_BUILD, ci_on and ci is not None and ci.allow_cancel),
             (ActionKind.PROPOSE_CI_CONFIG, ci_on and ci is not None and ci.allow_propose),
+            (
+                ActionKind.LIFT_HOLD,
+                pulls is not None and pulls.enabled and pulls.allow_lift_holds,
+            ),
         )
         if on
     )
@@ -2979,10 +3041,11 @@ def act_blockers(settings: Settings, adapters: Sequence[PlatformAdapter]) -> dic
         name, effects = planned.name, planned.effects
         if name not in REGISTRY:
             continue
-        platform = effects - CI_WRITES
-        # A rule with CI writes acts when the CI connector allows at least one of them.
-        if effects & CI_WRITES and not effects & allowed:
-            found[name] = ActBlocker(_no_ci_writes(settings), refused=has_hermes)
+        platform = effects - CONNECTOR_WRITES
+        # A rule with connector writes acts when its connector allows at least one of them.
+        if effects & CONNECTOR_WRITES and not effects & allowed:
+            reason = _no_ci_writes(settings) if effects & CI_WRITES else _no_hold_lifts(settings)
+            found[name] = ActBlocker(reason, refused=has_hermes)
         elif has_hermes and name not in HERMES_ACT_RULES and not (effects and not platform):
             found[name] = ActBlocker(_hermes_gap(name, platform), refused=True)
         elif platform and settings.hub is None and platform - _carried(adapters):
@@ -3044,6 +3107,16 @@ def _gaps(adapters: Sequence[PlatformAdapter], platform: frozenset[ActionKind]) 
 
 # The CI connector's writes (rule 9), allowed by its own settings, not by a platform adapter.
 CI_WRITES = frozenset({ActionKind.CANCEL_BUILD, ActionKind.PROPOSE_CI_CONFIG})
+# Every connector write: the CI connector's, and rule 6's hold lifts on PR labels.
+CONNECTOR_WRITES = CI_WRITES | {ActionKind.LIFT_HOLD}
+
+
+def _no_hold_lifts(settings: Settings) -> str:
+    github = settings.github if settings.github is not None and settings.github.enabled else None
+    what = "Kelpie lifts no holds"
+    if github is not None and github.pulls is not None and github.pulls.enabled:
+        return f"{what}: [connectors.github.pulls] allow_lift_holds is off"
+    return f"{what}: no connector owns them ([connectors.github.pulls] allow_lift_holds)"
 
 
 def _no_ci_writes(settings: Settings) -> str:
