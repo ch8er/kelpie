@@ -50,6 +50,7 @@ from datetime import timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
+from kelpie.core.loopback import is_loopback as core_is_loopback
 from kelpie.core.serde import parse_duration
 
 log = logging.getLogger(__name__)
@@ -145,20 +146,16 @@ def _ip_literal(name: str) -> bool:
 
 
 def is_loopback(host: str) -> bool:
-    """Whether a bind address is loopback: ``localhost`` or a loopback IP literal."""
+    """Whether a bind address is loopback: ``localhost`` or a loopback IP literal,
+    IPv4-mapped ones included (``::ffff:127.0.0.1``), once normalized (spaces, case,
+    brackets, a trailing dot). The check itself is :func:`kelpie.core.loopback.is_loopback`."""
     name = _bare(host.strip().lower())
     return name == "localhost" or _loopback_ip(name)
 
 
 def _loopback_ip(name: str) -> bool:
     """A loopback IP literal, IPv4-mapped ones included (``::ffff:127.0.0.1``)."""
-    try:
-        ip = ipaddress.ip_address(name)
-    except ValueError:
-        return False
-    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
-        return ip.ipv4_mapped.is_loopback
-    return ip.is_loopback
+    return core_is_loopback(name, names=False, mapped=True, brackets=False)
 
 
 def host_allowed(header: str, bind: str, names: Iterable[str] = ()) -> bool:

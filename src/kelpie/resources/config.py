@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import ipaddress
 import os
 import re
 from collections.abc import Mapping
@@ -11,6 +10,7 @@ from datetime import timedelta
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
+from kelpie.core.loopback import is_loopback
 from kelpie.core.serde import parse_duration
 from kelpie.resources.prometheus import (
     DEFAULT_GROWTH_SUSTAIN,
@@ -136,12 +136,7 @@ class ResourceSettings:
 
 
 def _loopback(host: str) -> bool:
-    if host.strip().lower() == "localhost":
-        return True
-    try:
-        return ipaddress.ip_address(host.strip("[]")).is_loopback
-    except ValueError:
-        return False
+    return is_loopback(host)  # kelpie.core.loopback: the same check as traces' and listeners'
 
 
 def load_resources(section: Any) -> ResourceSettings:
