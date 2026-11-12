@@ -542,3 +542,16 @@ def test_an_operator_the_farm_knows_as_a_person_is_skipped() -> None:
         problems=(problem(),),
     )
     assert list(Delegation(POLICY).evaluate(snap)) == []
+
+
+def test_a_person_operator_is_matched_whatever_its_case() -> None:
+    from kelpie.core.model import Owner, OwnerKind
+
+    upper = replace(POLICY, delegate_to={"hermes": "OPS-1"})
+    snap = Snapshot(
+        now=NOW,
+        tasks=(task(),),
+        owners=(Owner("ops-1", "ceo", OwnerKind.HUMAN),),
+        problems=(problem(),),
+    )
+    assert list(Delegation(upper).evaluate(snap)) == []

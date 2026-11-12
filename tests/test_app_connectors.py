@@ -446,14 +446,14 @@ def test_a_person_cannot_be_the_operator(tmp_path: Path, monkeypatch: pytest.Mon
     from kelpie.app import ConfigError
 
     monkeypatch.setenv("GITHUB_TOKEN", TOKEN)
-    for who in ("alice", "user", "kelpie"):
+    for who in ("alice", "user", "kelpie", " Alice ", "none", "Bad Name"):
         text = CONFIG + (
             f'[adapters.hermes]\ndb_path = "{tmp_path / "kanban.db"}"\nspool = false\n'
             'human_owners = ["alice"]\n'
             '[engine.rules.delegation]\nclasses = { orphan_status = "agent" }\n'
             f'delegate_to = {{ hermes = "{who}" }}\n'
         )
-        with pytest.raises(ConfigError, match="an operator is an agent profile"):
+        with pytest.raises(ConfigError, match=r"agent profile|profile name"):
             build_app(load_settings(write(tmp_path, text)))
 
 

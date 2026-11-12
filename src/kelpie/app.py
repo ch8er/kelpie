@@ -2506,9 +2506,16 @@ def _check_operators(settings: Settings, policy: Policy | None) -> None:
     could only be refused at act time, after paging someone."""
     if policy is None or settings.hermes is None:
         return
+    from kelpie.adapters.hermes.adapter import _PROFILE as HERMES_PROFILE
+    from kelpie.adapters.hermes.adapter import CLI_USER, UNASSIGN_WORDS
+
     hermes = settings.hermes
-    people = {h.casefold() for h in hermes.human_owners} | {hermes.author.casefold(), "user"}
-    if bad := sorted({o for o in policy.delegate_to.values() if o.casefold() in people}):
+    people = {h.casefold() for h in hermes.human_owners} | {hermes.author.casefold(), CLI_USER}
+    boards = {"hermes", *(b.name for b in hermes.boards)}
+    names = {o.strip().casefold() for b, o in policy.delegate_to.items() if b in boards}
+    if bad := sorted(n for n in names if not HERMES_PROFILE.match(n) or n in UNASSIGN_WORDS):
+        raise ConfigError(f"[engine.rules.delegation] delegate_to {bad}: not Hermes profile names")
+    if bad := sorted(names & people):
         raise ConfigError(
             f"[engine.rules.delegation] delegate_to {bad}: an operator is an agent profile, "
             "not a human owner, Kelpie or Hermes' default CLI author (user)"

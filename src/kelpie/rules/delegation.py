@@ -46,6 +46,7 @@ from kelpie.core.delegation import (
     Policy,
     card_for,
     incident_of,
+    operator_ids,
     policy_from_config,
     why_not,
 )
@@ -105,8 +106,8 @@ class Delegation:
                 continue
             operator = policy.operator_for(task)
             assert operator is not None  # why_not checked it
-            known = snapshot.owner(operator)
-            if known is not None and known.kind is OwnerKind.HUMAN:
+            ids = operator_ids(task.source or "", operator)
+            if any(o.kind is OwnerKind.HUMAN and o.id.casefold() in ids for o in snapshot.owners):
                 continue  # the configured operator is a person on this farm
             key = f"{problem.id}:{int(problem.opened_at.timestamp())}:{attempt}"
             card = card_for(problem, task, operator, attempt, f"kelpie-{key}")

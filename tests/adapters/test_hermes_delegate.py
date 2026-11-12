@@ -216,5 +216,28 @@ def test_output_without_an_id_finds_the_card_by_its_key(
 def test_a_forged_or_quoted_marker_is_not_a_card(board: Board, cli: tuple[str, Path]) -> None:
     board.task("t_f1", "ready", NOW, assignee="dev-2", body="kelpie-delegation: k-1")
     board.task("t_f2", "ready", NOW, assignee="ops-1", body="> kelpie-delegation: k-1")
+    board.task("t_f3", "ready", NOW, assignee="ops-1", body="kelpie-delegation: k-1")
+    board.update("t_f3", created_by="dev-2")
     card = make(board, cli[0]).delegate("t1", "ops-1", "T", BODY, "k-1")
-    assert card not in ("t_f1", "t_f2")
+    assert card not in ("t_f1", "t_f2", "t_f3")
+
+
+def test_a_key_the_cleaning_rewrites_is_still_found(
+    board: Board, cli: tuple[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import kelpie.adapters.hermes.adapter as adapter_module
+    from kelpie.adapters.hermes.stop import HermesCliError
+
+    real = adapter_module.run_kanban
+
+    def timed_out(*args: object, **kw: object) -> str:
+        real(*args, **kw)  # type: ignore[arg-type]
+        raise HermesCliError("timed out")
+
+    monkeypatch.setattr(adapter_module, "run_kanban", timed_out)
+    key = "kelpie-wait_condition:t1:2026:1"
+    body = f"Card\n\nkelpie-delegation: {key}"
+    a = make(board, cli[0])
+    first = a.delegate("t1", "ops-1", "T", body, key)
+    assert a.delegate("t1", "ops-1", "T", body, key) == first
+    assert len(cards(board)) == 1

@@ -137,6 +137,7 @@ from kelpie.adapters.hermes.park import (
     AUTHOR,
     DEFAULT_WAIT_KEY,
     assign_args,
+    clean_text,
     comment_args,
     create_args,
     decode_wait,
@@ -2175,18 +2176,27 @@ class HermesAdapter:
 
     def _card_with(self, key: str, profile: str) -> str | None:
         """The card on this board made for ``key``: a task assigned to ``profile`` whose body
-        has the line ``kelpie-delegation: <key>`` (not quoted), the newest first."""
-        line = f"{CARD_MARKER}{key}"
-        with self._connect() as conn:
-            rows = conn.execute(
-                "SELECT id, body, assignee FROM tasks WHERE instr(body, ?) > 0"
-                " ORDER BY created_at DESC, id DESC",
-                (line,),
-            ).fetchall()
+        has the line ``kelpie-delegation: <key>`` (not quoted) as Kelpie wrote it (through
+        :func:`create_args`' cleaning), created by Kelpie's ``author`` where the board
+        records who created a task; the newest first."""
+        line = clean_text(f"{CARD_MARKER}{key}")
+        try:
+            with self._connect() as conn:
+                rows = conn.execute(
+                    "SELECT * FROM tasks WHERE instr(body, ?) > 0"
+                    " ORDER BY created_at DESC, id DESC",
+                    (line,),
+                ).fetchall()
+        except sqlite3.Error as exc:
+            raise HermesError(f"cannot look for the card of {key}: {exc}") from exc
         for row in rows:
             assignee = str(row["assignee"] or "").strip().casefold()
-            lines = str(row["body"] or "").splitlines()
-            if assignee == profile and line in lines:
+            raw = row["body"]
+            body = raw.decode("utf-8", errors="replace") if isinstance(raw, bytes) else raw
+            creator = _col(row, "created_by")
+            if creator and str(creator).strip().casefold() != self.author.casefold():
+                continue  # made by someone else: not Kelpie's card
+            if assignee == profile and line in str(body or "").splitlines():
                 return str(row["id"])
         return None
 

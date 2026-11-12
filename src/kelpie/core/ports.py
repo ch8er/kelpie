@@ -180,11 +180,12 @@ class SupportsDelegate(Protocol):
 
     ``task_id`` is the task the problem is about (its board is where the card goes);
     ``operator`` the profile to assign it to; ``title`` and ``body`` the card's text, which
-    already quotes other agents' text as data; ``key`` an idempotency key (a retried
-    create returns the card made before, never a second one). Returns the new card's task
-    id on the board, in the same namespace as :attr:`Task.id`. Raises
-    :class:`UnsupportedAction` before any side effect when the operator is no agent of the
-    board."""
+    already quotes other agents' text as data; ``key`` an idempotency key: an adapter
+    returns the card it made for that key before rather than make a second one, as far as
+    it can tell. Returns the card's task id on the board, in the same namespace as
+    :attr:`Task.id`. Raises :class:`UnsupportedAction` before any side effect when the
+    operator is not a valid agent name, or a person or Kelpie itself (whether the profile
+    exists on the board is not checked)."""
 
     def delegate(self, task_id: str, operator: str, title: str, body: str, key: str) -> str: ...
 
