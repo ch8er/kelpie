@@ -189,7 +189,7 @@ is accepted and ignored with a warning. Rules run in the order below.
 | – | `return_causes` | P1 | implemented | `alert`, `comment` | adapter `comment` |
 | – | `output_offenders` | P1 | implemented | `comment`, `alert` | adapter `comment` (Hermes: `hermes kanban comment`) |
 | – | `instruction_bloat` | P1 | implemented | `alert` | alert channel |
-| – | `delegation` | P1 | implemented | `delegate` | an adapter that creates cards (none yet) |
+| – | `delegation` | P1 | implemented | `delegate` | adapter with `SupportsDelegate` (Hermes: `hermes kanban create`); not with `[hub]` yet |
 | – | `unanswered_asks` | P1 | implemented | `alert` | alert channel |
 
 Several rules share these terms:
@@ -867,6 +867,13 @@ clears); Kelpie verifies the fix by that rule's own condition, not by the agent'
 `delegate_to` names an operator for the task's board. It needs a database (`[storage]
 path`, not `":memory:"`): the guards read back what the rule did from the ledger, and the
 problems from the alert states. If that read fails, nothing is delegated that tick.
+Not with `[hub]` yet (refused at startup). On Hermes a card is `hermes kanban create
+<title> --body ... --assignee <operator> --idempotency-key ... --json` on the task's board.
+The operator is a profile name that is not a person or Kelpie: an operator in
+`human_owners`, Kelpie's `author` or Hermes' default CLI author `user` is refused at
+startup, and one the farm knows as a person is skipped. With several Hermes boards
+(`[[adapters.hermes.boards]]`), a `delegate_to` key may name a board; it wins over the
+adapter name.
 
 What is delegated: a problem whose kind is listed as `agent`, with severity `warning`,
 reported within the last 15 minutes and announced in suggest or act mode, on a task whose
@@ -890,7 +897,7 @@ delegate_to = { hermes = "ops-1" }   # board (a task's source) -> operator profi
 | Key | Default | Allowed | Meaning |
 | --- | --- | --- | --- |
 | `classes` | `{}` | kind = `agent` \| `human` \| `kelpie` | Who may fix the problems of a rule, or of one kind of them (`<rule>.<kind>`). A kind not listed is `human`; a rule that is not planned is refused. |
-| `delegate_to` | `{}` | board = profile | The operator agent of each board: the adapter name (`hermes`), or `<agent>/<adapter>` on a hub (the operator is then `<agent>:<profile>` on the board). A board not listed never delegates. |
+| `delegate_to` | `{}` | board = profile | The operator agent of each board: a named Hermes board, the adapter name (`hermes`), or `<agent>/<adapter>` on a hub (the operator is then `<agent>:<profile>` on the board). A board not listed never delegates. |
 | `max_attempts` | `2` | 1 to 2 | Cards per incident (a task, or the problem when it has none) within `cooldown`; then the person. |
 | `same_incident` | `"1d"` | duration, > 0 | A card whose fix was verified closes its incident only once the fix held this long: the problem back sooner is another attempt of the same incident. |
 | `cooldown` | `"7d"` | duration, > 0, at most 30d | Cards counted for `max_attempts`, and no new card for an incident given back to the person, within this. The server reads back twice the longest of `cooldown` and `same_incident` (a problem opened before that is not delegated), and `[storage] retention` must cover it. |

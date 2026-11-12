@@ -423,8 +423,9 @@ def test_status_shows_spool_age(tmp_path: Path) -> None:
 
 def test_act_allow_list_matches_what_hermes_carries_out() -> None:
     """Rules allowed to act on Hermes emit only what the adapter carries out (stop, wait,
-    wake of a parked task, comment, unblock, reassign, a local WIP commit) and alerts, plus
-    orphan_status's close, which becomes an alert at runtime (a gap, not a refusal)."""
+    wake of a parked task, comment, unblock, reassign, a local WIP commit, a delegation
+    card) and alerts, plus orphan_status's close, which becomes an alert at runtime (a gap,
+    not a refusal)."""
     import importlib
 
     from kelpie.app import HERMES_ACT_RULES
@@ -432,9 +433,11 @@ def test_act_allow_list_matches_what_hermes_carries_out() -> None:
     carried_out = {
         *("ALERT", "ESCALATE", "STOP", "WAIT", "WAKE", "COMMENT", "UNBLOCK", "REASSIGN"),
         "WIP_COMMIT",
+        "DELEGATE",
     }
     assert {
         "checkpoints",
+        "delegation",
         "loop_breaker",
         "wait_condition",
         "conflict_warning",

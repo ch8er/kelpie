@@ -174,6 +174,22 @@ class SupportsClose(Protocol):
     def close(self, task_id: str, reason: str) -> None: ...
 
 
+@runtime_checkable
+class SupportsDelegate(Protocol):
+    """Optional capability (#347): put a card on the operator agent's own queue.
+
+    ``task_id`` is the task the problem is about (its board is where the card goes);
+    ``operator`` the profile to assign it to; ``title`` and ``body`` the card's text, which
+    already quotes other agents' text as data; ``key`` an idempotency key: an adapter
+    returns the card it made for that key before rather than make a second one, as far as
+    it can tell. Returns the card's task id on the board, in the same namespace as
+    :attr:`Task.id`. Raises :class:`UnsupportedAction` before any side effect when the
+    operator is not a valid agent name, or a person or Kelpie itself (whether the profile
+    exists on the board is not checked)."""
+
+    def delegate(self, task_id: str, operator: str, title: str, body: str, key: str) -> str: ...
+
+
 def declared_actions(adapter: object) -> frozenset[ActionKind] | None:
     """The action kinds ``adapter`` declares in ``actions``; None when it declares none."""
     actions = getattr(adapter, "actions", None)

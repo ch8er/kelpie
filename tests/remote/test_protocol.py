@@ -245,6 +245,7 @@ def test_adapters_declare_their_kinds() -> None:
         ActionKind.REASSIGN,
         ActionKind.COMMENT,
         ActionKind.WIP_COMMIT,
+        ActionKind.DELEGATE,  # never offered to a hub (not a PLATFORM_ACTIONS kind)
     }
     assert ClaudeCodeAdapter.actions == {ActionKind.STOP}
 

@@ -344,6 +344,30 @@ Both were read from the Hermes sources (`hermes_cli/kanban.py` `_cmd_unblock` an
 `_cmd_assign`, `kanban_db.py` `unblock_task` and `assign_task`) and are tested against the
 simulated Hermes CLI (`kelpie.sim.hermes_cli`); neither has run on a live farm yet.
 
+## Delegation cards
+
+The `delegation` rule (#347, off by default; see `[engine.rules.delegation]` in
+[configuration.md](../../../../docs/configuration.md#delegation)) hands a problem to the
+board's operator agent as a card on its queue: `hermes kanban create <title> --body <text>
+--assignee <operator> --idempotency-key <key> --json`. The title names the rule and the
+task (the task's own title in quotes), and the body holds the facts, the rule's text
+quoted as data (`> ` lines), what counts as fixed, a fixed how-to-handle block and a
+`kelpie-delegation:` line with the key. The key is one per problem, opening and attempt.
+Kelpie does not rely on Hermes honouring `--idempotency-key` (**unverified**): before a
+create, and after one that failed or printed no id, it looks for a task on the board
+assigned to the operator (and created by Kelpie's `author`, where the board records who
+created a task) whose body has that exact `kelpie-delegation:` line, and returns
+it instead of creating another (an agent that forges such a task only keeps the problem
+from being handed on; the person still hears of it). The operator must be a profile name
+that is not a person or Kelpie: not in `human_owners`, not Kelpie's own `author`, not
+Hermes' default CLI author `user` (refused at startup, and by the adapter with
+`UnsupportedAction`). The card's id is read from the `--json` output (`id` or `task_id`,
+also inside `task`, from the last JSON line that has one); output without one, and no card
+found by its key, is an error, and the action is retried with the same key. With several
+boards the card is created on the task's board and its id carries the board's prefix.
+Hermes' `--json` keys are not documented, so this is **unverified** on a live board: run
+it in `suggest` first.
+
 ## Hooks plugin
 
 `plugin.py` in this directory is a self-contained Hermes plugin (standard library only).

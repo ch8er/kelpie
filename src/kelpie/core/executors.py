@@ -15,6 +15,7 @@ from kelpie.core.ports import (
     PlatformAdapter,
     SupportsAnswerCheck,
     SupportsClose,
+    SupportsDelegate,
     SupportsReassign,
     SupportsStop,
     SupportsWait,
@@ -114,6 +115,17 @@ class PlatformExecutor:
                 adapter, SupportsReassign
             ):
                 adapter.reassign(tid, action.params["owner_id"], action.reason)
+            case ActionKind.DELEGATE if isinstance(adapter, SupportsDelegate):
+                card = action.params.get("card")
+                operator = action.params.get("operator")
+                if not isinstance(card, dict) or not isinstance(operator, str):
+                    return False
+                parts = [card.get(k) for k in ("title", "body", "key")]
+                if not all(isinstance(p, str) and p for p in parts):
+                    return False
+                made = adapter.delegate(tid, operator, *parts)
+                # the card's id, for the ledger: delegation reads it back (``card <id>``)
+                return f"card {made} for {operator}"
             case ActionKind.CLOSE if isinstance(adapter, SupportsClose):
                 adapter.close(tid, action.reason)
             case ActionKind.WAIT if isinstance(adapter, SupportsWait):

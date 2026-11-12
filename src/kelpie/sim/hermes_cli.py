@@ -29,6 +29,11 @@ Supported commands (anything else exits 2 and is recorded):
   claimed run; sets the (lowercased) assignee, records an ``assigned`` event. ``none``,
   ``-`` and ``null`` unassign.
 - ``kanban comment [--author A] [--] <task> <text...>``: records the comment.
+- ``kanban create [--body B] [--assignee P] [--idempotency-key K] [--json] [--] <title>``:
+  a new ``ready`` task (``t_`` and a counter), assigned to P (lowercased), with a
+  ``created`` event carrying the key; a key used before prints that task again. Prints
+  ``{"id": ...}`` (Hermes' real ``--json`` keys are not documented; the adapter reads
+  ``id`` or ``task_id``).
 
 A file ``hermes-fail`` next to the board makes every command fail (exit 1), for scenarios
 where Hermes refuses. With a clock file (:func:`install`), times written to the board come
@@ -282,6 +287,51 @@ def _comment(args: Sequence[str]) -> None:
         conn.close()
 
 
+def _create(args: Sequence[str]) -> None:
+    flags = [a for a in args if a != "--json"]
+    found, positional = _options(flags, ("--body", "--assignee", "--idempotency-key"))
+    if len(positional) != 1 or not positional[0].strip():
+        raise Refused("usage: hermes kanban create <title> [--body B] [--assignee P]")
+    key = found.get("--idempotency-key")
+    assignee = (found.get("--assignee") or "").lower() or None
+    conn = _db()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        if key:
+            for row in conn.execute(
+                "SELECT task_id, payload FROM task_events WHERE kind = 'created'"
+            ).fetchall():
+                payload = json.loads(row["payload"] or "{}")
+                if isinstance(payload, dict) and payload.get("idempotency_key") == key:
+                    conn.execute("COMMIT")
+                    print(json.dumps({"id": row["task_id"], "existing": True}))
+                    return
+        count = conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0]
+        task_id = f"t_{count + 1:04x}"
+        while conn.execute("SELECT 1 FROM tasks WHERE id = ?", (task_id,)).fetchone():
+            count += 1
+            task_id = f"t_{count + 1:04x}"
+        now = int(_now())
+        conn.execute(
+            "INSERT INTO tasks (id, title, body, assignee, status, created_at, created_by)"
+            " VALUES (?, ?, ?, ?, 'ready', ?, ?)",
+            (task_id, positional[0], found.get("--body"), assignee, now, _author()),
+        )
+        conn.execute(
+            "INSERT INTO task_events (task_id, kind, payload, created_at)"
+            " VALUES (?, 'created', ?, ?)",
+            (task_id, json.dumps({"idempotency_key": key, "assignee": assignee}), now),
+        )
+        conn.execute("COMMIT")
+    except BaseException:
+        if conn.in_transaction:
+            conn.execute("ROLLBACK")
+        raise
+    finally:
+        conn.close()
+    print(json.dumps({"id": task_id, "status": "ready"}))
+
+
 def run(argv: Sequence[str]) -> int:
     board = os.environ.get(BOARD_ENV)
     if board and (Path(board).parent / FAIL).exists():
@@ -296,6 +346,8 @@ def run(argv: Sequence[str]) -> int:
             _assign(rest)
         case ["kanban", "comment", *rest]:
             _comment(rest)
+        case ["kanban", "create", *rest]:
+            _create(rest)
         case _:
             print(f"hermes: unsupported command: {' '.join(argv)}", file=sys.stderr)
             return 2

@@ -323,8 +323,9 @@ def run_kanban(
     rid: int | None = None,
     environ: Mapping[str, str] | None = None,
     author: str = AUTHOR,
-) -> None:
-    """Run ``hermes kanban <args>``; raise :class:`HermesCliError` unless it exits 0."""
+) -> str:
+    """Run ``hermes kanban <args>`` and return what it printed; raise
+    :class:`HermesCliError` unless it exits 0."""
     exe = shutil.which(cli)
     if exe is None:
         raise HermesCliError(f"Hermes CLI not found: {cli!r} (set [adapters.hermes] cli)")
@@ -352,6 +353,7 @@ def run_kanban(
     if proc.returncode != 0:
         tail = (err or out or "").strip()[-ERROR_TAIL:]
         raise HermesCliError(f"hermes kanban {what} failed (exit {proc.returncode}): {tail}")
+    return out or ""
 
 
 def schedule_args(task_id: str, reason: str) -> list[str]:
@@ -365,6 +367,23 @@ def unblock_args(task_id: str, reason: str) -> list[str]:
 
 def assign_args(task_id: str, profile: str) -> list[str]:
     return ["assign", "--", task_id, profile]
+
+
+MAX_CARD_BODY = 8000  # characters of a delegation card's body
+
+
+def create_args(title: str, body: str, assignee: str, key: str) -> list[str]:
+    """``hermes kanban create`` of a delegation card (#347): assigned to the operator, with an
+    idempotency key (a retried create returns the card made before), machine output."""
+    return [
+        "create",
+        f"--body={clean_text(body, MAX_CARD_BODY) or '(Kelpie: no text)'}",
+        f"--assignee={assignee}",
+        f"--idempotency-key={key}",
+        "--json",
+        "--",
+        clean_text(title) or "Kelpie card",
+    ]
 
 
 def comment_args(task_id: str, body: str, author: str = AUTHOR) -> list[str]:

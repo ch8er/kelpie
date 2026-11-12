@@ -127,6 +127,11 @@ class Policy:
     def operator(self, board: str | None) -> str | None:
         return self.delegate_to.get(board) if board else None
 
+    def operator_for(self, task: Task) -> str | None:
+        """The operator of ``task``'s board: its named board (``Task.board``, one of several
+        a Hermes home has) first, else its adapter (``Task.source``)."""
+        return self.operator(task.board) or self.operator(task.source)
+
 
 def why_not(
     policy: Policy,
@@ -156,7 +161,7 @@ def why_not(
         return "no task on a board"
     if person:
         return "a person's task"
-    operator = policy.operator(task.source)
+    operator = policy.operator_for(task)
     if operator is None:
         return f"no delegate_to for board {task.source or '(none)'}"
     if is_operator(task, task.source or "", operator):
