@@ -645,7 +645,7 @@ provider APIs where available and from trace errors otherwise.
 
 **Acceptance criteria**
 - [x] `quota_reset` conditions evaluated from the provider probes, or a reset time the condition carries (#424)
-- [x] Limit hits from spans counted per provider (from the status probes, #35; from LLM spans refused for a usage or rate limit, per provider, with the concurrency they suggest, `kelpie.core.limits`, #431; ticked in #PR)
+- [x] Limit hits from spans counted per provider (from the status probes, #35; from LLM spans refused for a usage or rate limit, per provider, with the concurrency they suggest, `kelpie.core.limits`, #431; ticked in #449)
 - [x] Credential expiry exposed in the snapshot (`ProviderStatus.expires_at` from the status probe, not a `Resource`; alerted by rule 7; #35)
 - [ ] Provider usage and cost APIs fed to budgets as a spend source: the same criterion as "Spend sources" in "core: budgets and spend" and tracked there (the cost reports are read and reconciled, #204, #205)
 - [x] No provider SDK is required by core
@@ -917,12 +917,12 @@ notes say `kelpie serve` stays on loopback or behind a limiting proxy until M5 i
 **Acceptance criteria**
 - [x] Subprocess calls (Hermes CLI, git): no injection, minimal environment, no token leakage (#275)
 - [x] No SQL built from strings with untrusted data (#275; L1, the read-only URI, fixed in #280)
-- [x] Secrets never reach logs, metrics, `kelpie status`, errors, reports or the LLM section (audited in #275; L6 fixed in #280; L7 and L8, the command-redaction gaps, in #322; what redaction still cannot see, `echo` behind an unknown launcher and a bare secret word with no credential word before it, is documented in privacy.md; ticked in #PR)
+- [x] Secrets never reach logs, metrics, `kelpie status`, errors, reports or the LLM section (audited in #275; L6 fixed in #280; L7 and L8, the command-redaction gaps, in #322; what redaction still cannot see, `echo` behind an unknown launcher and a bare secret word with no credential word before it, is documented in privacy.md; ticked in #449)
 - [x] Outbound HTTP: no redirects with credentials, TLS verified, response size limits (#275; M3 and L12 fixed in #279; M4, the Linear client's deadline, in #324)
-- [x] OTLP and `/metrics` endpoints: auth, bind address, body limits (audited in #275; M2 fixed in #279, M5 in #309; M1 by per-agent traces tokens, #302; L10 in #329, L11 in #330; ticked in #PR)
+- [x] OTLP and `/metrics` endpoints: auth, bind address, body limits (audited in #275; M2 fixed in #279, M5 in #309; M1 by per-agent traces tokens, #302; L10 in #329, L11 in #330; ticked in #449)
 - [x] File paths from config and data: no traversal, safe symlink handling (H1, H2 fixed in #278)
 - [x] Report and LLM root-cause section: prompt injection from agent text, what data leaves the host (#275; L9, no length cap on agent reasons, open)
-- [x] Clear fixes as small PRs (#278, #279, #280, #321, #322, #324, #327, #329, #330); design questions as issues (M1 → #302; L4, L13, L14 → #336; both closed; ticked in #PR)
+- [x] Clear fixes as small PRs (#278, #279, #280, #321, #322, #324, #327, #329, #330); design questions as issues (M1 → #302; L4, L13, L14 → #336; both closed; ticked in #449)
 - [x] `docs/security.md`: threat model, what Kelpie trusts, what it never stores (in place; updated by the audit in #279)
 
 ### deploy: `kelpie demo` — see Kelpie work without a farm
@@ -942,10 +942,10 @@ labels: P0, week-3, area:deploy
 Publish the open core: first public pre-release on PyPI and a container image.
 
 **Acceptance criteria**
-- [x] Release workflow builds and publishes with trusted publishing (workflow and `docs/release.md`, #105, #260; v0.1.0a1, a2 and a3 tagged and published by it; ticked in #PR)
-- [x] `pip install kelpie-sre` provides a working `kelpie` CLI (0.1.0a1–a3 on PyPI; a pre-release, so `pip install --pre kelpie-sre`; checked in a fresh venv on 2026-11-12, ticked in #PR)
-- [x] Container image published and referenced by docker-compose.yml (the release workflow pushes it to GHCR, its runs for a1–a3 succeeded; compose takes it through `KELPIE_IMAGE`; ticked in #PR)
-- [x] Changelog and release notes (`CHANGELOG.md` `[0.1.0a1]` with "Before you install" as the release notes, #306; M5 fixed in #309; the same for a2 and a3, #349, #355; ticked in #PR)
+- [x] Release workflow builds and publishes with trusted publishing (workflow and `docs/release.md`, #105, #260; v0.1.0a1, a2 and a3 tagged and published by it; ticked in #449)
+- [x] `pip install kelpie-sre` provides a working `kelpie` CLI (0.1.0a1–a3 on PyPI; a pre-release, so `pip install --pre kelpie-sre`; checked in a fresh venv on 2026-11-12, ticked in #449)
+- [x] Container image published and referenced by docker-compose.yml (the release workflow pushes it to GHCR, its runs for a1–a3 succeeded; compose takes it through `KELPIE_IMAGE`; ticked in #449)
+- [x] Changelog and release notes (`CHANGELOG.md` `[0.1.0a1]` with "Before you install" as the release notes, #306; M5 fixed in #309; the same for a2 and a3, #349, #355; ticked in #449)
 
 ### project: 10 conversations with farm owners
 labels: P1, week-3, area:project
