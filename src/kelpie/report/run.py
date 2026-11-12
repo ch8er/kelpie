@@ -18,7 +18,7 @@ from typing import Protocol
 from kelpie.core.budgets import PriceTable
 from kelpie.core.config import Mode
 from kelpie.core.files import write_private
-from kelpie.core.model import HostSleep, Reconciliation, Snapshot, Snooze, source_agent
+from kelpie.core.model import HostSleep, Reconciliation, Snapshot, Snooze, Span, source_agent
 from kelpie.core.spend import SpendConfig
 from kelpie.core.storage import ActionDay, TokenRow
 from kelpie.core.transitions import StatusChange
@@ -127,8 +127,12 @@ def load_inputs(sources: ReportSources, day: date, board: Snapshot) -> ReportInp
     pairable = None
     if sources.token_scopes:
         guard = ScopeGuard(sources.token_scopes)
-        guard.refresh(board)
-        pairable = guard.may_fold
+        guard.refresh(board, attribution)
+
+        def pairable(otlp: Span, hook: Span) -> bool:
+            # no scope check follows: a run that left the board still takes its own calls
+            return guard.may_fold(otlp, hook, strict=False)
+
     merged = merge_hook_spans(
         [*spans, *(s for s in board.spans if history <= (s.end or s.start) < end)], pairable
     ).spans

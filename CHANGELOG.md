@@ -227,7 +227,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 - Hook fold across ingest tokens (#374): an OTLP tool span takes the hook span of the same
   call only when its scoped ingest token may report the folded span (the hook's session and
-  task; a token no longer configured takes none). Another token's span carrying a run's
+  task; a token no longer configured takes none), and in the live loop never the call of a
+  session the board does not place yet (the board is read before the fold); the daily
+  report and the tool-output scan fold alike. Another token's span carrying a run's
   call ids could fold the run's verified hook calls into a span the scope check then
   deleted, so rule 10 missed the run's loop. Rule 10's logic and thresholds are unchanged.
 - The Docker image's base images are pinned by digest without hand-copied values: the new

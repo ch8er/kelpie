@@ -215,3 +215,28 @@ def test_the_report_folds_with_the_same_pairing() -> None:
     assert {s.session_id for s in inputs.spans if s.attributes.get(TOKEN_ATTRIBUTE)} == {"S-101"}
     unscoped = load_inputs(replace(sources, token_scopes={}), NOW.date(), board_)
     assert sum(1 for s in unscoped.spans if s.session_id == "S-102") == 10  # folded as before
+
+
+def test_the_report_folds_a_finished_runs_calls_into_its_run() -> None:
+    """A scoped farm whose exporter names its chat, not the platform's run: the report folds
+    a run's calls into the run even once it left the board (no check follows there)."""
+    from kelpie.core.prices import PriceTable
+    from kelpie.report.config import ReportSettings
+    from kelpie.report.run import ReportSources, load_inputs
+    from kelpie.traces.outputs import OutputSettings
+
+    hooks = tuple(hook(n) for n in range(5))
+    own = tuple(otlp(n, "chat-xyz", "dev-2") for n in range(5))
+    sources = ReportSources(
+        db_path=None,
+        report=ReportSettings(),
+        prices=PriceTable(),
+        outputs=OutputSettings(),
+        estimated=False,
+        modes={},
+        token_scopes=SCOPES,
+    )
+    gone = replace(live_board(), sessions=(), spans=hooks + own)  # S-102 left the board
+    inputs = load_inputs(sources, NOW.date(), gone)
+    tools = [s for s in inputs.spans if s.kind is SpanKind.TOOL]
+    assert len(tools) == 5 and {s.session_id for s in tools} == {"S-102"}

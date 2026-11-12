@@ -365,7 +365,7 @@ class ScopeGuard:
         with self._lock:
             return self._bound.get((kind, value))
 
-    def may_fold(self, otlp: Span, hook: Span) -> bool:
+    def may_fold(self, otlp: Span, hook: Span, strict: bool = True) -> bool:
         """Whether an OTLP tool span may take a hook span of the same call
         (:func:`kelpie.traces.hooks.merge_hook_spans`, #374): only when its ingest token
         may report the folded span (the hook's session and task). A span without a token
@@ -379,8 +379,15 @@ class ScopeGuard:
             return False
         folded = fold(otlp, hook)
         sid = folded.session_id
-        if sid is not None and sid != otlp.session_id and self.index.session(sid) is None:
-            # a session the board does not place (yet): no other session's call is taken
+        if (
+            strict
+            and sid is not None
+            and sid != otlp.session_id
+            and self.index.session(sid) is None
+        ):
+            # a session the board does not place (yet): no other session's call is taken, as
+            # the check after the fold could not tell; ``strict=False`` where no check
+            # follows (the daily report: runs left the board since)
             return False
         return self.judge(token, folded)[0] is not Verdict.OUT
 

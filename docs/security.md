@@ -376,7 +376,10 @@ way the multi-host hub limits each `kelpie agent` to its own host:
   its own session, and the run's verified hook calls stay rule 10's evidence instead of
   being folded into a span the check deletes. The board is read before the fold, and a
   span never takes the call of another session the board does not place yet; the daily
-  report and the largest-tool-outputs scan fold with the same rule.
+  report and the largest-tool-outputs scan fold with the same rule (the report judges
+  against the board and the sessions the store remembers, and lets a run that left the
+  board take its own calls). A span of a token no longer configured takes no hook call: it
+  stays next to it, so the report may count that call twice; better than losing it.
 - **What a forger can still do.** Claim a session id before its agent starts (Hermes run ids
   are sequential) and report spans for it until the board shows the run; from then on they
   are deleted, and the agent's own token reports for it. Hold up to 10,000 such ids used
@@ -396,9 +399,9 @@ way the multi-host hub limits each `kelpie agent` to its own host:
   agents of one role do not trust each other. Requests are forwarded (`[[traces.forward]]`)
   as received, rejected spans included. The largest tool outputs and the daily report fold
   stored OTLP tool calls with hook calls by their call id over the whole day, outside the
-  snapshot the check sees, with the same pairing (#374); the report judges against the
-  board it reads, so a span of a session the board no longer shows takes no other
-  session's call. A removed
+  snapshot the check sees, with the same pairing (#374): a span whose token may not
+  report a session the board (or the store's memory of sessions) places takes none of its
+  calls. A removed
   (or renamed) entry covers nothing: its spans stay while the board does not show their
   session or task, and are deleted once it does, so removing a misbehaving agent's token
   also removes what it claimed in advance. The shared token, when set, still
