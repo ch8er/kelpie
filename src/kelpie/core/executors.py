@@ -16,6 +16,7 @@ from kelpie.core.ports import (
     SupportsAnswerCheck,
     SupportsClose,
     SupportsDelegate,
+    SupportsLiftHold,
     SupportsReassign,
     SupportsStop,
     SupportsWait,
@@ -83,6 +84,8 @@ class PlatformExecutor:
             if detail is ActionResult.DONE or detail is None:  # (a StrEnum is a str too)
                 return True
             return detail if isinstance(detail, str) and detail.strip() else True
+        if action.kind is ActionKind.LIFT_HOLD:  # a hold, not a task: its held tasks
+            return self._lift_hold(action)
         tid = action.task_id
         if tid is None:
             return False
@@ -136,6 +139,24 @@ class PlatformExecutor:
             case _:
                 return False
         return True
+
+    def _lift_hold(self, action: Action) -> bool | str:
+        adapter = self.adapter
+        hold, kind = action.params.get("hold"), action.params.get("hold_kind", "label")
+        held = action.params.get("held_tasks")
+        if (
+            not isinstance(adapter, SupportsLiftHold)
+            or not isinstance(hold, str)
+            or not hold
+            or not isinstance(kind, str)
+            or not isinstance(held, list)
+        ):
+            return False
+        ids = [t for t in held if isinstance(t, str) and t]
+        if not ids:
+            return False
+        done = adapter.lift_hold(hold, kind, ids, action.reason)
+        return done if isinstance(done, str) and done.strip() else True
 
 
 @dataclass(slots=True)

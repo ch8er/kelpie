@@ -21,6 +21,7 @@ by one of three things the tracker records, so an :class:`Agent` names its own:
 closed as completed                    ``done``
 closed as not planned or duplicate     ``cancelled``
 open, a blocked label                  ``blocked`` (since the label was put on)
+open, a pause label or pause state     ``blocked`` on a pause (block category ``pause``)
 open, a linked ready pull request      ``review`` (since the pull request was opened)
 open, a linked draft pull request, or  ``in_progress`` (since the agent was started:
 an agent or person holds it            assigned or labelled, else the pull request)
@@ -42,7 +43,11 @@ GitHub's own link, which closes the issue on merge. Plain mentions never link (i
 
 **Owner**, first match: an agent assigned, an agent's label, the agent whose account opened
 the linked pull request, a person assigned, the person (or bot) who opened the linked pull
-request (human owners). Issues blocked by open issues (GitHub's issue dependencies) depend
+request (human owners). **Pauses and flags**: a pause label (``pause_labels``) or, on a
+tracker with workflow states, a pause state (``pause_states``) is a block of category
+``pause`` (rule 6's pause holds); flags the tracker sets apart from labels (GitHub: a
+locked conversation, ``locked``) are the task's ``flags`` (rule 6's flag holds). Issues
+blocked by open issues (GitHub's issue dependencies) depend
 on them. A parent keeps its sub-issues as subtasks only when every open one is a task here
 (one missing would read as finished).
 """
@@ -61,6 +66,8 @@ from kelpie.core.model import Block, Dependency, Owner, OwnerKind, Status, Task
 DEFAULT_ROLE = "issue-agent"
 MAX_BODY = 8000  # characters of an issue's description kept on the task
 DEFAULT_BLOCKED_LABELS = ("blocked",)
+PAUSE = "pause"  # the block category of a pause label or state (rule 6's pause holds)
+LOCKED = "locked"  # the flag of a GitHub issue whose conversation is locked
 CANCELLED_REASONS = frozenset({"not_planned", "duplicate"})
 
 
@@ -130,6 +137,10 @@ class Board:
     blocked_labels: tuple[str, ...] = DEFAULT_BLOCKED_LABELS
     ready_labels: tuple[str, ...] = ()  # an issue nobody holds with one is ready
     ready_states: tuple[str, ...] = ()  # so is one in one of these workflow states (Linear)
+    # An open issue with one of these labels, or in one of these workflow states (Linear),
+    # is blocked on a pause (``Block.category`` ``pause``), unless a blocked label holds it.
+    pause_labels: tuple[str, ...] = ()
+    pause_states: tuple[str, ...] = ()
     role: str = DEFAULT_ROLE  # the role of tasks no agent holds
     # Names of the agents Kelpie may hand its tasks to; empty: all of them. An agent's
     # account is that agent on every board.
@@ -177,6 +188,7 @@ class Item:
     # collaborator; a stranger's issue text is not a person's criteria).
     author_trusted: bool = False
     labels: tuple[str, ...] = ()
+    flags: tuple[str, ...] = ()  # what the tracker flags apart from labels (``locked``)
     assignees: tuple[str, ...] = ()
     events: tuple[Event, ...] | None = None
     blocked_by: tuple[str, ...] = ()  # ids of the open issues it is blocked by
@@ -276,6 +288,16 @@ def _status(
         put_on = [e.at for e in item.events or () if e.kind == "labeled" and _same(e, blocked)]
         since = max(put_on, default=None) or fallback
         return Status.BLOCKED, since, Block(f"label '{blocked}'", since), f"open, {blocked}"
+    if (paused := _first_label(item, board.pause_labels)) is not None:
+        put_on = [e.at for e in item.events or () if e.kind == "labeled" and _same(e, paused)]
+        since = max(put_on, default=None) or fallback
+        block = Block(f"paused: label '{paused}'", since, category=PAUSE)
+        return Status.BLOCKED, since, block, f"open, {paused}"
+    if item.state is not None and item.state.casefold() in {
+        s.casefold() for s in board.pause_states
+    }:  # when the state was set is not read: the earlier of the last change and first seen
+        block = Block(f"paused: state '{item.state}'", fallback, category=PAUSE)
+        return Status.BLOCKED, fallback, block, f"open, {item.state}"
     pull = item.pulls[0] if item.pulls else None
     if pull is not None and not pull.draft:
         since = pull.created_at or fallback
@@ -341,6 +363,7 @@ def map_items(
                 block=block,
                 repo=item.board,
                 labels=item.labels,
+                flags=item.flags,
                 body=item.body[:MAX_BODY] or None,
                 branch=pull.branch if pull is not None else None,
                 assignee=item.assignees[0] if item.assignees else None,

@@ -117,6 +117,7 @@ def test_declares_its_actions_and_can_reassign(gh: FakeGitHub, pacing: Pacing) -
         ActionKind.UNBLOCK,
         ActionKind.COMMENT,
         ActionKind.REASSIGN,
+        ActionKind.LIFT_HOLD,  # pause labels, with allow_lift_holds (test_issues_holds.py)
     }
 
 

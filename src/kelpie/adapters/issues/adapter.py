@@ -19,6 +19,11 @@ quoted inert (:func:`note`):
   issue: refused, a human decides.
 - ``reassign``: the new agent is started first, then the one holding it taken off
   (unassigned, its label removed); only an agent of this adapter that the board allows.
+- ``lift_hold`` (``lift_holds``, off by default): rule 6's pause hold past its expiry, named
+  with this adapter as its ``executor`` and named after one of the board's pause labels:
+  that label comes off each held task of this adapter that still carries it. A pause state
+  (Linear), a flag or a label hold is left to a person (which state, or whether to unlock,
+  is not Kelpie's call).
 
 What cannot be done (an agent with no way to start it, a closed issue to reassign) is refused
 before anything changes (``UnsupportedAction``), so a human is alerted instead.
@@ -48,12 +53,15 @@ from kelpie.core.actions import ActionKind
 from kelpie.core.actlock import ActLock
 from kelpie.core.alerts import format_age
 from kelpie.core.model import Snapshot, Task
-from kelpie.core.ports import Deferred, PlatformEvent, UnsupportedAction
+from kelpie.core.ports import Deferred, NothingToDo, PlatformEvent, UnsupportedAction
 
 log = logging.getLogger(__name__)
 
 SIGNATURE = "\n\n— Kelpie"
 RESERVE = 6  # writes held for a requeue or reassign: reopen, off (2), on (2), note
+MAX_LIFT = 50  # held tasks one lift_hold considers (rule 6 names at most this many)
+MAX_LIFTS = 4  # tasks one lift_hold changes (a label and a note each, inside a tick's cap)
+PAUSE_KIND = "pause"  # the only hold kind an issue tracker lifts (rule 6's hold kinds)
 WAIT_KINDS = frozenset({"backoff", "rate_limited", "stale", "budget"})
 MAX_QUOTE = 2000  # characters of a rule's reason quoted in a comment
 MENTION_TEXT = "please pick this issue up again (Kelpie restarts its work)."
@@ -110,10 +118,18 @@ class IssuesAdapter:
     name: str = "github-issues"
     where: str = ""  # for kelpie status: the tracker's address
     clock: Callable[[], datetime] = field(default=lambda: datetime.now(UTC), repr=False)
+    # Rule 6 may take pause labels off (``lift_hold``, act mode only): off by default.
+    lift_holds: bool = False
     # Not wake: issue tasks are never waiting (Kelpie parks none), and restarting an agent
     # is not resuming a parked task.
     actions: ClassVar[frozenset[ActionKind]] = frozenset(
-        {ActionKind.REQUEUE, ActionKind.UNBLOCK, ActionKind.COMMENT, ActionKind.REASSIGN}
+        {
+            ActionKind.REQUEUE,
+            ActionKind.UNBLOCK,
+            ActionKind.COMMENT,
+            ActionKind.REASSIGN,
+            ActionKind.LIFT_HOLD,
+        }
     )
     # Kinds no issue task draws: no sessions to stop, no worktrees to commit, no parked task
     # to wake.
@@ -125,6 +141,7 @@ class IssuesAdapter:
     # issue does not show them (assignees and labels do show the others).
     _owners: dict[str, str] = field(default_factory=dict, init=False, repr=False)
     _known: set[str] = field(default_factory=set, init=False, repr=False)  # last read's tasks
+    _board_of: dict[str, str] = field(default_factory=dict, init=False, repr=False)
     _problem: str | None = field(default=None, init=False, repr=False)
     # Per issue: how it looked (open, labels, assignees, linked pull requests) and since when.
     _seen: dict[str, tuple[object, datetime]] = field(default_factory=dict, init=False, repr=False)
@@ -189,6 +206,7 @@ class IssuesAdapter:
             if t.owner_id in self.agents and not self.agents[t.owner_id].holds(by_id[t.id])
         }
         self._known = {t.id for t in mapped.tasks}
+        self._board_of = {t.id: by_id[t.id].board for t in mapped.tasks}
         return Snapshot(
             now=now,
             tasks=mapped.tasks,
@@ -206,6 +224,7 @@ class IssuesAdapter:
                 frozenset(label.casefold() for label in item.labels),
                 frozenset(login.casefold() for login in item.assignees),
                 tuple((p.number, p.draft) for p in item.pulls),
+                (item.state or "").casefold(),  # a pause state's age starts when it is seen
             )
             kept = self._seen.get(item.id)
             # First seen: no later than its last change, so a comment cannot move it on.
@@ -315,6 +334,88 @@ class IssuesAdapter:
     ) -> None:
         raise UnsupportedAction("issue agents commit on their own machines; Kelpie cannot")
 
+    def lift_hold(self, hold: str, kind: str, task_ids: Sequence[str], reason: str) -> str:
+        """Take the hold's own pause label off its held tasks (``SupportsLiftHold``).
+
+        The hold must be named after one of the board's ``pause_labels`` (``on-hold``): only
+        that label comes off, never another pause someone else put on. Refused before any
+        write (``UnsupportedAction``, a person is told): ``lift_holds`` off, a hold that is
+        not a pause, no held task of this adapter at the last read, or no held task whose
+        board has the hold's name as a pause label (a pause state on Linear: which state
+        comes next is a person's call). Each task is re-read right before its own writes
+        (its label, then a note, held together): one closed, blocked by a blocked label too,
+        or no longer carrying the label is skipped; none lifted and none left is
+        ``NothingToDo``. At most ``MAX_LIFTS`` tasks are lifted per action; the rest, and
+        tasks that cannot be read now, are left to a person (the result says how many). A
+        failure after a lift raises with what was lifted, so the engine retries the rest."""
+        if not self.lift_holds:
+            raise UnsupportedAction(f"allow_lift_holds is off for {self.name}")
+        if kind != PAUSE_KIND:
+            raise UnsupportedAction(
+                f"{self.name} lifts pause holds only; hold {hold!r} is a {kind}"
+            )
+        ours = [t for t in dict.fromkeys(task_ids) if t in self._known][:MAX_LIFT]
+        if not ours:
+            raise UnsupportedAction(f"hold {hold!r} holds no task of {self.name}")
+        want = hold.casefold()
+        boards = [self._boards.get(self._board_of.get(t, "")) for t in ours]
+        if not any(
+            b is not None and want in {x.casefold() for x in b.pause_labels} for b in boards
+        ):
+            raise UnsupportedAction(
+                f"hold {hold!r} is no pause label of {self.name}'s boards: name a pause hold "
+                "after the label it lifts; a person lifts it"
+            )
+        lifted: list[str] = []
+        left = 0
+        for n, task_id in enumerate(ours):
+            if len(lifted) >= MAX_LIFTS:
+                left += len(ours) - n
+                break
+            try:
+                item = self._issue(task_id)
+            except Deferred:  # the tracker asks Kelpie to wait: no more reads or writes now
+                if not lifted:
+                    raise
+                left += len(ours) - n
+                break
+            except (UnsupportedAction, IssuesError) as exc:
+                log.info("issues: hold %r: %s not read: %s", hold, task_id, exc)
+                left += 1
+                continue
+            board = self._board(item)
+            label = next((x for x in item.labels if x.casefold() == want), None)
+            if not item.open or _labelled(item, board.blocked_labels) or label is None:
+                continue  # closed, blocked for another reason, or lifted meanwhile
+            if want not in {x.casefold() for x in board.pause_labels}:
+                left += 1  # on this board the name is no pause label
+                continue
+            try:
+                self.tracker.reserve(2)
+                self.tracker.remove_labels(task_id, [label])
+            except Deferred:
+                if not lifted:
+                    raise
+                left += len(ours) - n
+                break
+            except Exception as exc:
+                if not lifted:
+                    raise
+                done = ", ".join(lifted)
+                raise IssuesError(
+                    f"hold {hold!r}: lifted on {done}, then {task_id} failed: {exc}",
+                    f"hold '{hold}' lifted on {done} only; the rest is tried again",
+                ) from exc
+            lifted.append(task_id)
+            quoted = f"Removed: {label}\n{reason}"
+            self._say(task_id, note(f"Hold '{hold}' lifted: its label came off.", quoted))
+        rest = f"; {left} left to a person" if left else ""
+        if not lifted:
+            if left:
+                raise UnsupportedAction(f"hold {hold!r}: no task could be lifted here{rest}")
+            raise NothingToDo(f"no task of hold {hold!r} carries its label any more")
+        return f"label '{hold}' off {', '.join(lifted)}{rest}"
+
     # --- carrying actions out ------------------------------------------------------------
 
     def _issue(self, task_id: str) -> Item:
@@ -379,6 +480,12 @@ class IssuesAdapter:
         if agent.assignee is None and agent.label is None:
             assert agent.mention is not None  # _startable
             self.tracker.comment(item.id, signed(f"{agent.mention} {MENTION_TEXT}"))
+
+
+def _labelled(item: Item, labels: Iterable[str]) -> list[str]:
+    """The labels of ``item`` that are among ``labels`` (as the issue spells them)."""
+    want = {label.casefold() for label in labels}
+    return [label for label in item.labels if label.casefold() in want]
 
 
 def _startable(agent: Agent) -> None:

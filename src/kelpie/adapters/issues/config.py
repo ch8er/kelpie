@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 import os
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import Any
@@ -52,9 +52,12 @@ KEYS = frozenset(
         *("enabled", "repos", "api_url", "token_env", "timeout", "cache_ttl"),
         *("lookback", "max_requests_per_tick", "tick_budget"),
         *("label", "blocked_labels", "ready_labels", "role", "agents", "boards"),
+        *("pause_labels", "allow_lift_holds"),
     }
 )
-BOARD_KEYS = frozenset({"label", "blocked_labels", "ready_labels", "role", "agents"})
+BOARD_KEYS = frozenset(
+    {"label", "blocked_labels", "ready_labels", "pause_labels", "role", "agents"}
+)
 AGENT_KEYS = frozenset({"role", "assignee", "label", "mention", "author"})
 DEFAULT_LOOKBACK = timedelta(days=7)
 DEFAULT_MAX_REQUESTS = 60
@@ -62,6 +65,7 @@ DEFAULT_TICK_BUDGET = timedelta(seconds=15)
 MAX_REQUESTS = 5000
 MAX_LABEL = 50  # GitHub's limit on a label name
 MAX_AGENTS = 32
+MAX_PAUSE = 8  # pause labels or states per board: one lift's writes fit in a tick
 MIN_LINEAR_REFRESH = timedelta(seconds=30)
 _NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
 _ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*", re.ASCII)
@@ -81,6 +85,7 @@ class GitHubIssuesSettings:
     max_requests_per_tick: int = DEFAULT_MAX_REQUESTS
     tick_budget: timedelta = DEFAULT_TICK_BUDGET
     enabled: bool = True
+    allow_lift_holds: bool = False  # rule 6 may take pause labels off (lift_hold, act mode)
 
     def token(self, environ: Mapping[str, str] = os.environ) -> str | None:
         """The token from ``$token_env``; None when unset. Raises ValueError when it was set
@@ -112,7 +117,14 @@ class GitHubIssuesSettings:
             max_requests=self.max_requests_per_tick,
             tick_budget=self.tick_budget,
         )
-        return IssuesAdapter(reader, self.boards, self.agents, name=NAME, where=self.api_url)
+        return IssuesAdapter(
+            reader,
+            self.boards,
+            self.agents,
+            name=NAME,
+            where=self.api_url,
+            lift_holds=self.allow_lift_holds,
+        )
 
 
 def _string(value: Any, where: str, limit: int = 200) -> str:
@@ -203,7 +215,7 @@ def _board(
         if unknown := [v for v in value if v not in agents]:
             raise ValueError(f"{where} agents: unknown agents {unknown}")
         names = tuple(value)
-    return Board(
+    board = Board(
         key=repo,
         label=label,
         blocked_labels=_labels(section["blocked_labels"], f"{where} blocked_labels")
@@ -215,9 +227,39 @@ def _board(
         ready_states=_states(section["ready_states"], f"{where} ready_states")
         if "ready_states" in section
         else defaults.ready_states,
+        pause_labels=_pauses(section["pause_labels"], f"{where} pause_labels", _labels)
+        if "pause_labels" in section
+        else defaults.pause_labels,
+        pause_states=_pauses(section["pause_states"], f"{where} pause_states", _states)
+        if "pause_states" in section
+        else defaults.pause_states,
         role=_string(section["role"], f"{where} role", 64) if "role" in section else defaults.role,
         agents=names,
     )
+    return _distinct(board, where)
+
+
+def _pauses(
+    value: Any, where: str, parse: Callable[[Any, str], tuple[str, ...]]
+) -> tuple[str, ...]:
+    names = parse(value, where)
+    if len(names) > MAX_PAUSE:
+        raise ValueError(f"{where}: at most {MAX_PAUSE}")
+    return names
+
+
+def _distinct(board: Board, where: str) -> Board:
+    """A pause label is no blocked, ready or board label, and a pause state no ready
+    state: one name, one meaning."""
+    others = {o.casefold() for o in (board.label or "", *board.blocked_labels, *board.ready_labels)}
+    if clash := sorted(p for p in board.pause_labels if p.casefold() in others):
+        raise ValueError(
+            f"{where} pause_labels {clash} are also its label, blocked_labels or ready_labels"
+        )
+    ready = {r.casefold() for r in board.ready_states}
+    if clash := sorted(p for p in board.pause_states if p.casefold() in ready):
+        raise ValueError(f"{where} pause_states {clash} are also ready_states")
+    return board
 
 
 def _states(value: Any, where: str) -> tuple[str, ...]:
@@ -248,11 +290,17 @@ def _check_agents(
                 f"{sect} agents.{agent.name} label {agent.label!r} is already agents.{seen[key]}'s"
             )
         for board in boards:
-            other = {board.label or "", *board.blocked_labels, *board.ready_labels}
+            other = {
+                board.label or "",
+                *board.blocked_labels,
+                *board.ready_labels,
+                *board.pause_labels,
+            }
             if agent.label.casefold() in {o.casefold() for o in other}:
                 raise ValueError(
                     f"{sect} agents.{agent.name} label {agent.label!r} is also a board "
-                    f"label of {board.key} (label, blocked_labels or ready_labels)"
+                    f"label of {board.key} (label, blocked_labels, ready_labels or "
+                    "pause_labels)"
                 )
 
 
@@ -326,6 +374,9 @@ def load_github_issues(section: Any, github: GitHubSettings | None) -> GitHubIss
         ready_labels=_labels(section["ready_labels"], f"{SECTION} ready_labels")
         if "ready_labels" in section
         else (),
+        pause_labels=_pauses(section["pause_labels"], f"{SECTION} pause_labels", _labels)
+        if "pause_labels" in section
+        else (),
         role=_string(section.get("role", DEFAULT_ROLE), f"{SECTION} role", 64),
     )
     boards_section = section.get("boards", {})
@@ -352,7 +403,15 @@ def load_github_issues(section: Any, github: GitHubSettings | None) -> GitHubIss
         max_requests_per_tick=max_requests,
         tick_budget=_duration(section, "tick_budget", DEFAULT_TICK_BUDGET),
         enabled=enabled,
+        allow_lift_holds=_flag(section, "allow_lift_holds", SECTION),
     )
+
+
+def _flag(section: Mapping[str, Any], key: str, sect: str) -> bool:
+    value = section.get(key, False)
+    if not isinstance(value, bool):
+        raise ValueError(f"{sect} {key} must be true or false")
+    return value
 
 
 # --- [adapters.linear] ----------------------------------------------------------------------
@@ -365,9 +424,10 @@ LINEAR_KEYS = frozenset(
         *("enabled", "teams", "api_url", "token_env", "timeout", "refresh"),
         *("lookback", "max_requests_per_tick", "tick_budget", "pull_repos"),
         *("label", "blocked_labels", "ready_labels", "ready_states", "role", "agents", "boards"),
+        *("pause_labels", "pause_states", "allow_lift_holds"),
     }
 )
-LINEAR_BOARD_KEYS = BOARD_KEYS | {"ready_states"}
+LINEAR_BOARD_KEYS = BOARD_KEYS | {"ready_states", "pause_states"}
 _TEAM = re.compile(r"[A-Z][A-Z0-9_]{0,15}")
 _PULL_REPO = re.compile(r"(?:(?P<host>[a-z0-9.-]{1,255})/)?(?P<repo>[\w.-]{1,100}/[\w.-]{1,100})")
 MAX_PULL_REPOS = 100
@@ -387,6 +447,7 @@ class LinearSettings:
     tick_budget: timedelta = LINEAR_TICK_BUDGET
     pull_repos: frozenset[str] = frozenset()  # "host/owner/repo"; empty: github.com, any repo
     enabled: bool = True
+    allow_lift_holds: bool = False  # rule 6 may take pause labels off (lift_hold, act mode)
 
     def token(self, environ: Mapping[str, str] = os.environ) -> str:
         """The API key from ``$token_env`` (Linear has no anonymous access). Raises
@@ -410,7 +471,14 @@ class LinearSettings:
             pull_repos=self.pull_repos,
             agents=self.agents,
         )
-        return IssuesAdapter(reader, self.boards, self.agents, name=LINEAR_NAME, where=self.api_url)
+        return IssuesAdapter(
+            reader,
+            self.boards,
+            self.agents,
+            name=LINEAR_NAME,
+            where=self.api_url,
+            lift_holds=self.allow_lift_holds,
+        )
 
 
 def load_linear(section: Any) -> LinearSettings:
@@ -495,6 +563,12 @@ def load_linear(section: Any) -> LinearSettings:
         ready_states=_states(section["ready_states"], f"{sect} ready_states")
         if "ready_states" in section
         else (),
+        pause_labels=_pauses(section["pause_labels"], f"{sect} pause_labels", _labels)
+        if "pause_labels" in section
+        else (),
+        pause_states=_pauses(section["pause_states"], f"{sect} pause_states", _states)
+        if "pause_states" in section
+        else (),
         role=_string(section.get("role", DEFAULT_ROLE), f"{sect} role", 64),
     )
     boards_section = section.get("boards", {})
@@ -523,6 +597,7 @@ def load_linear(section: Any) -> LinearSettings:
         tick_budget=tick_budget,
         pull_repos=_pull_repos(section.get("pull_repos", []), f"{sect} pull_repos"),
         enabled=enabled,
+        allow_lift_holds=_flag(section, "allow_lift_holds", sect),
     )
 
 

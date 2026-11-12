@@ -114,6 +114,7 @@ from kelpie.core.ports import (
     SnapshotSource,
     SupportsActLock,
     SupportsClose,
+    SupportsLiftHold,
     SupportsReassign,
     SupportsStop,
     SupportsWait,
@@ -121,6 +122,7 @@ from kelpie.core.ports import (
     TransitionStore,
     declared_actions,
     inapplicable_actions,
+    lifts_holds,
 )
 from kelpie.core.prices import CHECKED, canonical_model, platform_wrapped
 from kelpie.core.retention import (
@@ -3220,7 +3222,8 @@ def act_blockers(settings: Settings, adapters: Sequence[PlatformAdapter]) -> dic
             (ActionKind.PROPOSE_CI_CONFIG, ci_on and ci is not None and ci.allow_propose),
             (
                 ActionKind.LIFT_HOLD,
-                pulls is not None and pulls.enabled and pulls.allow_lift_holds,
+                (pulls is not None and pulls.enabled and pulls.allow_lift_holds)
+                or any(lifts_holds(a) for a in adapters),
             ),
         )
         if on
@@ -3234,7 +3237,11 @@ def act_blockers(settings: Settings, adapters: Sequence[PlatformAdapter]) -> dic
         platform = effects - CONNECTOR_WRITES
         # A rule with connector writes acts when its connector allows at least one of them.
         if effects & CONNECTOR_WRITES and not effects & allowed:
-            reason = _no_ci_writes(settings) if effects & CI_WRITES else _no_hold_lifts(settings)
+            reason = (
+                _no_ci_writes(settings)
+                if effects & CI_WRITES
+                else _no_hold_lifts(settings, adapters)
+            )
             found[name] = ActBlocker(reason, refused=has_hermes)
         elif has_hermes and name not in HERMES_ACT_RULES and not (effects and not platform):
             found[name] = ActBlocker(_hermes_gap(name, platform), refused=True)
@@ -3301,12 +3308,16 @@ CI_WRITES = frozenset({ActionKind.CANCEL_BUILD, ActionKind.PROPOSE_CI_CONFIG})
 CONNECTOR_WRITES = CI_WRITES | {ActionKind.LIFT_HOLD}
 
 
-def _no_hold_lifts(settings: Settings) -> str:
+def _no_hold_lifts(settings: Settings, adapters: Sequence[PlatformAdapter] = ()) -> str:
     github = settings.github if settings.github is not None and settings.github.enabled else None
     what = "Kelpie lifts no holds"
+    able = sorted(
+        _PLATFORMS.get(a.name, a.name) for a in adapters if isinstance(a, SupportsLiftHold)
+    )
+    boards = f"; allow_lift_holds is off for {' and '.join(able)}" if able else ""
     if github is not None and github.pulls is not None and github.pulls.enabled:
-        return f"{what}: [connectors.github.pulls] allow_lift_holds is off"
-    return f"{what}: no connector owns them ([connectors.github.pulls] allow_lift_holds)"
+        return f"{what}: [connectors.github.pulls] allow_lift_holds is off{boards}"
+    return f"{what}: no connector owns them ([connectors.github.pulls] allow_lift_holds){boards}"
 
 
 def _no_ci_writes(settings: Settings) -> str:

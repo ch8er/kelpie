@@ -57,6 +57,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from kelpie.adapters.issues.mapping import (
+    LOCKED,
     Agent,
     Board,
     Event,
@@ -422,6 +423,7 @@ class GitHubIssues:
             author_is_bot=isinstance(user, Mapping) and user.get("type") == "Bot",
             author_trusted=issue.get("author_association") in TRUSTED,
             labels=labels,
+            flags=(LOCKED,) if issue.get("locked") is True else (),
             assignees=assignees,
             events=events,
             blocked_by=blocked_by,
