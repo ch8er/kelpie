@@ -50,6 +50,11 @@ from kelpie.alerts.config import AlertSettings, load_alerts
 from kelpie.alerts.delivery import Delivery
 from kelpie.alerts.telegram import TelegramSettings
 from kelpie.answering import AnswerBoards, AnswerRunner
+from kelpie.conditions_api import (
+    ConditionRegistry,
+    ConditionSettings,
+    load_conditions,
+)
 from kelpie.configpaths import expand, read_config
 from kelpie.connectors.cost_reports import CostReportsSettings, load_cost_reports
 from kelpie.connectors.github import (
@@ -343,6 +348,7 @@ class Settings:
     snooze: SnoozeSettings = field(default_factory=SnoozeSettings)  # [snooze]
     server: Limits = field(default_factory=Limits)  # [server]: every listener's guards
     view: ViewSettings = field(default_factory=ViewSettings)  # [view]: read-only farm view
+    conditions: ConditionSettings = field(default_factory=ConditionSettings)  # [conditions]
     doctor: DoctorSettings = field(default_factory=DoctorSettings)  # [doctor]: doctor only
 
     @property
@@ -387,7 +393,7 @@ def load_settings(path: Path | None) -> Settings:
         "snooze",
         "server",
         "view",
-        "doctor",
+        "conditions",
     }
     if unknown:
         raise ConfigError(f"unknown config sections: {sorted(unknown)}")
@@ -435,6 +441,7 @@ def load_settings(path: Path | None) -> Settings:
         snooze = load_snooze(data.get("snooze"), report.tz)
         server = load_server(data.get("server"))
         view = load_view(data.get("view"))
+        conditions = load_conditions(data.get("conditions"))
         doctor = load_doctor(data.get("doctor"), report.tz)
     except ValueError as exc:
         raise ConfigError(str(exc)) from exc
@@ -466,6 +473,7 @@ def load_settings(path: Path | None) -> Settings:
         server=server,
         view=view,
         doctor=doctor,
+        conditions=conditions,
     )
     _check_propose_token(settings)
     return settings
@@ -1843,11 +1851,14 @@ class App:
     # before the alert delivery they may use (the scheduled daily report).
     services: list[Service] = field(default_factory=list)
     ledger_retention: LedgerRetention | None = None  # raw ledger and closed states (#318)
+    conditions: ConditionRegistry | None = None  # POST /conditions ([conditions] enabled)
 
     def close(self) -> None:
         for service in self.services:
             service.stop()
         self.loop.stop()
+        if self.conditions is not None:
+            self.conditions.close()
         if self.ledger_retention is not None:
             self.ledger_retention.stop()  # its own connection: before the ledger store's
         if self.alerts is not None:
@@ -2060,6 +2071,9 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
     _refuse_unimplemented_actions(settings, loaded, adapters)
     hub = _build_hub(settings, adapters, clock)
     enrich, connectors = connector_steps(settings, metrics, clock)
+    registry = condition_registry(settings, clock)
+    if registry is not None:  # first: the connectors evaluate what agents registered
+        enrich = [("registered_conditions", registry), *enrich]
     costs_source = cost_report_source(settings)  # kelpie serve only: reads with the admin key
     tokens = None
     if traces.enabled and traces.token_file is not None and settings.hub is None:
@@ -2158,6 +2172,7 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
             store,
             alerts=_start_alerts(settings, engine, metrics, store, clock, loop),
             ledger_retention=ledger_retention,
+            conditions=registry,
         )
         return _with_hub(app, hub)
     span_store = _open_span_store(settings.db_path)
@@ -2265,6 +2280,7 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
         forwarder,
         alerts,
         ledger_retention=ledger_retention,
+        conditions=registry,
     )
     return _with_hub(app, hub, relayed)
 
@@ -2523,6 +2539,31 @@ def _chat_control(
     metrics.set_chat_channels(c.name for c in channels)
     answers = runner.control() if runner is not None else None
     return ChatControl(buttons, snooze, clock, metrics, answers=answers)
+
+
+def condition_registry(
+    settings: Settings, clock: Callable[[], datetime]
+) -> ConditionRegistry | None:
+    """``POST /conditions`` and its snapshot step, with ``[conditions] enabled``; None
+    otherwise. ConfigError when its token is unset or weak (named, never shown), or there is
+    no database to keep registrations in."""
+    if not settings.conditions.enabled:
+        return None
+    if settings.hub is not None or settings.agent is not None:
+        raise ConfigError(
+            "[conditions] is for single-host kelpie serve: not with [hub] or [agent] yet"
+        )
+    if settings.db_path is None:
+        raise ConfigError('[conditions] needs a database ([storage] path is ":memory:")')
+    try:
+        token = settings.conditions.token()
+    except ValueError as exc:
+        raise ConfigError(str(exc)) from None
+    log.info(
+        "[conditions] POST /conditions takes registrations with the token in $%s",
+        settings.conditions.token_env,
+    )
+    return ConditionRegistry(settings.conditions, settings.db_path, clock, token)
 
 
 def connector_steps(

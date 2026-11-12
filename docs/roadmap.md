@@ -217,8 +217,8 @@ gate parks a task with `SupportsWait` (Hermes: `scheduled` with a signed marker,
 There is no endpoint and no agent-side helper; the first criterion stays open for that.
 
 **Acceptance criteria**
-- [ ] `POST /conditions` with kind, params and task id (no endpoint; conditions come from block reasons and parks)
-- [ ] Authentication required (no endpoint; park markers are HMAC-signed, so forged or replayed parks are not trusted, #75, #189)
+- [x] `POST /conditions` with kind, params and task id: off by default (`[conditions] enabled`), on the main listener (loopback by default, Host and body guards), attach-only (#PR)
+- [x] Authentication required: a bearer token of its own (`[conditions] token_env`), compared in constant time before the body is read; park markers stay HMAC-signed (#75, #189, #PR)
 - [x] Duplicate registrations are idempotent (the ledger stops repeat parks; a second park of a task Kelpie parked on those conditions is nothing to do, with a ledger note, #378)
 - [x] Registering a condition puts the task into a "waiting" state visible to rules (for parks: a parked task reads back as `waiting`, #75)
 

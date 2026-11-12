@@ -41,6 +41,7 @@ configure what exists.
 - [[agent]](#agent) and [[hub]](#hub): multi-host
 - [[server]](#server): connection guards of every listener
 - [[view]](#view): the read-only farm view listener (off by default)
+- [[conditions]](#conditions): `POST /conditions`, agents register what their task waits for (off by default)
 - [Checks across sections](#checks-across-sections)
 
 ## How the config is read
@@ -2530,6 +2531,42 @@ Body sizes are each endpoint's own limit: `[traces] max_body_bytes` (8 MiB) and
 hub; both are checked against `Content-Length` before the body is read, and again after
 gzip. One request per connection. Refused and cut connections are logged at most once a
 minute per address. See [security.md](security.md#listeners).
+
+## [conditions]
+
+`POST /conditions` on the main listener (`kelpie serve`'s port, loopback by default, behind
+the `[server]` Host and connection guards): an agent registers the condition its task waits
+for before it exits, and rule 2 wakes the task once it holds. Off by default.
+
+```bash
+curl -s -X POST http://127.0.0.1:9464/conditions \
+  -H "Authorization: Bearer $KELPIE_CONDITIONS_TOKEN" -H "Content-Type: application/json" \
+  -d '{"task_id": "T-1", "kind": "pr_merged", "params": {"repo": "owner/name", "pr": 12}}'
+```
+
+- **Attach-only.** A registered condition attaches to its task inside Kelpie (every snapshot
+  carries it with `task_id` set); the connectors evaluate it like any other (`pr_merged` and
+  `ci_status` by `[connectors.github]`, `task_status` from the board, `quota_reset` by
+  `[connectors.llm_quotas]`, ...) and the rules read it in their own modes. Registering
+  never parks the task or changes anything on the board: the agent sets its own status.
+- **Before the body is read:** the bearer token (constant-time compare; 401), no `Origin`
+  header (403: a web page), `Content-Length` present and at most 16 KiB (411/413),
+  `Content-Type: application/json` (415).
+- **The body:** `task_id` (1 to 200 characters), `kind` (`ci_status`, `pr_merged`,
+  `quota_reset`, `human_task`, `task_status`, `time`, `custom`) and `params` (at most 20
+  numbers, booleans or strings of at most 200 characters); 400 otherwise.
+- **Idempotent:** the same task, kind and params again answer `200` with `"duplicate":
+  true` and keep the first registration's time; a new one answers `201` with its `id`.
+  Beyond `max_registered` live registrations: `507`, nothing stored. A registration goes
+  once its task is done or cancelled on the board, or `max_age` after it was made.
+- Single-host `kelpie serve` only for now: not with `[hub]` or `[agent]` (startup refuses).
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `enabled` | `false` | Take registrations. Needs the token and a database (`[storage] path` not `:memory:`), or `kelpie serve` refuses to start. |
+| `token_env` | `"KELPIE_CONDITIONS_TOKEN"` | The variable holding the bearer token agents send: at least as strong as an OTLP token (`[traces]`), never shown. |
+| `max_age` | `"7d"` | A registration is dropped this long after it was made, 1m to 90d. |
+| `max_registered` | `1000` | Live registrations kept, 1 to 100000. |
 
 ## [view]
 

@@ -23,6 +23,8 @@ a CONNECT tunnel.
 
 ## Listeners
 
+`kelpie serve` listens on the main port (`/v1/traces`, `/metrics`, `/healthz`, and with
+`[conditions] enabled` `POST /conditions`; loopback by default) and, with `[hub]`, on the hub port. Both go through one set of connection guards
 `kelpie serve` listens on the main port (`/v1/traces`, `/v1/metrics`, `/metrics`, `/healthz`;
 loopback by default) and, with `[hub]`, on the hub port. Both go through one set of connection guards
 (`kelpie.httpguard`, configured by [`[server]`](configuration.md#server)), so nobody needs

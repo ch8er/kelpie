@@ -10,6 +10,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ### Added
 
+- `POST /conditions`: an agent registers the condition its task waits for (task id, kind,
+  params), off by default (`[conditions] enabled`). On the main listener (loopback by
+  default, behind the Host and connection guards), with a bearer token of its own
+  (`[conditions] token_env`, compared in constant time before the body is read), no
+  `Origin`, at most 16 KiB of JSON. Duplicates are idempotent (`200`, same id). Attach-only:
+  a registered condition attaches to its task inside Kelpie and the connectors evaluate it;
+  nothing on the board changes. Registrations are dropped when their task finishes or after
+  `max_age`. Single-host `kelpie serve` only for now.
 - Rule 6 holds matched by flag or pause, not only by label: `kind = "flag"` (a platform
   flag, the new `Task.flags`) or `kind = "pause"` (a blocked or waiting task whose block is
   a pause: category `pause`, or a reason matching the hold's `pattern`, by default one
