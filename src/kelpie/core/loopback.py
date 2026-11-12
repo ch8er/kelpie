@@ -13,6 +13,9 @@ its callers differ only in what they hand it:
 - ``[agent] relay`` takes IP literals only (``names=False, brackets=False``): its config
   takes the brackets off and maps ``localhost`` to ``127.0.0.1`` itself.
 
+Out of scope: the plain-http URL checks of the HTTP helper (``kelpie.net``, which must
+stand alone), the GitHub connector and Telegram; they are not listeners.
+
 Pure: no name resolution, no I/O.
 """
 
@@ -31,6 +34,8 @@ def is_loopback(
     without ``brackets`` a bracket anywhere makes it no literal). ``mapped``: an
     IPv4-mapped IPv6 literal counts by its IPv4 address. Any other name is not loopback:
     nothing is resolved."""
+    if not isinstance(host, str):  # typed str; never raise on anything else
+        return False
     if names and host.strip().lower() == "localhost":
         return True
     if not brackets and ("[" in host or "]" in host):

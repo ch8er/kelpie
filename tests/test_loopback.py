@@ -84,6 +84,16 @@ EDGES = [
     "::1%lo",
     "0x7f.1",
     "2130706433",
+    # whitespace or brackets around what _bare leaves: httpguard must not take them off
+    "[ localhost]",
+    "[localhost ]",
+    " [ localhost ]",
+    "localhost .",
+    "localhost\t.",
+    "[\tlocalhost]",
+    "[::1].",
+    "[127.0.0.1].",
+    "[::1]]..",
 ]
 
 
@@ -97,7 +107,12 @@ def test_every_caller_answers_as_before(host: str) -> None:
 
 
 HOSTS = st.one_of(
-    st.text(alphabet=" []:.0123456789abcdefLOCALHOSTlocalhost%f", max_size=24),
+    st.text(alphabet=" \t[]:.0123456789abcdefLOCALHOSTlocalhost%f", max_size=24),
+    st.tuples(
+        st.sampled_from(["", " ", "[", " [", "[ "]),
+        st.sampled_from(["localhost", "127.0.0.1", "::1", "::ffff:127.0.0.1"]),
+        st.sampled_from(["", " ", "]", " ]", "] ", ".", "].", " .", "]]..", "\t."]),
+    ).map("".join),
     st.ip_addresses().map(str),
     st.ip_addresses(v=6).map(lambda ip: f"[{ip}]"),
     st.ip_addresses(v=4).map(lambda ip: f"::ffff:{ip}"),

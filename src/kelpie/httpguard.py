@@ -149,7 +149,8 @@ def is_loopback(host: str) -> bool:
     """Whether a bind address is loopback: ``localhost`` or a loopback IP literal,
     IPv4-mapped ones included (``::ffff:127.0.0.1``), once normalized (spaces, case,
     brackets, a trailing dot). The check itself is :func:`kelpie.core.loopback.is_loopback`."""
-    return core_is_loopback(_bare(host.strip().lower()), mapped=True)
+    name = _bare(host.strip().lower())
+    return name == "localhost" or _loopback_ip(name)
 
 
 def _loopback_ip(name: str) -> bool:
