@@ -2956,7 +2956,7 @@
           "value": ""
         },
         "hide": 0,
-        "description": "Your Langfuse project's traces page (e.g. https://langfuse.example/project/<id>/traces), when [[traces.forward]] sends spans there. Empty: the Langfuse links lead nowhere. Set it here for this view, with &var-langfuse=<url> in the dashboard URL, or as this variable's default in deploy/grafana/dashboards/kelpie.json."
+        "description": "Your Langfuse project's traces page (e.g. https://langfuse.example/project/<id>/traces), when [[traces.forward]] sends spans there. Until it is set, the Langfuse links open this dashboard again. Set it here for this view, with &var-langfuse=<url> in the dashboard URL, or as this variable's default in deploy/grafana/dashboards/kelpie.json."
       }
     ]
   },

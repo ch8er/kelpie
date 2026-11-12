@@ -30,8 +30,9 @@ Rows of features you have not configured stay empty. The variables at the top fi
 `https://langfuse.example/project/<id>/traces`). The dashboard's "Traces in Langfuse"
 link and the trace panels' links (spans received, spans in the snapshot, forwarding,
 unattributed tokens) then open it in a new tab. The variable is empty by default, so the
-dashboard assumes no Langfuse host. Set it for one view in the variable bar, keep it in a
-bookmark with `&var-langfuse=<url>`, or make it the default by editing the variable's
+dashboard assumes no Langfuse host; until it is set, the links open this dashboard again.
+Set it for one view in the variable bar, keep it in a bookmark with `&var-langfuse=<url>`
+(percent-encode a URL with `?`, `&` or `#` in it), or make it the default by editing the variable's
 `query` and `current` in `deploy/grafana/dashboards/kelpie.json`. The provisioned
 dashboard cannot be saved from the UI.
 

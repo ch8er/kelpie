@@ -259,7 +259,7 @@ def test_langfuse_links_follow_the_variable() -> None:
     default (no host is assumed), the dashboard's link and the trace panels' links."""
     (var,) = [v for v in _variables() if v["name"] == "langfuse"]
     assert var["type"] == "textbox" and var["query"] == "" and var["current"]["value"] == ""
-    (link,) = _dashboard()["links"]
+    (link,) = [x for x in _dashboard()["links"] if x["title"] == "Traces in Langfuse"]
     assert link["url"] == "${langfuse}" and link["targetBlank"]
     linked = {p["title"] for p in _panels() if p.get("links")}
     assert linked == {
