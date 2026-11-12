@@ -60,12 +60,12 @@ import os
 import re
 import secrets
 import shutil
-import signal
 import subprocess
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timedelta
 from pathlib import Path
 
+from kelpie.adapters._common import kill_group as _kill_group
 from kelpie.adapters.hermes.text import clean_text
 
 DEFAULT_CLI = "hermes"
@@ -264,17 +264,6 @@ def block_task(
             f"hermes kanban block {task_id} failed (exit {proc.returncode}): {tail}",
             f"hermes kanban block failed (exit {proc.returncode})",
         )
-
-
-def _kill_group(proc: subprocess.Popen[str]) -> None:
-    """Kill the command and anything it started; it is our own child in its own session."""
-    try:
-        if hasattr(os, "killpg"):
-            os.killpg(proc.pid, signal.SIGKILL)
-        else:  # pragma: no cover - Windows
-            proc.kill()
-    except (ProcessLookupError, PermissionError):
-        pass
 
 
 kill_group = _kill_group  # shared with kelpie.adapters.hermes.park

@@ -251,6 +251,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ### Changed
 
+- Internal, no behaviour change (#248 D13, adapter twins): one copy of the adapters'
+  shared helpers in `kelpie.adapters._common`: `format_age` (Hermes, Claude Code,
+  OpenClaw), the spool time `_utc` and `_warn`/`act_locks` (Claude Code, OpenClaw), the
+  stop's `_kill_group` (Hermes, OpenClaw; byte-identical, the stop path is unchanged), and
+  the issues readers' `_time` (Linear takes GitHub's).
 - Internal, no behaviour change (#248 D8, D13): one copy of GitHub's time parsing in the
   CI connector (`ci_runs.parse_time`) and of the glob test of budgets and prices
   (`core.prices.is_glob`).

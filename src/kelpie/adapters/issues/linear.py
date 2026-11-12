@@ -60,6 +60,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from kelpie import __version__, net
+from kelpie.adapters.issues.github import _time
 from kelpie.adapters.issues.mapping import (
     Agent,
     Board,
@@ -216,16 +217,6 @@ class LinearError(Exception):
     def __init__(self, kind: str, message: str) -> None:
         super().__init__(message)
         self.kind = kind
-
-
-def _time(value: Any) -> datetime | None:
-    if not isinstance(value, str):
-        return None
-    try:
-        at = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    return at if at.tzinfo is not None else at.replace(tzinfo=UTC)
 
 
 def _iso(at: datetime) -> str:
