@@ -377,7 +377,18 @@ class ScopeGuard:
             return True
         if token not in self.scopes:
             return False
-        return self.judge(token, fold(otlp, hook))[0] is not Verdict.OUT
+        folded = fold(otlp, hook)
+        sid = folded.session_id
+        if sid is not None and sid != otlp.session_id and self.index.session(sid) is None:
+            # a session the board does not place (yet): no other session's call is taken
+            return False
+        return self.judge(token, folded)[0] is not Verdict.OUT
+
+    def refresh(self, snapshot: Snapshot, remembered: Attribution | None = None) -> None:
+        """Read the board into the index before hook spans are folded (:meth:`may_fold`
+        judges against it), as :meth:`check` does before judging."""
+        with self.barrier.exclusive():
+            self.index.update(snapshot, remembered)
 
     def judge(self, token: str, span: Span) -> tuple[Verdict, list[tuple[str, str]]]:
         """Whether ``token`` may report ``span``, and the ids the board does not place that

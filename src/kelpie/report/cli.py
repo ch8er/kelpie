@@ -55,6 +55,7 @@ def sources(settings: Settings) -> ReportSources:
         prices=settings.budgets.prices,
         spend=settings.spend,
         outputs=settings.traces.outputs,
+        token_scopes={t.name: t.scope for t in settings.traces.tokens},
         estimated=any(b.mode is BudgetMode.SUBSCRIPTION for b in settings.budgets.budgets),
         modes=modes,
         hold_labels=tuple(hold_labels(engine.rules.get("bottlenecks", {}))),

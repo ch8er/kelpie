@@ -221,10 +221,8 @@ def merge_hook_spans(
         if call:
             candidates.update(by_call.get(call, ()))
         for o in candidates:
-            if pairable is not None and not pairable(spans[o], hook):
-                continue
             distance = _distance(hook, spans[o])
-            if distance is not None:
+            if distance is not None and (pairable is None or pairable(spans[o], hook)):
                 pairs.append((hook.attributes.get(UNVERIFIED_ATTRIBUTE) is True, distance, h, o))
     pairs.sort()
     taken: dict[int, int] = {}  # otlp index -> hook index

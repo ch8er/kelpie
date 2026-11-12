@@ -374,7 +374,9 @@ way the multi-host hub limits each `kelpie agent` to its own host:
   (the hook's session and task; a token no longer configured takes none, #374): another
   token's span carrying a run's (provider-generated) call ids stays a span of its own, in
   its own session, and the run's verified hook calls stay rule 10's evidence instead of
-  being folded into a span the check deletes.
+  being folded into a span the check deletes. The board is read before the fold, and a
+  span never takes the call of another session the board does not place yet; the daily
+  report and the largest-tool-outputs scan fold with the same rule.
 - **What a forger can still do.** Claim a session id before its agent starts (Hermes run ids
   are sequential) and report spans for it until the board shows the run; from then on they
   are deleted, and the agent's own token reports for it. Hold up to 10,000 such ids used
@@ -394,8 +396,9 @@ way the multi-host hub limits each `kelpie agent` to its own host:
   agents of one role do not trust each other. Requests are forwarded (`[[traces.forward]]`)
   as received, rejected spans included. The largest tool outputs and the daily report fold
   stored OTLP tool calls with hook calls by their call id over the whole day, outside the
-  snapshot the check sees: a span carrying another agent's (provider-generated) tool call id
-  could be counted under that agent's session there, never in rule 10 or budgets. A removed
+  snapshot the check sees, with the same pairing (#374); the report judges against the
+  board it reads, so a span of a session the board no longer shows takes no other
+  session's call. A removed
   (or renamed) entry covers nothing: its spans stay while the board does not show their
   session or task, and are deleted once it does, so removing a misbehaving agent's token
   also removes what it claimed in advance. The shared token, when set, still

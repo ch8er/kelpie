@@ -1373,7 +1373,10 @@ def merged_snapshot(
                 # run-once) and without [connectors.llm_quotas] they stay unchecked
                 configured = [p.name for p in getattr(providers, "providers", ())]
                 merged = check_quota_reset(merged, configured)
-        # A scoped token's span folds a hook span only into a span it may report (#374).
+        # A scoped token's span folds a hook span only into a span it may report (#374),
+        # judged against this tick's board.
+        if scopes is not None:
+            scopes.refresh(merged)
         folded = merge_hook_spans(merged.spans, scopes.may_fold if scopes is not None else None)
         metrics.hook_spans_merged(folded.merged)
         merged = replace(merged, spans=folded.spans)
@@ -2248,7 +2251,12 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
         resources=reader,
         enrich=enrich,
         providers=quotas,
-        offenders=OffenderWatch(span_store, traces.outputs, settings.report.tz),
+        offenders=OffenderWatch(
+            span_store,
+            traces.outputs,
+            settings.report.tz,
+            pairable=guard.may_fold if guard is not None else None,
+        ),
         remote=remote,
         snoozes=snooze_reader(settings, store),
         instructions=instruction_watch(settings, adapters),

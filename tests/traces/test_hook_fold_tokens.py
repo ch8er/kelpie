@@ -173,3 +173,45 @@ def test_the_cross_token_fixture() -> None:
     assert old.merged == 8
     before, _ = ScopeGuard(scopes).check(replace(snap, spans=old.spans))
     assert "S-102" not in stops(before)
+
+
+# --- the board is read before folding ----------------------------------------------------
+
+
+def test_a_fresh_guard_or_a_new_session_folds_no_other_sessions_call() -> None:
+    """The first tick after a start (empty index) or a session new to the board: a span
+    never takes a hook call of another session the board does not place yet."""
+    hooks = tuple(hook(n) for n in range(10))
+    forged = tuple(otlp(n, "S-101", "dev-1") for n in range(10))
+    fresh = ScopeGuard(SCOPES)  # nothing read yet
+    assert merge_hook_spans(hooks + forged, fresh.may_fold).merged == 0
+    fresh.refresh(live_board())
+    snap, _ = fresh.check(
+        replace(live_board(), spans=merge_hook_spans(hooks + forged, fresh.may_fold).spans)
+    )
+    assert "S-102" in stops(snap)
+
+
+def test_the_report_folds_with_the_same_pairing() -> None:
+    from kelpie.core.prices import PriceTable
+    from kelpie.report.config import ReportSettings
+    from kelpie.report.run import ReportSources, load_inputs
+    from kelpie.traces.outputs import OutputSettings
+
+    hooks = tuple(hook(n) for n in range(10))
+    forged = tuple(otlp(n, "S-101", "dev-1") for n in range(10))
+    sources = ReportSources(
+        db_path=None,
+        report=ReportSettings(),
+        prices=PriceTable(),
+        outputs=OutputSettings(),
+        estimated=False,
+        modes={},
+        token_scopes=SCOPES,
+    )
+    board_ = replace(live_board(), spans=hooks + forged)
+    inputs = load_inputs(sources, NOW.date(), board_)
+    assert sum(1 for s in inputs.spans if s.session_id == "S-102") == 10
+    assert {s.session_id for s in inputs.spans if s.attributes.get(TOKEN_ATTRIBUTE)} == {"S-101"}
+    unscoped = load_inputs(replace(sources, token_scopes={}), NOW.date(), board_)
+    assert sum(1 for s in unscoped.spans if s.session_id == "S-102") == 10  # folded as before
