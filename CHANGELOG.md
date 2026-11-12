@@ -15,6 +15,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
   32, with the status the window began in), read back from the database at start.
   `kelpie.rules._history` reads time-to-accept and bounces back from review or done from
   it. No rule uses it yet; fixtures may carry their own `status_history`.
+- The GitHub CI connector carries out rule 9's fail-fast `cancel_build` (#450): a queued
+  or running `push` or `pull_request` run on a PR commit whose cheap required check
+  already failed is cancelled, under the same `[connectors.github.ci]` cancel policy as
+  superseded runs (`allow_cancel`, `cancel_repos`, `cancel_workflows`, `cancel_branches`;
+  never the default branch). The connector checks this itself: never a re-run (a human's
+  decision) or a held run (an approval, a concurrency group). Right before the cancel it
+  re-reads the run (still active and unheld, same attempt and commit) and the check's runs
+  on that commit outside the cache (the last to finish ended in `failure`, none running);
+  otherwise it does nothing. Until now it refused every fail-fast cancel. Rule 9's
+  fail-fast cancels stay observe-only until `fail_fast_mode = "rule"`, and the rule's own
+  mode and the global dry-run still apply.
 - The Grafana dashboard links to traces in Langfuse (#455). Set the new **Langfuse traces
   URL** variable to your project's traces page, and the "Traces in Langfuse" dashboard
   link and the trace panels' links open it. The variable is empty by default; see
