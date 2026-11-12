@@ -22,10 +22,10 @@ snapshot:
     - {id: T-802, title: "Pick a pricing tier", status: blocked, status_since: "2026-03-02T09:00:00+00:00", owner_id: agent-dev-1, source: hermes}
     - {id: T-803, title: "Weekly board sweep", status: blocked, status_since: "2026-03-02T10:00:00+00:00", owner_id: ops-1, source: hermes}
   problems:
-    - {id: "stale-block:T-801", rule: stale_blocks, severity: warning, since: "2026-03-02T09:00:00+00:00", opened_at: "2026-03-02T11:00:00+00:00", summary: "T-801 is blocked on 'waiting for CI on #4', but CI on #4 is green since 10:10.", task_id: T-801}
-    - {id: "needs-you:T-802", rule: needs_you, severity: warning, since: "2026-03-02T09:00:00+00:00", opened_at: "2026-03-02T11:00:00+00:00", summary: "T-802 waits for a person's decision.", task_id: T-802}
-    - {id: "stale-block:T-803", rule: stale_blocks, severity: warning, since: "2026-03-02T10:00:00+00:00", opened_at: "2026-03-02T11:30:00+00:00", summary: "T-803 is blocked on a merged PR.", task_id: T-803}
-    - {id: "disk:host-a", rule: resources, severity: warning, since: "2026-03-02T12:00:00+00:00", opened_at: "2026-03-02T12:00:00+00:00", summary: "Disk on host-a is 90% full."}
+    - {id: "stale-block:T-801", rule: stale_blocks, severity: warning, since: "2026-03-02T09:00:00+00:00", opened_at: "2026-03-02T11:00:00+00:00", summary: "T-801 is blocked on 'waiting for CI on #4', but CI on #4 is green since 10:10.", task_id: T-801, last_seen: "2026-03-02T13:59:00+00:00", mode: act}
+    - {id: "needs-you:T-802", rule: needs_you, severity: warning, since: "2026-03-02T09:00:00+00:00", opened_at: "2026-03-02T11:00:00+00:00", summary: "T-802 waits for a person's decision.", task_id: T-802, last_seen: "2026-03-02T13:59:00+00:00", mode: act}
+    - {id: "stale-block:T-803", rule: stale_blocks, severity: warning, since: "2026-03-02T10:00:00+00:00", opened_at: "2026-03-02T11:30:00+00:00", summary: "T-803 is blocked on a merged PR.", task_id: T-803, last_seen: "2026-03-02T13:59:00+00:00", mode: act}
+    - {id: "disk:host-a", rule: resources, severity: warning, since: "2026-03-02T12:00:00+00:00", opened_at: "2026-03-02T12:00:00+00:00", summary: "Disk on host-a is 90% full.", last_seen: "2026-03-02T13:59:00+00:00", mode: act}
 expected_actions:
   - kind: delegate
     task_id: T-801

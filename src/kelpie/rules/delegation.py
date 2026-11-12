@@ -14,8 +14,11 @@ ledger):
 
 - one open card per incident (a task, or the problem when it has none): no new card while
   one carried out has no verdict yet;
-- at most ``max_attempts`` (2) cards per incident within ``same_incident``, and none for
-  ``cooldown`` after the rule gave the incident back to the person;
+- at most ``max_attempts`` (2) cards per incident within ``cooldown`` (a card whose fix was
+  verified more than ``same_incident`` ago closed its incident and no longer counts), and
+  none after the incident was given back to the person;
+- only fresh problems (reported within 15 minutes), announced in suggest or act mode, on a
+  task not held by a person;
 - no delegation about a delegation card (a task that is one of the cards) or about the
   operator's own tasks;
 - at most ``max_per_hour`` and ``max_per_day`` cards carried out; the oldest problems go
@@ -23,15 +26,17 @@ ledger):
 - the circuit breaker: ``breaker_failures`` failed verifications within a day stop all
   delegation.
 
-Each card is a one-off action per problem and attempt (``Action.once``, key
-``delegate:<problem>:<attempt>``).
+Each card is a one-off action per problem, opening and attempt (``Action.once``, key
+``delegate:<problem>:<opened epoch>:<attempt>``; attempts are numbered over the incident's
+history, so a key never repeats). The circuit breaker's alert to the person and the
+verdicts come in a later part of #347.
 """
 
 from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Any
 
 from kelpie.core.actions import Action, ActionKind, Severity
@@ -43,13 +48,14 @@ from kelpie.core.delegation import (
     policy_from_config,
     why_not,
 )
-from kelpie.core.model import DelegationEvent, Problem, Snapshot
+from kelpie.core.model import DelegationEvent, OwnerKind, Problem, Snapshot
 from kelpie.rules import register
 
 NAME = RULE
 EXECUTED = "executed"
 # Verdicts that end an incident's delegation and give it back to the person.
 GAVE_UP = frozenset({"not_fixed"})
+VERIFIED = "verified"
 # Verdicts that count as a failed verification (the circuit breaker).
 FAILED = frozenset({"still_broken", "not_fixed", "not_picked_up", "not_finished"})
 DAY = timedelta(days=1)
@@ -72,10 +78,9 @@ class Delegation:
         ]
         if len(failures) >= policy.breaker_failures:
             return ()  # the circuit breaker: every problem stays with the person
-        cards = [e for e in events if e.kind == "card"]
-        carried = [c for c in cards if c.outcome == EXECUTED]
+        carried = [e for e in events if e.kind == "card" and e.outcome == EXECUTED]
         card_tasks = {c.card_id for c in carried if c.card_id}
-        judged = {(e.problem, e.attempt) for e in events if e.kind == "verdict"}
+        verdicts = {(e.problem, e.attempt): e for e in events if e.kind == "verdict"}
         left = min(
             policy.max_per_hour - sum(1 for c in carried if c.at > now - HOUR),
             policy.max_per_day - sum(1 for c in carried if c.at > now - DAY),
@@ -85,24 +90,20 @@ class Delegation:
             if left <= 0:
                 break
             task = snapshot.task(problem.task_id) if problem.task_id else None
-            if why_not(policy, problem, task) is not None or task is None:
+            owner = snapshot.owner(task.owner_id) if task and task.owner_id else None
+            person = owner is not None and owner.kind is OwnerKind.HUMAN
+            if task is None or why_not(policy, problem, task, now, person=person) is not None:
                 continue
             if task.id in card_tasks:
                 continue  # a problem about a delegation card stays with the person
-            attempt = self._attempt(problem, events, carried, judged, now)
+            attempt = self._attempt(problem, events, carried, verdicts, now)
             if attempt is None:
                 continue
             operator = policy.operator(task.source)
             assert operator is not None  # why_not checked it
-            actions.append(
-                _delegate(
-                    problem,
-                    task.id,
-                    operator,
-                    attempt,
-                    card_for(problem, task, operator, attempt).params(),
-                )
-            )
+            key = f"{problem.id}:{int(problem.opened_at.timestamp())}:{attempt}"
+            card = card_for(problem, task, operator, attempt, f"kelpie-{key}")
+            actions.append(_delegate(problem, task.id, operator, attempt, key, card.params()))
             left -= 1
         return actions
 
@@ -111,29 +112,42 @@ class Delegation:
         problem: Problem,
         events: Sequence[DelegationEvent],
         carried: Sequence[DelegationEvent],
-        judged: set[tuple[str, int]],
-        now: Any,
+        verdicts: dict[tuple[str, int], DelegationEvent],
+        now: datetime,
     ) -> int | None:
-        """The attempt a new card for ``problem`` would be, or None when a guard holds it
-        back: a card still open for its incident, the incident given back to the person
-        within ``cooldown``, or ``max_attempts`` cards within ``same_incident``."""
+        """The attempt a new card for ``problem`` would be (counted over the incident's
+        cards in the history, so it never repeats), or None when a guard holds it back: a
+        card still open for its incident, the incident given back to the person, or
+        ``max_attempts`` cards that count within ``cooldown`` (a card whose fix was
+        verified more than ``same_incident`` ago closed its incident and no longer counts)."""
         policy = self.policy
         incident = incident_of(problem)
         mine = [c for c in carried if c.incident == incident]
-        if any((c.problem, c.attempt) not in judged for c in mine):
+        if any((c.problem, c.attempt) not in verdicts for c in mine):
             return None  # one open card per incident
         if any(
-            e.kind == "verdict" and e.incident == incident and e.verdict in GAVE_UP for e in events
+            e.kind == "verdict"
+            and e.incident == incident
+            and e.verdict in GAVE_UP
+            and e.at > now - policy.cooldown
+            for e in events
         ):
             return None  # given back to the person: no new card within the cooldown
-        recent = [c for c in mine if c.at > now - policy.same_incident]
-        if len(recent) >= policy.max_attempts:
+
+        def counts(card: DelegationEvent) -> bool:
+            said = verdicts.get((card.problem, card.attempt))
+            held = said is not None and said.verdict == VERIFIED
+            return card.at > now - policy.cooldown and not (
+                held and said is not None and said.at <= now - policy.same_incident
+            )
+
+        if sum(1 for c in mine if counts(c)) >= policy.max_attempts:
             return None
-        return len(recent) + 1
+        return max((c.attempt for c in mine), default=0) + 1
 
 
 def _delegate(
-    problem: Problem, task_id: str, operator: str, attempt: int, card: dict[str, Any]
+    problem: Problem, task_id: str, operator: str, attempt: int, key: str, card: dict[str, Any]
 ) -> Action:
     headline = problem.summary.strip().splitlines()[0] if problem.summary.strip() else ""
     return Action(
@@ -141,7 +155,7 @@ def _delegate(
         NAME,
         f"Handed to {operator} (attempt {attempt}): {headline}".rstrip(": "),
         task_id=task_id,
-        key=f"delegate:{problem.id}:{attempt}",
+        key=f"delegate:{key}",
         severity=Severity.WARNING,
         once=True,
         once_per_key=True,
@@ -158,4 +172,10 @@ def _delegate(
 
 @register(NAME)
 def build(config: dict[str, Any]) -> Delegation:
-    return Delegation(policy_from_config(config))
+    from kelpie.rules import PLANNED  # the planned rules: a class must name one of them
+
+    policy = policy_from_config(config)
+    known = {p.name for p in PLANNED}
+    if unknown := sorted(k for k in policy.classes if k.split(".", 1)[0] not in known):
+        raise ValueError(f"classes: unknown rules {unknown}")
+    return Delegation(policy)

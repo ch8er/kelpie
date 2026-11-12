@@ -28,6 +28,7 @@ person at once and is not delegated; a ``warning`` is delegated when its class a
 from __future__ import annotations
 
 import re
+import unicodedata
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -59,8 +60,12 @@ ALWAYS_HUMAN = frozenset(
 # Rules whose problems Kelpie handles itself (in act mode): stops and cancelled builds.
 ALWAYS_KELPIE = frozenset({"loop_breaker", "ci_economy"})
 
-# A profile or board name as config gives it.
+# A profile name as config gives it; a board is an adapter name, ``<agent>/<adapter>`` on a hub.
 _NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,99}")
+_BOARD = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}")
+# A class key: a rule, or ``<rule>.<kind>`` for one kind of its problems.
+_CLASS_KEY = re.compile(r"[a-z][a-z0-9_]{0,99}(\.[A-Za-z0-9_-]{1,100})?")
+FRESH = timedelta(minutes=15)  # a problem not reported for longer is not delegated
 MAX_ATTEMPTS = 2  # the plan's "at most two attempts per problem"
 MAX_COOLDOWN = timedelta(days=30)  # history the server reads back for the guards
 MAX_QUOTED = 1500  # characters of a rule's own text quoted on a card
@@ -71,12 +76,14 @@ MAX_TITLE = 120  # characters of a card's title
 class Policy:
     """``[engine.rules.delegation]``: what may be delegated, to whom, and the loop guards.
 
-    ``classes`` maps a rule name (the problem kind) to its class; a rule not listed is
-    ``human``. ``delegate_to`` maps a board (a task's ``source``: the adapter name, or
-    ``<agent>:<adapter>`` on a hub) to the operator agent's profile on that board; a board
-    without one never delegates. The guards: at most ``max_attempts`` cards per incident
-    (a task, or the problem itself when it has none) within ``same_incident``, then the person
-    and no new card for that incident for ``cooldown``; at most ``max_per_hour`` and
+    ``classes`` maps a problem kind to its class: a rule (``orphan_status``), or one kind of
+    its problems (``stale_blocks.unlinked``: the rule's alert key up to its first ``:``),
+    the kind winning over the rule; a problem not listed is ``human``. ``delegate_to`` maps
+    a board (a task's ``source``: the adapter name, or ``<agent>/<adapter>`` on a hub) to the
+    operator agent's profile on that board; a board without one never delegates. The guards:
+    at most ``max_attempts`` cards per incident (a task, or the problem itself when it has
+    none) within ``cooldown`` (a card whose fix held for ``same_incident`` closes the
+    incident and no longer counts), then the person; at most ``max_per_hour`` and
     ``max_per_day`` new cards; ``breaker_failures`` failed verifications within a day stop
     all delegation (the circuit breaker). A fix counts once the problem stayed resolved for
     ``hold``; a card not picked up within ``pickup_within`` or not finished within
@@ -103,24 +110,36 @@ class Policy:
 
     @property
     def history(self) -> timedelta:
-        """How far back the guards look: the longest of the cooldown and a day."""
-        return max(self.cooldown, self.same_incident, timedelta(days=1))
+        """How far back the guards look: twice the longest of the cooldown, the same-incident
+        window and a day, so attempts keep their numbers (and cards their keys) well past the
+        cooldown."""
+        return 2 * max(self.cooldown, self.same_incident, timedelta(days=1))
 
-    def problem_class(self, rule: str) -> ProblemClass:
+    def problem_class(self, rule: str, kind: str | None = None) -> ProblemClass:
         if rule in ALWAYS_KELPIE:
             return ProblemClass.KELPIE
         if rule in ALWAYS_HUMAN:
             return ProblemClass.HUMAN
+        if kind is not None and (found := self.classes.get(f"{rule}.{kind}")) is not None:
+            return found
         return self.classes.get(rule, ProblemClass.HUMAN)
 
     def operator(self, board: str | None) -> str | None:
         return self.delegate_to.get(board) if board else None
 
 
-def why_not(policy: Policy, problem: Problem, task: Task | None) -> str | None:
-    """Why ``problem`` may not be handed to an operator by its class, severity and board,
-    or None when it may (the loop guards come on top: :mod:`kelpie.rules.delegation`)."""
-    cls = policy.problem_class(problem.rule)
+def why_not(
+    policy: Policy,
+    problem: Problem,
+    task: Task | None,
+    now: datetime,
+    *,
+    person: bool = False,
+) -> str | None:
+    """Why ``problem`` may not be handed to an operator by its class, severity, freshness
+    and board, or None when it may (the loop guards come on top:
+    :mod:`kelpie.rules.delegation`). ``person``: the task is held by a person."""
+    cls = policy.problem_class(problem.rule, problem.kind)
     if cls is not ProblemClass.AGENT:
         return f"{problem.rule} is {cls.value}-only"
     if is_outage_state(problem.id):
@@ -129,14 +148,35 @@ def why_not(policy: Policy, problem: Problem, task: Task | None) -> str | None:
         return "critical: it goes to a person at once"
     if problem.severity != "warning":
         return "a notice is never delegated"
+    if problem.mode == "observe":
+        return "announced in observe mode only"
+    if problem.last_seen is None or problem.last_seen < now - FRESH:
+        return "not reported lately"
     if task is None:
         return "no task on a board"
+    if person:
+        return "a person's task"
     operator = policy.operator(task.source)
     if operator is None:
         return f"no delegate_to for board {task.source or '(none)'}"
-    if (task.owner_id or "").casefold() == operator.casefold():
+    if is_operator(task, task.source or "", operator):
         return "the operator's own task"
     return None
+
+
+def operator_ids(board: str, operator: str) -> frozenset[str]:
+    """The ids the operator has on ``board``: its profile, and on a hub (``<agent>/...``)
+    the profile in the agent's namespace (``<agent>:<profile>``), case-folded."""
+    ids = {operator.casefold()}
+    if "/" in board:
+        ids.add(f"{board.split('/', 1)[0]}:{operator}".casefold())
+    return frozenset(ids)
+
+
+def is_operator(task: Task, board: str, operator: str) -> bool:
+    """Whether ``task`` is the operator's: held by it, or routed to it (``assignee``)."""
+    ids = operator_ids(board, operator)
+    return any((who or "").casefold() in ids for who in (task.owner_id, task.assignee))
 
 
 def incident_of(problem: Problem) -> str:
@@ -158,10 +198,17 @@ HOW_TO = (
 )
 
 
+def _inert(text: str) -> str:
+    """``text`` without control characters (newlines kept) and format characters (bidi
+    overrides, zero-width), which could hide or reorder what a reader sees."""
+    text = re.sub(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]", " ", text)
+    return "".join(c for c in text if unicodedata.category(c) != "Cf")
+
+
 def quote(text: str, limit: int = MAX_QUOTED) -> str:
-    """``text`` as inert quoted data: every line prefixed with ``> ``, control characters
-    replaced, at most ``limit`` characters (cut with an ellipsis)."""
-    clean = re.sub(r"[\x00-\x08\x0b-\x1f\x7f]", " ", text).strip()
+    """``text`` as inert quoted data: every line prefixed with ``> ``, control and format
+    characters removed, at most ``limit`` characters (cut with an ellipsis)."""
+    clean = _inert(text).strip()
     if len(clean) > limit:
         clean = clean[: limit - 1].rstrip() + "…"
     return "\n".join(f"> {line}" for line in clean.splitlines() or [""])
@@ -180,17 +227,20 @@ class Card:
         return {"title": self.title, "body": self.body, "key": self.key}
 
 
-def card_for(problem: Problem, task: Task, operator: str, attempt: int) -> Card:
+def card_for(problem: Problem, task: Task, operator: str, attempt: int, key: str) -> Card:
     """The card that hands ``problem`` on ``task`` to ``operator``: what happened, the facts
-    Kelpie sees, the rule's text quoted as data, what counts as fixed, the fingerprint and the
-    fixed how-to-handle block."""
-    subject = re.sub(r"\s+", " ", task.title).strip()
-    title = f"Kelpie: {problem.rule} on {task.id}: {subject}"
-    if len(title) > MAX_TITLE:
-        title = title[: MAX_TITLE - 1].rstrip() + "…"
+    Kelpie sees, other agents' text (the task's title, the rule's text) quoted as data, what
+    counts as fixed, the fingerprint and the fixed how-to-handle block. ``key`` is the
+    card's idempotency key."""
+    subject = re.sub(r"\s+", " ", _inert(task.title)).strip().replace('"', "'")
+    room = MAX_TITLE - len(f'Kelpie: {problem.rule} on {task.id}: ""')
+    if len(subject) > room:
+        subject = subject[: max(0, room - 1)].rstrip() + "…"
+    title = f'Kelpie: {problem.rule} on {task.id}: "{subject}"'
+    owner = _inert(task.owner_id or "").strip()
     facts = [
         f"- task: {task.id} ({task.status.value}"
-        + (f", held by {task.owner_id}" if task.owner_id else ", no owner")
+        + (f", held by {owner}" if owner else ", no owner")
         + ")",
         f"- found by Kelpie's rule {problem.rule}, open since {problem.since.isoformat()}",
         f"- attempt {attempt} of at most {MAX_ATTEMPTS}",
@@ -210,10 +260,10 @@ def card_for(problem: Problem, task: Task, operator: str, attempt: int) -> Card:
             "",
             HOW_TO,
             "",
-            f"kelpie-delegation: {problem.id} attempt {attempt}",
+            f"kelpie-delegation: {key}",
         ]
     )
-    return Card(title, body, f"kelpie-{problem.id}-{attempt}")
+    return Card(title, body, key)
 
 
 # --- config -----------------------------------------------------------------------------
@@ -246,14 +296,15 @@ def policy_from_config(config: Mapping[str, Any]) -> Policy:
             raise ValueError("classes must be a table of rule = class")
         parsed: dict[str, ProblemClass] = {}
         for rule, value in classes.items():
-            if not isinstance(rule, str) or not _NAME.fullmatch(rule):
+            if not isinstance(rule, str) or not _CLASS_KEY.fullmatch(rule):
                 raise ValueError(f"classes: invalid rule name {rule!r}")
             try:
                 cls = ProblemClass(value)
             except ValueError:
                 raise ValueError(f"classes.{rule} must be one of agent, human, kelpie") from None
-            if cls is ProblemClass.AGENT and rule in ALWAYS_HUMAN | ALWAYS_KELPIE:
-                fixed = "kelpie" if rule in ALWAYS_KELPIE else "human"
+            base = rule.split(".", 1)[0]
+            if cls is ProblemClass.AGENT and base in ALWAYS_HUMAN | ALWAYS_KELPIE:
+                fixed = "kelpie" if base in ALWAYS_KELPIE else "human"
                 raise ValueError(f"classes.{rule}: its problems are {fixed}-only")
             parsed[rule] = cls
         kwargs["classes"] = parsed
@@ -263,7 +314,7 @@ def policy_from_config(config: Mapping[str, Any]) -> Policy:
             raise ValueError("delegate_to must be a table of board = operator profile")
         parsed_to: dict[str, str] = {}
         for board, operator in targets.items():
-            if not isinstance(board, str) or not _NAME.fullmatch(board):
+            if not isinstance(board, str) or not _BOARD.fullmatch(board):
                 raise ValueError(f"delegate_to: invalid board name {board!r}")
             if not isinstance(operator, str) or not _NAME.fullmatch(operator.strip()):
                 raise ValueError(f"delegate_to.{board} must be a profile name")
@@ -283,7 +334,7 @@ def policy_from_config(config: Mapping[str, Any]) -> Policy:
     if raw:
         raise ValueError(f"unknown parameters: {sorted(raw)}")
     policy = Policy(**kwargs)
-    if policy.history > MAX_COOLDOWN:
+    if max(policy.cooldown, policy.same_incident) > MAX_COOLDOWN:
         raise ValueError(f"cooldown and same_incident must be at most {MAX_COOLDOWN.days}d")
     if policy.pickup_within >= policy.finish_within:
         raise ValueError("pickup_within must be shorter than finish_within")
@@ -304,6 +355,9 @@ def problem_of(state: OpenState) -> Problem:
         opened_at=state.opened_at,
         summary=state.summary,
         task_id=state.task_id,
+        kind=state.key.split(":", 1)[0] if state.key else None,
+        last_seen=state.last_seen,
+        mode=str(state.mode),
     )
 
 

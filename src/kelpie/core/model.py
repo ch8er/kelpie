@@ -991,6 +991,11 @@ class Problem:
     opened_at: datetime
     summary: str
     task_id: str | None = None
+    # What the rule called it (its alert key up to the first ``:``: ``unlinked``,
+    # ``orphan``, ...), when it was last reported, and the mode it was last announced in.
+    kind: str | None = None
+    last_seen: datetime | None = None
+    mode: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

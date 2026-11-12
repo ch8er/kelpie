@@ -868,9 +868,14 @@ clears); Kelpie verifies the fix by that rule's own condition, not by the agent'
 path`, not `":memory:"`): the guards read back what the rule did from the ledger, and the
 problems from the alert states. If that read fails, nothing is delegated that tick.
 
-What is delegated: a problem of a rule listed as `agent`, with severity `warning`, on a task
-whose board has a `delegate_to` operator, that is not the operator's own task, not a
-delegation card and not an outage. A `critical` problem goes to the person at once and is
+What is delegated: a problem whose kind is listed as `agent`, with severity `warning`,
+reported within the last 15 minutes and announced in suggest or act mode, on a task whose
+board has a `delegate_to` operator, that is not held by a person, not the operator's own
+task (held by it or assigned to it), not a delegation card and not an outage. A kind is a
+rule (`orphan_status`) or one kind of its problems, `<rule>.<kind>` with the kind the
+first part of the rule's alert key (`stale_blocks.unlinked`, `stale_blocks.overdue`): the
+kind wins over the rule, so `"stale_blocks.overdue" = "human"` keeps long waits with the
+person while other stale blocks go to the operator. A `critical` problem goes to the person at once and is
 not delegated; an `info` (notice) never is. `needs_you`, `resources`, `instruction_bloat`,
 `output_offenders`, `no_progress` and `delegation` itself are human-only, and
 `loop_breaker` and `ci_economy` are Kelpie's own: listing one of them as `agent` is refused.
@@ -878,28 +883,29 @@ not delegated; an `info` (notice) never is. `needs_you`, `resources`, `instructi
 ```toml
 [engine.rules.delegation]
 mode = "observe"                     # observe -> suggest ("would hand ... to ops-1") -> act
-classes = { stale_blocks = "agent", orphan_status = "agent" }
+classes = { orphan_status = "agent", "stale_blocks.unlinked" = "agent" }
 delegate_to = { hermes = "ops-1" }   # board (a task's source) -> operator profile
 ```
 
 | Key | Default | Allowed | Meaning |
 | --- | --- | --- | --- |
-| `classes` | `{}` | rule = `agent` \| `human` \| `kelpie` | Who may fix the problems a rule reports. A rule not listed is `human`. |
-| `delegate_to` | `{}` | board = profile | The operator agent of each board: the adapter name (`hermes`), or `<agent>:<adapter>` on a hub. A board not listed never delegates. |
-| `max_attempts` | `2` | 1 to 2 | Cards per incident (a task, or the problem when it has none) within `same_incident`. |
-| `same_incident` | `"1d"` | duration, > 0 | A card whose check failed, or the problem back within this, counts as another attempt of the same incident. |
-| `cooldown` | `"7d"` | duration, > 0, at most 30d | No new card for an incident given back to the person for this long. |
-| `hold` | `"30m"` | duration, > 0 | How long a fix must stay clear before Kelpie calls it verified. |
-| `pickup_within` | `"1h"` | duration, < `finish_within` | A card nobody picked up by then goes back to the person. |
-| `finish_within` | `"6h"` | duration, > 0 | A card not finished by then goes back to the person. |
+| `classes` | `{}` | kind = `agent` \| `human` \| `kelpie` | Who may fix the problems of a rule, or of one kind of them (`<rule>.<kind>`). A kind not listed is `human`; a rule that is not planned is refused. |
+| `delegate_to` | `{}` | board = profile | The operator agent of each board: the adapter name (`hermes`), or `<agent>/<adapter>` on a hub (the operator is then `<agent>:<profile>` on the board). A board not listed never delegates. |
+| `max_attempts` | `2` | 1 to 2 | Cards per incident (a task, or the problem when it has none) within `cooldown`; then the person. |
+| `same_incident` | `"1d"` | duration, > 0 | A card whose fix was verified closes its incident only once the fix held this long: the problem back sooner is another attempt of the same incident. |
+| `cooldown` | `"7d"` | duration, > 0, at most 30d | Cards counted for `max_attempts`, and no new card for an incident given back to the person, within this. `[storage] retention` must cover it. |
+| `hold` | `"30m"` | duration, > 0 | How long a fix must stay clear before Kelpie calls it verified (used once verdicts land, a later part of #347). |
+| `pickup_within` | `"1h"` | duration, < `finish_within` | A card nobody picked up by then goes back to the person (a later part of #347). |
+| `finish_within` | `"6h"` | duration, > 0 | A card not finished by then goes back to the person (a later part of #347). |
 | `max_per_hour` | `3` | integer >= 1 | New cards carried out per hour; the oldest problems go first. |
 | `max_per_day` | `10` | integer >= 1 | New cards carried out per day. |
-| `breaker_failures` | `3` | integer >= 1 | Failed verifications within a day that stop all delegation (the circuit breaker). |
+| `breaker_failures` | `3` | integer >= 1 | Failed verifications within a day that stop all delegation (the circuit breaker; its alert to the person comes with the verdicts). |
 
 Guards: one open card per incident (a card carried out with no verdict yet); after
-`max_attempts` failed cards, or once the incident was given back to the person, no new
-card within `cooldown`; no delegation about a delegation card or the operator's own tasks.
-Each card is carried out once per problem and attempt (`Action.once`).
+`max_attempts` cards within `cooldown`, or once the incident was given back to the person,
+no new card; no delegation about a delegation card or the operator's own tasks. Each card
+is carried out once per problem, opening and attempt (`Action.once`); attempts are
+numbered over the incident's history, so a card's idempotency key never repeats.
 
 ### unanswered_asks
 

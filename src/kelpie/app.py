@@ -3072,6 +3072,7 @@ _VERBS: dict[ActionKind, str] = {
     ActionKind.REASSIGN: "reassign tasks",
     ActionKind.CLOSE: "close tasks",
     ActionKind.WIP_COMMIT: "make WIP commits",
+    ActionKind.DELEGATE: "hand problems to an operator agent",
     ActionKind.COMMENT: "comment on tasks",
     ActionKind.STOP: "stop runs",
     ActionKind.CANCEL_BUILD: "cancel builds",

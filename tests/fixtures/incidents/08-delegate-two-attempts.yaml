@@ -23,10 +23,10 @@ snapshot:
     - {id: T-823, title: "Search index", status: blocked, status_since: "2026-03-02T09:00:00+00:00", owner_id: agent-dev-1, source: hermes}
     - {id: T-824, title: "Kelpie: stale_blocks on T-823: Search index", status: blocked, status_since: "2026-03-02T15:00:00+00:00", owner_id: ops-1, source: hermes}
   problems:
-    - {id: "stale-block:T-821", rule: stale_blocks, severity: warning, since: "2026-03-02T08:00:00+00:00", opened_at: "2026-03-02T08:30:00+00:00", summary: "T-821 is blocked on a merged PR.", task_id: T-821}
-    - {id: "stale-block:T-822", rule: stale_blocks, severity: warning, since: "2026-03-02T09:00:00+00:00", opened_at: "2026-03-02T09:30:00+00:00", summary: "T-822 is blocked on a merged PR.", task_id: T-822}
-    - {id: "stale-block:T-823", rule: stale_blocks, severity: warning, since: "2026-03-02T09:00:00+00:00", opened_at: "2026-03-02T09:30:00+00:00", summary: "T-823 is blocked on a merged PR.", task_id: T-823}
-    - {id: "stale-block:T-824", rule: stale_blocks, severity: warning, since: "2026-03-02T15:00:00+00:00", opened_at: "2026-03-02T15:30:00+00:00", summary: "T-824 is blocked on a green CI run.", task_id: T-824}
+    - {id: "stale-block:T-821", rule: stale_blocks, severity: warning, since: "2026-03-02T08:00:00+00:00", opened_at: "2026-03-02T08:30:00+00:00", summary: "T-821 is blocked on a merged PR.", task_id: T-821, last_seen: "2026-03-02T15:59:00+00:00", mode: act}
+    - {id: "stale-block:T-822", rule: stale_blocks, severity: warning, since: "2026-03-02T09:00:00+00:00", opened_at: "2026-03-02T09:30:00+00:00", summary: "T-822 is blocked on a merged PR.", task_id: T-822, last_seen: "2026-03-02T15:59:00+00:00", mode: act}
+    - {id: "stale-block:T-823", rule: stale_blocks, severity: warning, since: "2026-03-02T09:00:00+00:00", opened_at: "2026-03-02T09:30:00+00:00", summary: "T-823 is blocked on a merged PR.", task_id: T-823, last_seen: "2026-03-02T15:59:00+00:00", mode: act}
+    - {id: "stale-block:T-824", rule: stale_blocks, severity: warning, since: "2026-03-02T15:00:00+00:00", opened_at: "2026-03-02T15:30:00+00:00", summary: "T-824 is blocked on a green CI run.", task_id: T-824, last_seen: "2026-03-02T15:59:00+00:00", mode: act}
   delegations:
     - {problem: "stale-block:T-821", incident: "task:T-821", attempt: 1, kind: card, at: "2026-03-02T09:00:00+00:00", outcome: executed, task_id: T-821, operator: ops-1, card_id: T-831}
     - {problem: "stale-block:T-821", incident: "task:T-821", attempt: 1, kind: verdict, at: "2026-03-02T11:00:00+00:00", outcome: alerted, task_id: T-821, verdict: still_broken}

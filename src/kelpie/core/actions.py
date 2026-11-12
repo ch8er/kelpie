@@ -31,6 +31,9 @@ class ActionKind(StrEnum):
     LIFT_HOLD = "lift_hold"
     # Hand a problem to the operator agent as a card on its queue (#347, ``SupportsDelegate``);
     # ``params.card`` holds the card's title, body and idempotency key.
+    # Hand a problem to the operator agent as a card on its queue (#347; the adapters that
+    # create cards come in a later part); ``params.card`` holds the card's title, body and
+    # idempotency key.
     DELEGATE = "delegate"
     ESCALATE = "escalate"
     ALERT = "alert"
