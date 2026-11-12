@@ -61,11 +61,13 @@ changing a workflow file: see :mod:`kelpie.connectors.github.proposals`. And
   still be active and on the same attempt, and the newer run must still be a newer run of
   the same group. Anything else refuses the cancel;
 - a fail-fast cancel (``params.cause`` ``fail_fast``, rule 9's doomed builds) needs no
-  newer run: its target is any run that was active in a current scan and that the same
-  policy allows (repository, workflow, branch, never the default branch). Right before
-  cancelling, the run is fetched again (still active, same attempt, same commit) and the
-  failed check's runs on that commit are listed outside the cache: the newest run of the
-  ``check_workflow`` must have failed, and no run of it may be active (a re-run may still
+  newer run: its target is a run that was active in a current scan, a ``push`` or
+  ``pull_request`` run on a PR commit, its first attempt (never a re-run), not held (an
+  approval or a concurrency group), that the same policy allows (repository, workflow,
+  branch, never the default branch). Right before cancelling, the run is fetched again
+  (still active and unheld, same attempt, same commit) and the failed check's runs on that
+  commit are listed outside the cache: the last of the ``check_workflow`` runs to finish
+  must have ended in ``failure``, and no run of it may be active (a re-run may still
   pass). Anything else refuses the cancel or finds nothing to do;
 - results: done; nothing to do (the run finished, was re-run or is no longer superseded
   meanwhile, the newer run is gone, the check passed or runs again, HTTP 409, or Kelpie
@@ -597,7 +599,8 @@ class GitHubCI:
         for scan, run in work:
             run_id = _id(run.get("id")) or 0
             build = self._build(scan, run_id, run, now, tick)
-            if build.sha is not None and self._allowed(scan, run, build):
+            if self._doomable_run(scan, run, build):
+                assert build.sha is not None  # _doomable_run requires it
                 self._doomable[build.id] = _Doomable(
                     scan.repo, run_id, _attempt(run), build.sha, build.workflow
                 )
@@ -643,6 +646,19 @@ class GitHubCI:
         created = _time(run.get("created_at"))
         assert created is not None  # _page keeps only runs with a creation time
         return _Target(scan.repo, run_id, _attempt(run), newer_id, group, created)
+
+    def _doomable_run(self, scan: _RepoScan, run: Mapping[str, Any], build: Build) -> bool:
+        """A fail-fast target: an active, unheld first attempt of a push or pull request
+        run on a PR commit, which the cancel policy covers. A re-run is a human's decision,
+        and a held run (an approval, a concurrency group) is left alone, as rule 9 does."""
+        return (
+            build.sha is not None
+            and build.pr is not None
+            and not build.held
+            and run.get("event") in SUPERSEDABLE_EVENTS
+            and _attempt(run) == 1
+            and self._allowed(scan, run, build)
+        )
 
     def _allowed(self, scan: _RepoScan, run: Mapping[str, Any], build: Build) -> bool:
         """An active run of a current scan that the cancel policy covers."""
@@ -854,6 +870,7 @@ class GitHubCI:
         run = self._fresh(target.repo, target.run_id)
         if (
             not _status(run).is_active
+            or run.get("status") in _HELD
             or _attempt(run) != target.attempt
             or _str(run.get("head_sha")) != target.sha
         ):
@@ -872,8 +889,10 @@ class GitHubCI:
         return self._post_cancel(target.repo, target.run_id, build_id)
 
     def _still_failed(self, repo: str, sha: str, check: str) -> bool:
-        """The newest run of ``check`` on commit ``sha`` failed and none of it is active,
-        read from GitHub just now. A full page (more runs than one page) is no verdict."""
+        """The newest run of ``check`` on commit ``sha`` (the last to finish, as rule 9
+        reads it) ended in ``failure`` and none of it is active, read from GitHub just now.
+        Other failing conclusions (a timeout, a startup failure, an approval) are no verdict
+        on the code, and neither is a full page (more runs than one page)."""
         query = {"head_sha": sha, "per_page": str(PER_PAGE)}
         response = self.client.get(f"/repos/{repo}/actions/runs", query, fresh=True)
         if response.stale:
@@ -889,8 +908,8 @@ class GitHubCI:
         ]
         if not runs or any(_status(r).is_active for r in runs):
             return False
-        newest = max(runs, key=lambda r: (_created(r), _id(r.get("id")) or 0))
-        return _status(newest) is BuildStatus.FAILURE
+        newest = max(runs, key=lambda r: (_updated(r), _id(r.get("id")) or 0))
+        return newest.get("status") == "completed" and newest.get("conclusion") == "failure"
 
     def _post_cancel(self, repo: str, run_id: int, build_id: str) -> ActionResult:
         path = f"/repos/{repo}/actions/runs/{run_id}/cancel"
@@ -992,6 +1011,11 @@ def _status(run: Mapping[str, Any]) -> BuildStatus:
 
 def _attempt(run: Mapping[str, Any]) -> int:
     return _id(run.get("run_attempt")) or 1
+
+
+def _updated(run: Mapping[str, Any]) -> float:
+    updated = _time(run.get("updated_at"))
+    return updated.timestamp() if updated else 0.0
 
 
 def _created(run: Mapping[str, Any]) -> float:

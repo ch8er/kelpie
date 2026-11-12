@@ -10,12 +10,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ### Added
 
-- The GitHub CI connector carries out rule 9's fail-fast `cancel_build`: a queued or
-  running build on a PR commit whose cheap required check already failed is cancelled,
-  under the same `[connectors.github.ci]` cancel policy as superseded runs (`allow_cancel`,
-  `cancel_repos`, `cancel_workflows`, `cancel_branches`; never the default branch). Right
-  before the cancel it re-reads the run (still active, same attempt and commit) and the
-  check's runs on that commit outside the cache (the newest failed, none running);
+- The GitHub CI connector carries out rule 9's fail-fast `cancel_build` (#450): a queued
+  or running `push` or `pull_request` run on a PR commit whose cheap required check
+  already failed is cancelled, under the same `[connectors.github.ci]` cancel policy as
+  superseded runs (`allow_cancel`, `cancel_repos`, `cancel_workflows`, `cancel_branches`;
+  never the default branch). The connector checks this itself: never a re-run (a human's
+  decision) or a held run (an approval, a concurrency group). Right before the cancel it
+  re-reads the run (still active and unheld, same attempt and commit) and the check's runs
+  on that commit outside the cache (the last to finish ended in `failure`, none running);
   otherwise it does nothing. Until now it refused every fail-fast cancel. Rule 9's
   fail-fast cancels stay observe-only until `fail_fast_mode = "rule"`, and the rule's own
   mode and the global dry-run still apply.

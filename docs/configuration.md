@@ -622,10 +622,12 @@ no build of it is running there (a re-run may still pass). Held builds (an appro
 concurrency group) and builds the superseded cancel already covers are left alone; once
 per build. Observe-only until `fail_fast_mode = "rule"`. The GitHub connector carries out
 a fail-fast cancel under the same policy as a superseded one (`allow_cancel`,
-`cancel_repos`, `cancel_workflows`, `cancel_branches`, never the default branch), for a run
-that was active in its last scan, and only after a fresh re-check: the run is still active
-on the same attempt and commit, and the check's newest run on that commit failed with none
-of it running (a re-run may still pass). Otherwise it finds nothing to do.
+`cancel_repos`, `cancel_workflows`, `cancel_branches`, never the default branch), for a
+`push` or `pull_request` run on a PR commit that was active in its last scan, never a
+re-run or a held run, and only after a fresh re-check: the run is still active and unheld
+on the same attempt and commit, and the check's last run to finish on that commit ended in
+`failure` with none of it running (a re-run may still pass). Otherwise it finds nothing to
+do.
 
 ### 10. loop_breaker
 

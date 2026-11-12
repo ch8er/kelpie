@@ -620,6 +620,83 @@ def test_fail_fast_recheck_before_cancel() -> None:
             assert posts(gh) == []
 
 
+def test_fail_fast_targets_only_first_unheld_pr_runs() -> None:
+    base = {"path": IOS, "workflow_id": 9, "head_sha": SHA}
+    for scanned in (
+        pr_run(12, 9, 7, "main", run_attempt=2, **base),  # a human's re-run
+        pr_run(12, 9, 7, "main", status="waiting", **base),  # held for an approval
+        pr_run(12, 9, 7, "main", **base) | {"event": "workflow_dispatch"},  # started by hand
+        run(12, 9, **base),  # a push with no PR
+    ):
+        with serve() as gh:
+            lint = pr_run(11, 10, 7, "main", path=LINT, workflow_id=8, head_sha=SHA)
+            lint |= {"status": "completed", "conclusion": "failure"}
+            runs_page(gh, [scanned, lint])
+            gh.reply(f"{RUNS}/12", scanned)
+            heads(gh, [scanned, lint])
+            source = ci(gh, **ALLOWED)
+            source(Snapshot(now=NOW))
+            assert source.execute(doomed()) is ActionResult.REFUSED, scanned
+            assert posts(gh) == []
+    with serve() as gh:  # held after the scan: nothing to do
+        doomed_head(gh)
+        source = ci(gh, **ALLOWED)
+        source(Snapshot(now=NOW))
+        gh.reply(f"{RUNS}/12", pr_run(12, 9, 7, "main", status="pending", **base))
+        assert source.execute(doomed()) is ActionResult.NOTHING_TO_DO
+        assert posts(gh) == []
+
+
+def test_fail_fast_check_verdicts() -> None:
+    lint_run = {"path": LINT, "workflow_id": 8}
+    other_head = pr_run(11, 10, 7, "main", status="completed", conclusion="failure", **lint_run)
+    timed_out = pr_run(
+        11, 10, 7, "main", head_sha=SHA, status="completed", conclusion="timed_out", **lint_run
+    )
+    for check_runs in ([other_head], [timed_out]):  # another commit; no verdict on the code
+        with serve() as gh:
+            doomed_head(gh)
+            source = ci(gh, **ALLOWED)
+            source(Snapshot(now=NOW))
+            heads(gh, check_runs)
+            assert source.execute(doomed()) is ActionResult.NOTHING_TO_DO
+            assert posts(gh) == []
+
+
+def test_fail_fast_cancel_forbidden_and_reserve_low() -> None:
+    with serve() as gh:
+        doomed_head(gh)
+        gh.reply(f"POST {RUNS}/12/cancel", {"message": "Resource not accessible"}, status=403)
+        source = ci(gh, **ALLOWED)
+        source(Snapshot(now=NOW))
+        assert source.execute(doomed()) is ActionResult.REFUSED
+    with serve() as gh:
+        doomed_head(gh)
+        clock = Clock(NOW)
+        source = ci(gh, clock, rate_reserve=1000, **ALLOWED)
+        source(Snapshot(now=NOW))
+        source.client.rate_remaining = 10
+        source.client.rate_reset = NOW + timedelta(hours=1)
+        clock.advance(minutes=5)
+        source(Snapshot(now=clock.now))  # skipped: nothing may be cancelled on old evidence
+        assert source.execute(doomed()) is ActionResult.REFUSED
+        assert posts(gh) == []
+
+
+def test_fail_fast_check_runs_served_stale_raise() -> None:
+    with serve() as gh:
+        doomed_head(gh)
+        source = ci(gh, **ALLOWED)
+        source(Snapshot(now=NOW))
+        source.client.get(f"{RUNS}", {"head_sha": SHA, "per_page": "100"})  # cached
+        fresh_run = source._fresh(REPO, 12)
+        source._fresh = lambda repo, run_id: fresh_run  # type: ignore[method-assign]
+        source.client.backoff_until = NOW + timedelta(minutes=5)
+        with pytest.raises(GitHubError, match="check runs could not be re-checked"):
+            source.execute(doomed())
+        assert posts(gh) == []
+
+
 def test_fail_fast_check_runs_are_read_fresh() -> None:
     with serve() as gh:
         doomed_head(gh)
