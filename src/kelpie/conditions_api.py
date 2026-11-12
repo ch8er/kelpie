@@ -10,16 +10,18 @@ Off by default. With ``[conditions] enabled = true`` the main listener of ``kelp
     {"task_id": "T-1", "kind": "pr_merged", "params": {"repo": "owner/name", "pr": 12}}
 
 **Attach-only.** A registered condition attaches to its task inside Kelpie: each snapshot
-carries it in ``Snapshot.conditions`` with ``task_id`` set while the task is on the board
-and ready, in progress or waiting (:data:`ATTACH_TO`; never a blocked task, whose block
-rule 4 would read it as ending), the connectors evaluate it like any other (``pr_merged``
-and ``ci_status`` by the GitHub connector, ``task_status`` from the board, ...), and the
-rules read it in their own modes (rule 2 wakes a waiting task once it holds). Registering
-never parks the task or changes anything on the board: the agent sets its own status. A
-registration made at most :data:`REGISTER_GRACE` before the task's current status counts
-from that status (register, then set waiting and exit); an older one is left over from an
-earlier wait, as for any condition. Only the kinds an evaluator reads are taken
-(:data:`REGISTRABLE`), and params never set the keys evaluators write (:data:`RESERVED`).
+carries it in ``Snapshot.conditions`` with ``task_id`` set while the task is on the board,
+in progress or waiting (:data:`ATTACH_TO`; never a blocked task, whose block rule 4 would
+read it as ending, nor a ready one, which the dispatch gate would park), the connectors
+evaluate it like any other (``pr_merged`` and ``ci_status`` by the GitHub connector,
+``task_status`` from the board, ...), and the rules read it in their own modes (rule 2
+wakes a waiting task once it holds). Registering never parks the task or changes anything
+on the board: the agent sets its own status. A registration made at most
+:data:`REGISTER_GRACE` before the task's wait began counts from that wait (register, then
+set waiting and exit), and is bound to it: a later wait needs it registered again. An older
+one is left over from an earlier wait, as for any condition. Only the kinds an evaluator
+reads are taken (:data:`REGISTRABLE`), and params never set the keys evaluators write
+(:data:`RESERVED`).
 
 **Trust.** One token for every agent: whoever holds it may register for any task (and so
 add a condition a task's wake also waits for). Give it only to the farm's agents.
@@ -33,10 +35,10 @@ of at most :data:`MAX_PARAMS` scalar values, keys and strings at most 200 charac
 otherwise.
 
 **Idempotent.** A registration is identified by its task, kind and params (a hash of their
-canonical JSON): the same one again is ``200`` with ``"duplicate": true`` and keeps its first
-registration time; a new one is ``201``. At most ``max_registered`` live registrations are
-kept (507 beyond, nothing stored). A registration is dropped once its task is done or
-cancelled on the board, or ``max_age`` after it was made.
+canonical JSON): the same one again is ``200`` with ``"duplicate": true`` and counts from
+now (a later wait on the same thing); a new one is ``201``. At most ``max_registered`` live
+registrations are kept (507 beyond, nothing stored). A registration is dropped once its
+task finishes on the board, or ``max_age`` after it was made.
 
 Registrations live in Kelpie's database (table ``registered_conditions``, created when
 missing; no schema version), so a restart keeps them.
@@ -90,10 +92,23 @@ REGISTRABLE = frozenset(
     }
 )
 # Params the evaluators write or trust as their own results, never a client's.
-RESERVED = frozenset({"terminal", "terminal_ok", "error", "satisfied", "source"})
+RESERVED = frozenset(
+    {
+        "terminal",
+        "terminal_ok",
+        "error",
+        "satisfied",
+        "source",
+        "pr_state",
+        "ci_state",
+        "ci_source",
+        "head_sha",
+    }
+)
 # Statuses a registration attaches to: a task working, about to wait, or waiting. Never a
 # blocked one: rule 4 would read a registered condition as the end of its block.
-ATTACH_TO = frozenset({Status.READY, Status.IN_PROGRESS, Status.WAITING})
+# Not a ready one either: the dispatch gate would park it on an unmet registration.
+ATTACH_TO = frozenset({Status.IN_PROGRESS, Status.WAITING})
 # The usual order is: register, then set the waiting status and exit. A registration made at
 # most this long before the task's current status counts from that status, as made for it.
 REGISTER_GRACE = timedelta(minutes=15)
@@ -105,7 +120,8 @@ CREATE TABLE IF NOT EXISTS registered_conditions (
     task_id       TEXT NOT NULL,
     kind          TEXT NOT NULL,
     params        TEXT NOT NULL,
-    registered_at TEXT NOT NULL
+    registered_at TEXT NOT NULL,
+    bound_to      TEXT  -- the task's status_since the registration was taken for (once)
 );
 CREATE INDEX IF NOT EXISTS registered_conditions_at ON registered_conditions (registered_at);
 CREATE INDEX IF NOT EXISTS registered_conditions_task ON registered_conditions (task_id);
@@ -299,12 +315,21 @@ class ConditionRegistry:
                 if db.execute(
                     "SELECT 1 FROM registered_conditions WHERE id = ?", (ident,)
                 ).fetchone():
+                    # The same again, for this wait: it counts from now, bound to no wait yet.
+                    db.execute(
+                        "UPDATE registered_conditions SET registered_at = ?, bound_to = NULL"
+                        " WHERE id = ?",
+                        (_ts(now), ident),
+                    )
                     return Answer(200, {"id": ident, "duplicate": True})
-                live = db.execute("SELECT COUNT(*) FROM registered_conditions").fetchone()[0]
+                live = db.execute(
+                    "SELECT COUNT(*) FROM registered_conditions WHERE registered_at >= ?",
+                    (_ts(now - self.settings.max_age),),
+                ).fetchone()[0]
                 if live >= self.settings.max_registered:
                     return Answer(507, {"error": "too many registered conditions"})
                 db.execute(
-                    "INSERT INTO registered_conditions VALUES (?, ?, ?, ?, ?)",
+                    "INSERT INTO registered_conditions VALUES (?, ?, ?, ?, ?, NULL)",
                     (ident, task, kind.value, json.dumps(params, sort_keys=True), _ts(now)),
                 )
         log.info("condition %s registered for task %s (%s)", ident, task[:MAX_TEXT], kind)
@@ -325,7 +350,8 @@ class ConditionRegistry:
         known = {c.id for c in snapshot.conditions}
         tasks = {t.id: t for t in snapshot.tasks}
         found = []
-        for ident, task_id, kind, params, at in rows:
+        bind: list[tuple[str, str]] = []
+        for ident, task_id, kind, params, at, bound in rows:
             task = tasks.get(task_id)
             if ident in known or task is None or task.status not in ATTACH_TO:
                 continue  # not on the board now, or not a task a registration attaches to
@@ -341,15 +367,29 @@ class ConditionRegistry:
             except (ValueError, TypeError) as exc:  # a row someone else wrote
                 log.warning("registered condition %s skipped: %s", ident[:64], exc)
                 continue
-            if task.status_since > registered >= task.status_since - REGISTER_GRACE:
-                # Registered, then the status set: made for this wait.
+            since = _ts(task.status_since)
+            fresh = task.status_since > registered >= task.status_since - REGISTER_GRACE
+            if bound == since or (bound is None and fresh and task.status is Status.WAITING):
+                # Registered, then the wait set: made for this wait, and for no later one.
                 condition = replace(condition, registered_at=task.status_since)
+                if bound is None:
+                    bind.append((since, ident))
             found.append(condition)
+        if bind and not self.readonly:
+            try:
+                with self._lock:
+                    db = self._conn()
+                    with db:
+                        db.executemany(
+                            "UPDATE registered_conditions SET bound_to = ? WHERE id = ?", bind
+                        )
+            except sqlite3.Error as exc:  # counted for this tick; bound on the next
+                log.warning("registered conditions not bound: %s", exc)
         if not found:
             return snapshot
         return replace(snapshot, conditions=(*snapshot.conditions, *found))
 
-    def _live(self, snapshot: Snapshot) -> list[tuple[str, str, str, str, str]]:
+    def _live(self, snapshot: Snapshot) -> list[tuple[str, str, str, str, str, str | None]]:
         """The rows within ``max_age``; every :data:`PRUNE_EVERY` (not with ``readonly``)
         those of finished tasks and older ones are deleted first."""
         oldest = _ts(snapshot.now - self.settings.max_age)
@@ -362,7 +402,8 @@ class ConditionRegistry:
                 self._pruned_at = snapshot.now
                 self._prune(db, snapshot, oldest)
             return db.execute(
-                "SELECT id, task_id, kind, params, registered_at FROM registered_conditions"
+                "SELECT id, task_id, kind, params, registered_at, bound_to"
+                " FROM registered_conditions"
                 " WHERE registered_at >= ? ORDER BY registered_at, id",
                 (oldest,),
             ).fetchall()

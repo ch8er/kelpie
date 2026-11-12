@@ -14,9 +14,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
   params), off by default (`[conditions] enabled`). On the main listener (loopback by
   default, behind the Host and connection guards), with a bearer token of its own
   (`[conditions] token_env`, compared in constant time before the body is read), no
-  `Origin`, at most 16 KiB of JSON. Duplicates are idempotent (`200`, same id). Attach-only:
-  a registered condition attaches to its task inside Kelpie (ready, in progress or waiting,
-  never blocked) and the connectors evaluate it; nothing on the board changes. Only kinds
+  `Origin`, at most 16 KiB of JSON. Duplicates are idempotent (`200`, same id, counted
+  from now). Attach-only:
+  a registered condition attaches to its task inside Kelpie (in progress or waiting, never
+  blocked or ready) for one wait and the connectors evaluate it; nothing on the board changes. Only kinds
   something evaluates, and never the keys evaluators write. Registrations are dropped when
   their task finishes or after `max_age`; `kelpie why` and the report read them. Single-host
   `kelpie serve` only for now.

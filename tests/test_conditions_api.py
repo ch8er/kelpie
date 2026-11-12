@@ -98,7 +98,7 @@ def test_a_registration_is_stored_once_and_attached_to_its_task(
     [condition] = out.conditions
     assert (condition.kind, condition.task_id) == (ConditionKind.PR_MERGED, "T-1")
     assert condition.params == {"pr": 12, "repo": "example/repo"}
-    assert condition.registered_at == NOW  # the first registration's time
+    assert condition.registered_at == NOW + timedelta(hours=1)  # the repeat counts from now
     assert condition.satisfied is None  # the connectors evaluate it, not the endpoint
     assert out.tasks == snapshot.tasks  # attach-only: the board is untouched
 
@@ -283,7 +283,7 @@ def test_a_row_it_cannot_read_is_skipped(registry: ConditionRegistry, tmp_path: 
     with sqlite3.connect(tmp_path / "k.db") as db:
         db.execute(
             "INSERT INTO registered_conditions VALUES ('registered:x', 'T-1', 'pr_merged',"
-            " '{broken', ?)",
+            " '{broken', ?, NULL)",
             (NOW.isoformat(),),
         )
     task = Task("T-1", "t", Status.WAITING, NOW)
@@ -319,3 +319,34 @@ def test_a_closed_registry_does_not_reopen(registry: ConditionRegistry) -> None:
     registry.close()
     task = Task("T-1", "t", Status.WAITING, NOW)
     assert registry(Snapshot(now=NOW, tasks=(task,))).conditions == ()
+
+
+def test_a_ready_task_gets_no_registered_condition(registry: ConditionRegistry) -> None:
+    # The dispatch gate would park it on an unmet registration: not attach-only.
+    registry.register(body(PR))
+    ready = Task("T-1", "t", Status.READY, NOW)
+    assert registry(Snapshot(now=NOW, tasks=(ready,))).conditions == ()
+
+
+def test_a_registration_is_taken_for_one_wait(registry: ConditionRegistry) -> None:
+    from kelpie.core.conditions import linked_conditions
+
+    wait = {"task_id": "T-1", "kind": "task_status", "params": {"task": "T-0"}}
+    registry.register(body(wait))
+    first = Task("T-1", "t", Status.WAITING, NOW + timedelta(minutes=1))
+    snap = registry(Snapshot(now=NOW + timedelta(minutes=2), tasks=(first,)))
+    assert linked_conditions(first, snap)[0]  # bound to the first wait
+    # Woken, back to work, waiting again within the grace: the old one is not this wait's.
+    second = replace(first, status_since=NOW + timedelta(minutes=10))
+    snap = registry(Snapshot(now=NOW + timedelta(minutes=11), tasks=(second,)))
+    assert snap.conditions[0].registered_at == NOW
+    assert not linked_conditions(second, snap)[0]
+    # The agent registers the same again for this wait: it counts.
+    CLOCK[0] = NOW + timedelta(minutes=9)
+    assert registry.register(body(wait)).status == 200
+    snap = registry(Snapshot(now=NOW + timedelta(minutes=12), tasks=(second,)))
+    assert linked_conditions(second, snap)[0]
+    # Made more than the grace before the wait: left over, not linked.
+    late = replace(second, status_since=NOW + timedelta(hours=2))
+    snap = registry(Snapshot(now=NOW + timedelta(hours=2, minutes=1), tasks=(late,)))
+    assert not linked_conditions(late, snap)[0]
