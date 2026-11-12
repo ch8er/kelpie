@@ -18,7 +18,7 @@ from typing import Protocol
 from kelpie.core.budgets import PriceTable
 from kelpie.core.config import Mode
 from kelpie.core.files import write_private
-from kelpie.core.model import HostSleep, Reconciliation, Snapshot, Snooze, source_agent
+from kelpie.core.model import HostSleep, Reconciliation, Snapshot, Snooze, Span, source_agent
 from kelpie.core.spend import SpendConfig
 from kelpie.core.storage import ActionDay, TokenRow
 from kelpie.core.transitions import StatusChange
@@ -39,6 +39,7 @@ from kelpie.report.store import ReportStore
 from kelpie.report.waits import BlockKind
 from kelpie.traces.hooks import merge_hook_spans
 from kelpie.traces.outputs import OutputSettings
+from kelpie.traces.scope import ScopeGuard, TokenScope
 
 
 class Sender(Protocol):
@@ -75,6 +76,9 @@ class ReportSources:
     # Providers' bills against the estimate for UTC days ``since`` to ``until``
     # (``kelpie.app.read_reconciliations``); None: no cost reports configured.
     reconcile: Callable[[date, date], Sequence[Reconciliation] | str] | None = None
+    # [[traces.tokens]] scopes: a token's span folds a hook span only into one it may report
+    # (#374), judged against the board
+    token_scopes: Mapping[str, TokenScope] = field(default_factory=dict)
 
 
 def default_day(now: datetime, settings: ReportSettings) -> date:
@@ -120,8 +124,17 @@ def load_inputs(sources: ReportSources, day: date, board: Snapshot) -> ReportInp
             watched = store.watched(start, end)
     # Hook spans (platforms without OTLP) live in the adapters, not in the store; the same
     # call reported both ways is kept once.
+    pairable = None
+    if sources.token_scopes:
+        guard = ScopeGuard(sources.token_scopes)
+        guard.refresh(board, attribution)
+
+        def pairable(otlp: Span, hook: Span) -> bool:
+            # no scope check follows: a run that left the board still takes its own calls
+            return guard.may_fold(otlp, hook, strict=False)
+
     merged = merge_hook_spans(
-        [*spans, *(s for s in board.spans if history <= (s.end or s.start) < end)]
+        [*spans, *(s for s in board.spans if history <= (s.end or s.start) < end)], pairable
     ).spans
     return ReportInputs(
         reconciliations=_bills(sources, end),

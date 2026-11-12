@@ -174,6 +174,8 @@ class OffenderWatch:
     tz: tzinfo
     every: timedelta = OFFENDERS_EVERY
     retry_after: timedelta = OFFENDERS_RETRY
+    # the scope guard's pairing (#374): its index is this tick's (checked before)
+    pairable: Callable[[Span, Span], bool] | None = None
     _found: tuple[OutputOffender, ...] = ()
     _next: datetime | None = None
 
@@ -194,7 +196,7 @@ class OffenderWatch:
         hooks = [s for s in snapshot.spans if s.kind is SpanKind.TOOL and last_at(s) >= start]
         # The snapshot carries the stored spans of its window too, already folded with
         # their hook spans (command, task, session): its copy goes first and wins.
-        spans = merge_hook_spans(merge_spans(hooks, stored)).spans
+        spans = merge_hook_spans(merge_spans(hooks, stored), self.pairable).spans
         roles, platforms = session_context(snapshot, remembered)
         self._found = repeated_offenders(calls(spans, roles, platforms), self.settings, self.tz)
         self._next = now + self.every

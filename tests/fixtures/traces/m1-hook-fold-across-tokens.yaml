@@ -1,0 +1,53 @@
+# #374: the hook/OTLP pairing across ingest tokens ("hook fold"). agent-dev-2's run S-102
+# loops: eight identical shell calls, recorded by the platform's hook (verified). agent-dev-1
+# sends OTLP tool spans in its own session S-101, under its own token, carrying the same
+# (provider-generated) call ids. Paired by call id regardless of the token, each hook span
+# folded into a dev-1 span moved to S-102; the scope check judged those out of scope and
+# deleted them, and rule 10 missed the loop. Now a span pairs with a hook span only when its
+# token may report the folded span: the hook calls stay, and rule 10 stops S-102.
+# Read by tests/traces/test_hook_fold_tokens.py.
+id: m1-hook-fold-across-tokens
+description: >
+  Another token's spans carrying a looping run's call ids no longer fold its verified hook
+  calls away: rule 10 stops S-102; dev-1's own spans stay in S-101 and stop nothing.
+config:
+  tokens:
+    - {name: dev-1, owners: [agent-dev-1]}
+    - {name: dev-2, roles: [developer-b]}
+snapshot:
+  now: "2026-03-02T12:00:00+00:00"
+  owners:
+    - {id: agent-dev-1, role: developer}
+    - {id: agent-dev-2, role: developer-b}
+  tasks:
+    - {id: T-101, title: "Sender task", status: in_progress, owner_id: agent-dev-1,
+       status_since: "2026-03-02T11:00:00+00:00"}
+    - {id: T-102, title: "Looping task", status: in_progress, owner_id: agent-dev-2,
+       status_since: "2026-03-02T11:00:00+00:00"}
+  sessions:
+    - {id: S-101, task_id: T-101, owner_id: agent-dev-1, started_at: "2026-03-02T11:00:00+00:00",
+       last_heartbeat: "2026-03-02T11:59:00+00:00"}
+    - {id: S-102, task_id: T-102, owner_id: agent-dev-2, started_at: "2026-03-02T11:00:00+00:00",
+       last_heartbeat: "2026-03-02T11:59:00+00:00"}
+  spans:
+    - {trace_id: hook, span_id: h-0, name: "execute_tool shell", kind: tool, start: "2026-03-02T11:51:00+00:00", end: "2026-03-02T11:51:01+00:00", session_id: S-102, tool: shell, args_hash: same-args, attributes: {kelpie.source: hooks, gen_ai.tool.call.id: call-0}}
+    - {trace_id: hook, span_id: h-1, name: "execute_tool shell", kind: tool, start: "2026-03-02T11:51:30+00:00", end: "2026-03-02T11:51:31+00:00", session_id: S-102, tool: shell, args_hash: same-args, attributes: {kelpie.source: hooks, gen_ai.tool.call.id: call-1}}
+    - {trace_id: hook, span_id: h-2, name: "execute_tool shell", kind: tool, start: "2026-03-02T11:52:00+00:00", end: "2026-03-02T11:52:01+00:00", session_id: S-102, tool: shell, args_hash: same-args, attributes: {kelpie.source: hooks, gen_ai.tool.call.id: call-2}}
+    - {trace_id: hook, span_id: h-3, name: "execute_tool shell", kind: tool, start: "2026-03-02T11:52:30+00:00", end: "2026-03-02T11:52:31+00:00", session_id: S-102, tool: shell, args_hash: same-args, attributes: {kelpie.source: hooks, gen_ai.tool.call.id: call-3}}
+    - {trace_id: hook, span_id: h-4, name: "execute_tool shell", kind: tool, start: "2026-03-02T11:53:00+00:00", end: "2026-03-02T11:53:01+00:00", session_id: S-102, tool: shell, args_hash: same-args, attributes: {kelpie.source: hooks, gen_ai.tool.call.id: call-4}}
+    - {trace_id: hook, span_id: h-5, name: "execute_tool shell", kind: tool, start: "2026-03-02T11:53:30+00:00", end: "2026-03-02T11:53:31+00:00", session_id: S-102, tool: shell, args_hash: same-args, attributes: {kelpie.source: hooks, gen_ai.tool.call.id: call-5}}
+    - {trace_id: hook, span_id: h-6, name: "execute_tool shell", kind: tool, start: "2026-03-02T11:54:00+00:00", end: "2026-03-02T11:54:01+00:00", session_id: S-102, tool: shell, args_hash: same-args, attributes: {kelpie.source: hooks, gen_ai.tool.call.id: call-6}}
+    - {trace_id: hook, span_id: h-7, name: "execute_tool shell", kind: tool, start: "2026-03-02T11:54:30+00:00", end: "2026-03-02T11:54:31+00:00", session_id: S-102, tool: shell, args_hash: same-args, attributes: {kelpie.source: hooks, gen_ai.tool.call.id: call-7}}
+    - {trace_id: tr-dev-1, span_id: o-0, name: "execute_tool shell", kind: tool, start: "2026-03-02T11:51:00+00:00", session_id: S-101, tool: shell, attributes: {kelpie.ingest.token: dev-1, gen_ai.tool.call.id: call-0}}
+    - {trace_id: tr-dev-1, span_id: o-1, name: "execute_tool shell", kind: tool, start: "2026-03-02T11:51:30+00:00", session_id: S-101, tool: shell, attributes: {kelpie.ingest.token: dev-1, gen_ai.tool.call.id: call-1}}
+    - {trace_id: tr-dev-1, span_id: o-2, name: "execute_tool shell", kind: tool, start: "2026-03-02T11:52:00+00:00", session_id: S-101, tool: shell, attributes: {kelpie.ingest.token: dev-1, gen_ai.tool.call.id: call-2}}
+    - {trace_id: tr-dev-1, span_id: o-3, name: "execute_tool shell", kind: tool, start: "2026-03-02T11:52:30+00:00", session_id: S-101, tool: shell, attributes: {kelpie.ingest.token: dev-1, gen_ai.tool.call.id: call-3}}
+    - {trace_id: tr-dev-1, span_id: o-4, name: "execute_tool shell", kind: tool, start: "2026-03-02T11:53:00+00:00", session_id: S-101, tool: shell, attributes: {kelpie.ingest.token: dev-1, gen_ai.tool.call.id: call-4}}
+    - {trace_id: tr-dev-1, span_id: o-5, name: "execute_tool shell", kind: tool, start: "2026-03-02T11:53:30+00:00", session_id: S-101, tool: shell, attributes: {kelpie.ingest.token: dev-1, gen_ai.tool.call.id: call-5}}
+    - {trace_id: tr-dev-1, span_id: o-6, name: "execute_tool shell", kind: tool, start: "2026-03-02T11:54:00+00:00", session_id: S-101, tool: shell, attributes: {kelpie.ingest.token: dev-1, gen_ai.tool.call.id: call-6}}
+    - {trace_id: tr-dev-1, span_id: o-7, name: "execute_tool shell", kind: tool, start: "2026-03-02T11:54:30+00:00", session_id: S-101, tool: shell, attributes: {kelpie.ingest.token: dev-1, gen_ai.tool.call.id: call-7}}
+expected:
+  stopped_sessions: [S-102]
+  folded: 0
+not_expected:
+  stopped_sessions: [S-101]
