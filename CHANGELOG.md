@@ -10,6 +10,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ### Added
 
+- Provider cost reports feed budgets (#205): a farm-wide `usd` budget in `api` mode counts
+  each reconciled provider day wholly within its window at the bill instead of the traces'
+  estimate. Every budget says where its spend came from (`traces`, Claude Code's metrics,
+  the bill) in `kelpie status`; billed days keep both figures (`kelpie_budget_billed_usd`,
+  `kelpie_budget_billed_estimate_usd`), a gap past the warning thresholds is marked
+  (`kelpie_budget_sources_disagree`), and a hard threshold only the bill passes is held at
+  soft (nothing is stopped for it). The daily report's bill check names the budgets that
+  count the bill.
 - Rules see each task's recent observed status history (#462): `Snapshot.status_history`,
   the status changes `kelpie serve` records (#157) over the last 7 days per task (at most
   32, with the status the window began in), read back from the database at start.

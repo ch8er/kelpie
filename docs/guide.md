@@ -899,7 +899,12 @@ Spend is the counted token usage (see "Traces") over the window, priced per mode
 Tokens of a model with no price still count for `tokens` budgets; for `usd` budgets their
 cost is unknown and left out, never guessed, and `kelpie_budget_cost_unknown_tokens` shows
 how many there are. Usage is read from the span store once a minute, as plain indexed sums
-(about 0.3 s for four windows over a million stored spans).
+(about 0.3 s for four windows over a million stored spans). Claude Code's own token metrics
+count too, for sessions with no model call in traces; and a farm-wide dollar budget counts
+each settled day of a provider with a cost report at the bill, keeping both figures
+(`kelpie_budget_billed_usd`, `kelpie_budget_billed_estimate_usd`,
+`kelpie_budget_sources_disagree`): see "Spend sources" in
+[configuration](configuration.md#budgets-and-prices).
 
 Every tick carries the state of each budget and subject in `Snapshot.budgets`: spent,
 remaining (to the hard threshold, else the soft one), the burn rate per hour over

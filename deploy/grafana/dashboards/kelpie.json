@@ -1045,6 +1045,24 @@
           "refId": "A",
           "expr": "kelpie_budget_spent",
           "legendFormat": "{{budget}} / {{subject}} ({{unit}})"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "kelpie-prometheus"
+          },
+          "refId": "B",
+          "expr": "kelpie_budget_billed_usd",
+          "legendFormat": "billed {{budget}}"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "kelpie-prometheus"
+          },
+          "refId": "C",
+          "expr": "kelpie_budget_billed_estimate_usd",
+          "legendFormat": "traces for the billed days {{budget}}"
         }
       ],
       "fieldConfig": {

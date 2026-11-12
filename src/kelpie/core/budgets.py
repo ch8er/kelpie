@@ -24,8 +24,8 @@ from __future__ import annotations
 
 import math
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta
+from dataclasses import dataclass, field, replace
+from datetime import UTC, date, datetime, timedelta
 from enum import StrEnum
 from fnmatch import fnmatchcase
 from itertools import pairwise
@@ -37,6 +37,7 @@ from kelpie.core.model import (
     BudgetStatus,
     BudgetUnit,
     LimitHit,
+    Reconciliation,
     Snapshot,
 )
 from kelpie.core.prices import DEFAULT_PRICES, Price, PriceTable, is_glob
@@ -55,13 +56,22 @@ __all__ = [
     "LimitHit",
     "Price",
     "PriceTable",
+    "billable",
     "evaluate",
     "load_budgets",
     "next_limit_at",
     "threshold_forecast",
+    "with_bills",
 ]
 
 FARM = "farm"
+# A reconciled day settles 6 hours after it ends (kelpie.app.SETTLE): only a window of
+# more than this can ever hold one whole.
+BILLABLE_WINDOW = timedelta(hours=30)
+# BudgetStatus.sources
+TRACES = "traces"
+CLAUDE_CODE_METRICS = "claude_code_metrics"  # tokens from POST /v1/metrics (calls = 0)
+BILL = "bill"
 LABEL = "label:"
 DEFAULT_WINDOW = timedelta(hours=24)
 DEFAULT_BURN_WINDOW = timedelta(hours=1)
@@ -326,6 +336,7 @@ class _Spend:
     spent: float = 0.0
     cost_unknown_tokens: int = 0
     sessions: set[str] = field(default_factory=set)
+    sources: set[str] = field(default_factory=set)
 
 
 @dataclass(frozen=True, slots=True)
@@ -419,6 +430,7 @@ def _status(
         cost_unknown_tokens=spend.cost_unknown_tokens,
         estimated=subscription,
         session_ids=tuple(sorted(spend.sessions)),
+        sources=tuple(s for s in (TRACES, CLAUDE_CODE_METRICS) if s in spend.sources),
     )
 
 
@@ -446,6 +458,8 @@ def _spend(
             spend.spent += price.cost(row)
         if row.session_id:
             spend.sessions.add(row.session_id)
+        # Metered rows (Claude Code's own metrics) carry no model call of their own.
+        spend.sources.add(TRACES if row.calls else CLAUDE_CODE_METRICS)
     return acc, lost
 
 
@@ -471,6 +485,96 @@ def _subject(budget: Budget, row: TokenUsage, known: _Known) -> str | object | N
     if labels is None:
         return _UNKNOWN
     return budget.match if budget.match[len(LABEL) :] in labels else None
+
+
+# --- the bill (#205) ---------------------------------------------------------------------
+
+
+def with_bills(
+    config: BudgetConfig,
+    statuses: Sequence[BudgetStatus],
+    reconciliations: Sequence[Reconciliation],
+    now: datetime,
+) -> tuple[BudgetStatus, ...]:
+    """``statuses`` with the providers' bills in place of the traces' estimate where a bill
+    can stand for it: in a farm-wide (``day`` scope, no ``match``) ``usd`` budget in ``api``
+    mode, for each reconciled provider day that lies wholly within the budget's window
+    (from its UTC midnight to the next one, between ``now - window`` and ``now``). A bill
+    has no tasks or agents, so other budgets keep the traces' figure, and a day only partly
+    in the window cannot be split.
+
+    Both figures stay on the status (``billed_usd``, ``billed_estimate_usd``), and a day
+    whose gap is past the warning thresholds marks ``sources_disagree``. A hard threshold
+    that only the bill reaches (traces alone stay below it) is held at soft
+    (``bill_only_hard``): a stop acts on the runs Kelpie sees, and the extra may be other
+    users of the same key or the bill's non-token items. Pure; :func:`evaluate` first."""
+    if not reconciliations:
+        return tuple(statuses)
+    budgets = {b.name: b for b in config.budgets}
+    out: list[BudgetStatus] = []
+    for status in statuses:
+        budget = budgets.get(status.budget)
+        if budget is None or not billable(budget):
+            out.append(status)
+            continue
+        start = now - budget.window
+        days = sorted(
+            (r for r in reconciliations if r.day >= start and r.day + _DAY <= now),
+            key=lambda r: (r.day, r.provider),
+        )
+        if not days:
+            out.append(status)
+            continue
+        out.append(_billed(budget, status, days, now))
+    return tuple(out)
+
+
+_DAY = timedelta(days=1)
+
+
+def billable(budget: Budget) -> bool:
+    """Whether ``budget`` counts reconciled days at the bill (:func:`with_bills`)."""
+    return (
+        budget.scope is BudgetScope.DAY
+        and budget.match is None
+        and budget.unit is BudgetUnit.USD
+        and budget.mode is BudgetMode.API
+    )
+
+
+def _billed(
+    budget: Budget, status: BudgetStatus, days: Sequence[Reconciliation], now: datetime
+) -> BudgetStatus:
+    billed = sum(r.reported_usd for r in days)
+    # What the budget counted for those days: the traces' estimate and Claude Code's
+    # metrics (the bill has both). Approximate at the edges: the reconciliation prices a
+    # day's calls at that day's prices and judges "a session with no model call in traces"
+    # within the day, the budget within its window; so never more than the window spent.
+    estimate = sum(r.estimated_usd + r.metered_usd for r in days)
+    # The bill goes in. A bill below the estimate (or a credit) lowers spend, and can lower
+    # the state too, never below 0: the bill is what the farm pays.
+    spent = max(status.spent - min(estimate, status.spent) + billed, 0.0)
+    state = budget.state(spent)
+    traces_state = budget.state(status.spent)
+    bill_only_hard = state is BudgetState.HARD and traces_state is not BudgetState.HARD
+    if bill_only_hard:
+        # Never a stop for spend only the bill shows; an alert where there is a soft
+        # threshold to say it against, else the traces' state stands (the status says why).
+        state = BudgetState.SOFT if budget.soft is not None else traces_state
+    remaining = max(budget.limit - spent, 0.0)
+    return replace(
+        status,
+        spent=spent,
+        state=state,
+        remaining=remaining,
+        runs_out_at=threshold_forecast(remaining, status.burn_rate, now),
+        sources=(*status.sources, BILL) if BILL not in status.sources else status.sources,
+        billed_usd=billed,
+        billed_estimate_usd=estimate,
+        billed_days=tuple(f"{r.provider} {r.day.astimezone(UTC).date().isoformat()}" for r in days),
+        sources_disagree=any(r.large for r in days),
+        bill_only_hard=bill_only_hard,
+    )
 
 
 # --- forecasts ---------------------------------------------------------------------------

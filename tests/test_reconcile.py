@@ -464,3 +464,24 @@ def test_spend_gauges_show_without_an_up_gauge(tmp_path: Path) -> None:
     text = metrics.render()
     assert 'kelpie_spend_reported_usd{provider="p"} 2.000000' in text
     assert "kelpie_cost_report_up" not in text
+
+
+def test_claude_codes_metrics_of_the_day_are_priced_beside_the_estimate(tmp_path: Path) -> None:
+    """#205: a day's Claude Code metrics (sessions with no model call in traces) are priced
+    as budgets price them, kept apart from the estimate the bill check compares."""
+    from kelpie.core.storage import SqliteSpanStore
+
+    settings = settings_for(tmp_path)
+    store = SqliteSpanStore(tmp_path / "spans.db")
+    try:
+        store.append_spans([chat("a", "claude-opus-5-5", 1_000_000, noon(D1))], NOW)
+        at = noon(D2)
+        ns = int(at.timestamp()) * 1_000_000_000
+        store.append_metric_points(
+            [("cc-1", None, "claude-opus-5-5", "input", 1_000_000.0, ns, ns - 60_000_000_000)]
+        )
+        (r,) = reconcile_spend(settings, store, [ReportedCost("anthropic", D2, 9.0)], NOW)
+        assert r.estimated_usd == 0.0  # no traced call that day: the bill check is unchanged
+        assert r.metered_usd == pytest.approx(4.0)  # $4 per million input tokens
+    finally:
+        store.close()
