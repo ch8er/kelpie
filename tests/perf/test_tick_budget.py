@@ -25,8 +25,9 @@ from kelpie.rules import REGISTRY
 from tests.fakes import FakeAdapter, FakeAlerter
 from tests.perf.farm import large_farm
 
-# Measured on a 2-vCPU sandbox (2026-11-12): ~0.5 s per tick with SQLite, ~0.15 s in
-# memory; the busy farm (about 19,000 actions a tick) ~1 s in memory.
+# Measured on a 2-vCPU sandbox (2026-11-12), without coverage: ~0.5 s per tick with
+# SQLite, ~0.1 s in memory, the busy farm (about 19,000 actions a tick) ~0.8 s in memory.
+# CI runs under coverage, 2-3x slower (~0.9 s, ~0.4 s, ~2 s): the margin there is ~5x.
 TICK_BUDGET = timedelta(seconds=5)
 BUSY_TICK_BUDGET = timedelta(seconds=10)
 
@@ -63,7 +64,7 @@ def _busy(snapshot: Snapshot) -> Snapshot:
     return replace(
         snapshot,
         tasks=tuple(
-            replace(t, files=tuple(f"src/shared_{rng.randint(0, 300)}.py" for _ in range(3)))
+            replace(t, files=tuple(f"src/shared_{rng.randrange(300)}.py" for _ in range(3)))
             for t in snapshot.tasks
         ),
     )
