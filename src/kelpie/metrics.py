@@ -313,11 +313,6 @@ class Metrics:
             self.budgets_unattributed = dict(result.unattributed)
             self.budgets_stale_now = False
 
-    def set_budget_statuses(self, statuses: Sequence[BudgetStatus]) -> None:
-        """The budgets once the providers' bills are in (#205): same subjects, new figures."""
-        with self._lock:
-            self.budgets = _bounded(tuple(statuses))
-
     def set_cost_reports(
         self, up: Mapping[str, bool], reconciliations: Iterable[Reconciliation]
     ) -> None:

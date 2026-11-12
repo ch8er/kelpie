@@ -23,7 +23,7 @@ from kelpie.app import (
     read_reconciliations,
     utc_now,
 )
-from kelpie.core.budgets import BudgetMode, billable
+from kelpie.core.budgets import BILLABLE_WINDOW, BudgetMode, billable
 from kelpie.core.config import EngineConfig, Mode
 from kelpie.core.model import Snapshot
 from kelpie.core.serde import parse_when
@@ -96,7 +96,9 @@ def farm_facts(settings: Settings) -> FarmFacts:
         block_conditions=any("block" in p.applies_to for p in settings.block_conditions),
         budgets=bool(settings.budgets.budgets),
         dry_run=settings.engine.dry_run,
-        billed_budgets=tuple(b.name for b in settings.budgets.budgets if billable(b)),
+        billed_budgets=tuple(
+            b.name for b in settings.budgets.budgets if billable(b) and b.window >= BILLABLE_WINDOW
+        ),
     )
 
 

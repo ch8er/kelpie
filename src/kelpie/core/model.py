@@ -557,6 +557,10 @@ class Reconciliation:
     unpriced_tokens: int = 0  # tokens of the day's models without a price (not estimated)
     unknown_tokens: int = 0  # tokens of calls whose provider is not known (maybe this one)
     bill_scope: str = "tokens"
+    # The day's Claude Code metrics (sessions with no model call in traces) priced as
+    # budgets price them: not in ``estimated_usd``; a budget that counts the day at the bill
+    # takes them out too, since the bill has those calls (#205).
+    metered_usd: float = 0.0
 
 
 @dataclass(frozen=True, slots=True)

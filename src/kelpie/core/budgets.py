@@ -65,6 +65,9 @@ __all__ = [
 ]
 
 FARM = "farm"
+# A reconciled day settles 6 hours after it ends (kelpie.app.SETTLE): only a window of
+# more than this can ever hold one whole.
+BILLABLE_WINDOW = timedelta(hours=30)
 # BudgetStatus.sources
 TRACES = "traces"
 CLAUDE_CODE_METRICS = "claude_code_metrics"  # tokens from POST /v1/metrics (calls = 0)
@@ -543,17 +546,21 @@ def _billed(
     budget: Budget, status: BudgetStatus, days: Sequence[Reconciliation], now: datetime
 ) -> BudgetStatus:
     billed = sum(r.reported_usd for r in days)
-    estimate = sum(r.estimated_usd for r in days)
-    # The traces' figure for those days comes out (never below what the rest of the window
-    # spent: the reconciliation prices a provider's calls a little differently), the bill
-    # goes in; a credit lowers spend, never below 0.
+    # What the budget counted for those days: the traces' estimate and Claude Code's
+    # metrics (the bill has both). Approximate at the edges: the reconciliation prices a
+    # day's calls at that day's prices and judges "a session with no model call in traces"
+    # within the day, the budget within its window; so never more than the window spent.
+    estimate = sum(r.estimated_usd + r.metered_usd for r in days)
+    # The bill goes in. A bill below the estimate (or a credit) lowers spend, and can lower
+    # the state too, never below 0: the bill is what the farm pays.
     spent = max(status.spent - min(estimate, status.spent) + billed, 0.0)
     state = budget.state(spent)
-    bill_only_hard = (
-        state is BudgetState.HARD and budget.state(status.spent) is not BudgetState.HARD
-    )
+    traces_state = budget.state(status.spent)
+    bill_only_hard = state is BudgetState.HARD and traces_state is not BudgetState.HARD
     if bill_only_hard:
-        state = BudgetState.SOFT
+        # Never a stop for spend only the bill shows; an alert where there is a soft
+        # threshold to say it against, else the traces' state stands (the status says why).
+        state = BudgetState.SOFT if budget.soft is not None else traces_state
     remaining = max(budget.limit - spent, 0.0)
     return replace(
         status,

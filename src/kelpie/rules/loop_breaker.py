@@ -192,8 +192,9 @@ class LoopBreaker:
                 NAME,
                 f"Spend from traces and the {provider} bill disagree for {r.day:%Y-%m-%d}: "
                 f"${r.estimated_usd:,.2f} priced from traces, ${r.reported_usd:,.2f} in the "
-                f"cost report{_share(r)}; {gap_causes(r)}. Dollar budgets of {provider} follow "
-                "the traces, not the bill.",
+                f"cost report{_share(r)}; {gap_causes(r)}. Farm-wide dollar budgets count a "
+                "settled day at the bill and show both figures; other dollar budgets follow "
+                "the traces.",
                 severity=Severity.WARNING,
                 key=f"bill:{provider}",
                 state=f"{NAME}:bill:{provider}",

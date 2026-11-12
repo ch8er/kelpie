@@ -1688,9 +1688,14 @@ def _with_budgets(
         log.error("span store failed to read spend: %s", exc)
         metrics.span_store_failed()
         metrics.budgets_stale()
-        return replace(snapshot, budgets=last.statuses, budgets_ok=False)
+        stale = with_bills(budgets, last.statuses, snapshot.reconciliations, now)
+        return replace(snapshot, budgets=stale, budgets_ok=False)
     result = evaluate(budgets, usage, snapshot, attribution)
-    last.statuses = result.statuses
+    last.statuses = result.statuses  # the traces' figures: the bill goes on each tick anew
+    # The cost report step ran before (an enrich step): the bills go in now (#205).
+    result = replace(
+        result, statuses=with_bills(budgets, result.statuses, snapshot.reconciliations, now)
+    )
     metrics.set_budgets(result, now)
     return replace(snapshot, budgets=result.statuses)
 
@@ -2885,6 +2890,14 @@ def reconcile_spend(
         usd = dict.fromkeys(providers, 0.0)
         unpriced = dict.fromkeys(providers, 0)
         unknown = 0
+        metered = getattr(spans, "metered_usage_between", None)
+        metered_rows = metered(start, end) if callable(metered) else ()
+        metered_usd = dict.fromkeys(providers, 0.0)
+        for row in metered_rows:  # as budgets count them: priced from tokens, by provider
+            provider = spend.provider_for(row.model)
+            price = settings.budgets.prices.price_for(row.model, day)
+            if provider in metered_usd and price is not None:
+                metered_usd[provider] += price.cost(row)
         for row in spans.usage_between(start, end):
             tokens = row.input_tokens + row.output_tokens
             if row.model and platform_wrapped(row.model):
@@ -2902,7 +2915,9 @@ def reconcile_spend(
             else:
                 usd[provider] += price.cost(row)
         for provider in providers:
-            estimated[(provider, day)] = Estimate(usd[provider], unpriced[provider], unknown)
+            estimated[(provider, day)] = Estimate(
+                usd[provider], unpriced[provider], unknown, metered_usd[provider]
+            )
     return reconcile(costs, estimated, thresholds, scopes)
 
 
@@ -2939,30 +2954,7 @@ def cost_report_steps(
         store = SqliteCostReports(settings.db_path) if settings.db_path is not None else None
     except (OSError, sqlite3.Error, RuntimeError) as exc:
         raise ConfigError(f"cannot open the cost report store {settings.db_path}: {exc}") from exc
-    steps: list[tuple[str, Callable[[Snapshot], Snapshot]]] = [
-        ("cost_reports", CostReportStep(source, store, settings, metrics=metrics))
-    ]
-    if settings.budgets.budgets:  # after the reconciliation: budgets read the bill (#205)
-        steps.append(("budget_bills", BudgetBills(settings.budgets, metrics)))
-    return steps
-
-
-@dataclass(slots=True)
-class BudgetBills:
-    """Puts the providers' reconciled bills into the budgets the snapshot already carries
-    (:func:`kelpie.core.budgets.with_bills`), after :class:`CostReportStep`, and the result
-    on ``/metrics``. Budgets that could not be read this tick are left as they are."""
-
-    config: BudgetConfig
-    metrics: Metrics | None = None
-
-    def __call__(self, snapshot: Snapshot) -> Snapshot:
-        if not snapshot.budgets or not snapshot.reconciliations:
-            return snapshot
-        statuses = with_bills(self.config, snapshot.budgets, snapshot.reconciliations, snapshot.now)
-        if self.metrics is not None and snapshot.budgets_ok:
-            self.metrics.set_budget_statuses(statuses)
-        return replace(snapshot, budgets=statuses)
+    return [("cost_reports", CostReportStep(source, store, settings, metrics=metrics))]
 
 
 def _github_steps(
@@ -3573,6 +3565,13 @@ def _status_bills(
     if isinstance(found, str):
         log.warning("budgets: bills not read: %s", found)
         return statuses
+    # The days kelpie serve has: each provider's report reads its last ``days``.
+    days = {r.provider: r.days for r in settings.cost_reports.reports}
+    found = tuple(
+        r
+        for r in found
+        if r.provider in days and r.day.date() >= until - timedelta(days=days[r.provider] + 1)
+    )
     return with_bills(settings.budgets, statuses, found, now)
 
 

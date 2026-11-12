@@ -4,11 +4,12 @@ only the bill reaches stops nothing."""
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from kelpie.app import BudgetBills, budget_sources
+from kelpie.app import budget_sources
 from kelpie.core.budgets import (
     BILL,
     CLAUDE_CODE_METRICS,
@@ -161,23 +162,100 @@ def test_claude_codes_metrics_are_named_as_a_source() -> None:
     assert only.statuses[0].sources == (CLAUDE_CODE_METRICS,)
 
 
-def test_the_step_puts_the_bill_in_the_tick_and_on_metrics() -> None:
+def test_claude_codes_metrics_on_a_billed_day_are_taken_out_with_the_estimate() -> None:
+    """The bill holds the calls Claude Code's metrics reported: counting both would count
+    them twice."""
+    config = cfg((budget(),))
+    (before,) = statuses(config)
+    metered = Reconciliation("anthropic", DAY, 2.0, 20.0, -18.0, metered_usd=1.5)
+    (after,) = with_bills(config, (before,), (metered,), NOW)
+    assert after.spent == pytest.approx(before.spent - 2.0 - 1.5 + 20.0)
+    assert after.billed_estimate_usd == pytest.approx(3.5)
+
+
+def test_without_a_soft_threshold_a_bill_only_hard_keeps_the_traces_state() -> None:
+    config = cfg((budget(soft=None),))
+    (after,) = with_bills(config, statuses(config), (bill(150.0, 2.0),), NOW)
+    assert after.state is BudgetState.OK and after.bill_only_hard
+
+
+def test_a_24_hour_window_never_holds_a_settled_day() -> None:
+    """A day settles 6 hours after it ends (``SETTLE``): it never lies wholly in 24 hours
+    that also end at least 6 hours after it."""
+    from kelpie.app import SETTLE
+    from kelpie.core.budgets import BILLABLE_WINDOW
+
+    assert timedelta(days=1) + SETTLE == BILLABLE_WINDOW
+    config = cfg((budget(window=timedelta(hours=24)),))
+    for hour in range(24):
+        now = datetime(2026, 3, 4, hour, 30, tzinfo=UTC)
+        settled = now.replace(hour=0, minute=0) - timedelta(days=1)  # newest settled at best
+        if settled + timedelta(days=1) + SETTLE > now:
+            settled -= timedelta(days=1)
+        before = evaluate(config, {}, Snapshot(now=now)).statuses
+        assert with_bills(config, before, (bill(500.0, 2.0, day=settled),), now) == before
+
+
+def test_rule_10_never_stops_for_spend_only_the_bill_shows() -> None:
+    """Negative case for the stop: a farm budget the bill alone takes past ``hard`` gives
+    rule 10 no stop, even with ``stop_on_shared_budgets``."""
+    from kelpie.core.actions import ActionKind
+    from kelpie.core.model import Session, Status, Task
+    from kelpie.rules.loop_breaker import build
+
+    config = cfg((budget(),))
+    (after,) = with_bills(config, statuses(config), (bill(150.0, 2.0),), NOW)
+    snap = Snapshot(
+        now=NOW,
+        tasks=(Task("T-1", "t", Status.IN_PROGRESS, NOW),),
+        sessions=(Session("s-1", "T-1", "agent-a", NOW - timedelta(hours=1)),),
+        budgets=(after,),
+    )
+    actions = build({"stop_on_shared_budgets": True}).evaluate(snap)
+    assert not [a for a in actions if a.kind is ActionKind.STOP]
+
+
+def test_the_tick_counts_the_bill_and_metrics_show_it() -> None:
+    """End to end through the tick's assembly: the cost report step (an enrich step) runs
+    before the budgets, which then count its bill; /metrics shows the billed figures."""
+    from kelpie.app import merged_snapshot
+    from kelpie.core.spans import MemorySpanStore
+    from kelpie.traces.store import SpanWindow
+
     config = cfg((budget(),))
     metrics = Metrics()
     metrics.set_budgets_enabled(True)
-    step = BudgetBills(config, metrics)
-    snap = Snapshot(now=NOW, budgets=statuses(config))
-    assert step(snap) is snap  # no reconciliation yet: nothing changes
-    billed = step(Snapshot(now=NOW, budgets=snap.budgets, reconciliations=(bill(20.0, 2.0),)))
-    assert billed.budgets[0].billed_usd == 20.0
+
+    def cost_step(snapshot: Snapshot) -> Snapshot:
+        return replace(snapshot, reconciliations=(bill(20.0, 2.0),))
+
+    window = SpanWindow(MemorySpanStore(), timedelta(minutes=30), timedelta(hours=24), 1000)
+    source = merged_snapshot(
+        [], metrics, lambda: NOW, window, config, enrich=[("cost_reports", cost_step)]
+    )
+    snap = source()
+    (status,) = snap.budgets
+    assert status.billed_usd == 20.0 and status.spent == pytest.approx(20.0)
     text = metrics.render()
     assert 'kelpie_budget_billed_usd{budget="farm-usd",subject="farm",unit="usd"} 20.000000' in text
-    assert "kelpie_budget_sources_disagree{" in text
-    # Budgets the span store could not read this tick stay as they were on /metrics.
-    stale = Snapshot(
-        now=NOW, budgets=snap.budgets, budgets_ok=False, reconciliations=(bill(30.0, 2.0),)
-    )
-    assert step(stale).budgets[0].billed_usd == 30.0
-    assert 'kelpie_budget_billed_usd{budget="farm-usd",subject="farm",unit="usd"} 20.000000' in (
-        metrics.render()
-    )
+    assert 'kelpie_budget_spent{budget="farm-usd",subject="farm",unit="usd"} 20.000000' in text
+
+
+def test_kelpie_status_counts_the_stored_bills_of_the_providers_days(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``kelpie status`` reads the stored bills of the days kelpie serve has (each
+    provider's ``days``); a bill it cannot read leaves the traces and says why."""
+    import kelpie.app as app
+
+    config = cfg((budget(window=timedelta(days=30)),))
+    before = statuses(config)
+    reports = type("R", (), {"reports": (type("P", (), {"provider": "anthropic", "days": 2})(),)})
+    settings = type("S", (), {"budgets": config, "cost_reports": reports()})()
+    old = bill(500.0, 2.0, day=NOW.replace(hour=0) - timedelta(days=10))  # past ``days``
+    recent = bill(20.0, 2.0)
+    monkeypatch.setattr(app, "read_reconciliations", lambda *a, **k: (old, recent))
+    (after,) = app._status_bills(settings, before, NOW)  # type: ignore[arg-type]
+    assert after.billed_days == ("anthropic 2026-03-02",)
+    monkeypatch.setattr(app, "read_reconciliations", lambda *a, **k: "cannot read")
+    assert app._status_bills(settings, before, NOW) == before  # type: ignore[arg-type]
