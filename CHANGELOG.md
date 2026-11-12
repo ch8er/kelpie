@@ -225,6 +225,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ### Security
 
+- Hook fold across ingest tokens (#374): an OTLP tool span takes the hook span of the same
+  call only when its scoped ingest token may report the folded span (the hook's session and
+  task; a token no longer configured takes none). Another token's span carrying a run's
+  call ids could fold the run's verified hook calls into a span the scope check then
+  deleted, so rule 10 missed the run's loop. Rule 10's logic and thresholds are unchanged.
 - The Docker image's base images are pinned by digest without hand-copied values: the new
   `pin-base-images` workflow resolves each base image's multi-platform index digest on
   GitHub Actions (`docker buildx imagetools inspect`, checked for linux/amd64 and

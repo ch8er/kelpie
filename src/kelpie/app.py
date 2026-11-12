@@ -1373,7 +1373,8 @@ def merged_snapshot(
                 # run-once) and without [connectors.llm_quotas] they stay unchecked
                 configured = [p.name for p in getattr(providers, "providers", ())]
                 merged = check_quota_reset(merged, configured)
-        folded = merge_hook_spans(merged.spans)
+        # A scoped token's span folds a hook span only into a span it may report (#374).
+        folded = merge_hook_spans(merged.spans, scopes.may_fold if scopes is not None else None)
         metrics.hook_spans_merged(folded.merged)
         merged = replace(merged, spans=folded.spans)
         if scopes is not None and spans is not None:  # after folding: a fold moves sessions

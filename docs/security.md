@@ -369,7 +369,12 @@ way the multi-host hub limits each `kelpie agent` to its own host:
   them), and a
   span takes a missing session or task from its parent only
   when both came with the same scoped token. Hook spans are folded into OTLP spans before
-  the snapshot check, so a fold that moves a span into another session is caught too.
+  the snapshot check, so a fold that moves a span into another session is caught too. A
+  scoped token's span takes a hook span only when that token may report the folded span
+  (the hook's session and task; a token no longer configured takes none, #374): another
+  token's span carrying a run's (provider-generated) call ids stays a span of its own, in
+  its own session, and the run's verified hook calls stay rule 10's evidence instead of
+  being folded into a span the check deletes.
 - **What a forger can still do.** Claim a session id before its agent starts (Hermes run ids
   are sequential) and report spans for it until the board shows the run; from then on they
   are deleted, and the agent's own token reports for it. Hold up to 10,000 such ids used

@@ -31,7 +31,7 @@ from __future__ import annotations
 import bisect
 import hashlib
 from collections import defaultdict
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from typing import Any
@@ -184,8 +184,15 @@ class Merged:
     merged: int  # hook spans folded into an OTLP span
 
 
-def merge_hook_spans(spans: Sequence[Span]) -> Merged:
-    """Fold hook tool spans into the OTLP spans that report the same call."""
+def merge_hook_spans(
+    spans: Sequence[Span], pairable: Callable[[Span, Span], bool] | None = None
+) -> Merged:
+    """Fold hook tool spans into the OTLP spans that report the same call.
+
+    ``pairable(otlp, hook)``: whether that OTLP span may take that hook span at all (#374:
+    an OTLP span whose ingest token may not report the hook's session, folded, would be
+    judged out of scope and deleted, and the hook's call with it). A pair it refuses stays
+    two spans, each judged on its own. None: every pair may fold."""
     hooks = [i for i, s in enumerate(spans) if _hook_tool(s)]
     others = [i for i, s in enumerate(spans) if _otlp_tool(s)]
     if not hooks or not others:
@@ -214,6 +221,8 @@ def merge_hook_spans(spans: Sequence[Span]) -> Merged:
         if call:
             candidates.update(by_call.get(call, ()))
         for o in candidates:
+            if pairable is not None and not pairable(spans[o], hook):
+                continue
             distance = _distance(hook, spans[o])
             if distance is not None:
                 pairs.append((hook.attributes.get(UNVERIFIED_ATTRIBUTE) is True, distance, h, o))
@@ -289,6 +298,11 @@ def _distance(hook: Span, other: Span) -> float | None:
         gaps.append(abs(hook.end - other.end))  # a hook without duration has start == end
     gap = min(gaps)
     return gap.total_seconds() if gap <= MATCH_WINDOW else None
+
+
+def fold(otlp: Span, hook: Span) -> Span:
+    """The span an OTLP span and the hook span of the same call fold into."""
+    return _fold(otlp, hook)
 
 
 def _fold(otlp: Span, hook: Span) -> Span:

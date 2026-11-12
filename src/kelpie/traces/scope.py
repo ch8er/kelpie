@@ -44,6 +44,7 @@ from enum import StrEnum
 
 from kelpie.core.model import Snapshot, Span
 from kelpie.core.spans import INGEST_MARK, Attribution, SpanKey, SpanStore, span_key
+from kelpie.traces.hooks import fold
 
 log = logging.getLogger(__name__)
 
@@ -363,6 +364,20 @@ class ScopeGuard:
     def _holder(self, kind: str, value: str) -> _Binding | None:
         with self._lock:
             return self._bound.get((kind, value))
+
+    def may_fold(self, otlp: Span, hook: Span) -> bool:
+        """Whether an OTLP tool span may take a hook span of the same call
+        (:func:`kelpie.traces.hooks.merge_hook_spans`, #374): only when its ingest token
+        may report the folded span (the hook's session and task). A span without a token
+        mark (unscoped ingest) may; one whose token is no longer configured may not.
+        Otherwise another token's span carrying the call id of a hook could fold it into a
+        span the check then deletes, and the hook's call would vanish from rule 10."""
+        token = otlp.attributes.get(TOKEN_ATTRIBUTE)
+        if not isinstance(token, str):
+            return True
+        if token not in self.scopes:
+            return False
+        return self.judge(token, fold(otlp, hook))[0] is not Verdict.OUT
 
     def judge(self, token: str, span: Span) -> tuple[Verdict, list[tuple[str, str]]]:
         """Whether ``token`` may report ``span``, and the ids the board does not place that
