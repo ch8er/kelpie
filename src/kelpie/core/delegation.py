@@ -205,6 +205,12 @@ def _inert(text: str) -> str:
     return "".join(c for c in text if unicodedata.category(c) != "Cf")
 
 
+def _line(text: str) -> str:
+    """``text`` on one line: inert, every run of whitespace (line and paragraph separators
+    included) one space."""
+    return re.sub(r"\s+", " ", _inert(text)).strip()
+
+
 def quote(text: str, limit: int = MAX_QUOTED) -> str:
     """``text`` as inert quoted data: every line prefixed with ``> ``, control and format
     characters removed, at most ``limit`` characters (cut with an ellipsis)."""
@@ -237,17 +243,17 @@ def card_for(problem: Problem, task: Task, operator: str, attempt: int, key: str
     if len(subject) > room:
         subject = subject[: max(0, room - 1)].rstrip() + "…"
     title = f'Kelpie: {problem.rule} on {task.id}: "{subject}"'
-    owner = _inert(task.owner_id or "").strip()
+    owner, tid, who = (_line(v) for v in (task.owner_id or "", task.id, operator))
     facts = [
-        f"- task: {task.id} ({task.status.value}"
+        f"- task: {tid} ({task.status.value}"
         + (f", held by {owner}" if owner else ", no owner")
         + ")",
         f"- found by Kelpie's rule {problem.rule}, open since {problem.since.isoformat()}",
-        f"- attempt {attempt} of at most {MAX_ATTEMPTS}",
+        f"- Kelpie's attempt {attempt} at handing this incident to an agent",
     ]
     body = "\n".join(
         [
-            f"Kelpie found a problem on task {task.id} and hands it to {operator}.",
+            f"Kelpie found a problem on task {tid} and hands it to {who}.",
             "",
             "Facts:",
             *facts,

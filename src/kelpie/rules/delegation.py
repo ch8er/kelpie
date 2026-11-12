@@ -17,8 +17,9 @@ ledger):
 - at most ``max_attempts`` (2) cards per incident within ``cooldown`` (a card whose fix was
   verified more than ``same_incident`` ago closed its incident and no longer counts), and
   none after the incident was given back to the person;
-- only fresh problems (reported within 15 minutes), announced in suggest or act mode, on a
-  task not held by a person;
+- only fresh problems (reported within 15 minutes), announced in suggest or act mode,
+  opened within the history the server reads (so every earlier card of the opening is
+  seen and a key never repeats), on a task not held by or assigned to a person;
 - no delegation about a delegation card (a task that is one of the cards) or about the
   operator's own tasks;
 - at most ``max_per_hour`` and ``max_per_day`` cards carried out; the oldest problems go
@@ -28,8 +29,8 @@ ledger):
 
 Each card is a one-off action per problem, opening and attempt (``Action.once``, key
 ``delegate:<problem>:<opened epoch>:<attempt>``; attempts are numbered over the incident's
-history, so a key never repeats). The circuit breaker's alert to the person and the
-verdicts come in a later part of #347.
+history, which holds every earlier card of the opening). The circuit breaker's alert to the
+person and the verdicts come in a later part of #347.
 """
 
 from __future__ import annotations
@@ -90,10 +91,13 @@ class Delegation:
             if left <= 0:
                 break
             task = snapshot.task(problem.task_id) if problem.task_id else None
-            owner = snapshot.owner(task.owner_id) if task and task.owner_id else None
-            person = owner is not None and owner.kind is OwnerKind.HUMAN
+            ids = (task.owner_id, task.assignee) if task is not None else ()
+            people = [snapshot.owner(who) for who in ids if who]
+            person = any(o is not None and o.kind is OwnerKind.HUMAN for o in people)
             if task is None or why_not(policy, problem, task, now, person=person) is not None:
                 continue
+            if problem.opened_at < now - policy.history:
+                continue  # its earlier cards may be out of the history: keys could repeat
             if task.id in card_tasks:
                 continue  # a problem about a delegation card stays with the person
             attempt = self._attempt(problem, events, carried, verdicts, now)
@@ -135,11 +139,18 @@ class Delegation:
             return None  # given back to the person: no new card within the cooldown
 
         def counts(card: DelegationEvent) -> bool:
+            """Whether ``card`` is an attempt of the incident now: within the cooldown,
+            unless its fix was verified and held for ``same_incident`` (no later card, and
+            not this problem, came within that after the verdict)."""
+            if card.at <= now - policy.cooldown:
+                return False
             said = verdicts.get((card.problem, card.attempt))
-            held = said is not None and said.verdict == VERIFIED
-            return card.at > now - policy.cooldown and not (
-                held and said is not None and said.at <= now - policy.same_incident
-            )
+            if said is None or said.verdict != VERIFIED:
+                return True
+            back = said.at + policy.same_incident
+            later = [c.at for c in mine if c.at > card.at] + [problem.opened_at]
+            held = back <= now and all(at > back for at in later if at >= said.at)
+            return not held
 
         if sum(1 for c in mine if counts(c)) >= policy.max_attempts:
             return None

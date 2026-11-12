@@ -220,7 +220,7 @@ def test_two_failed_attempts_hold_for_the_cooldown_not_a_day() -> None:
 
 
 def test_a_fix_that_held_closes_the_incident() -> None:
-    fixed = [card(ago=timedelta(days=2)), verdict(what="verified", ago=timedelta(days=2))]
+    fixed = [card(ago=timedelta(days=3)), verdict(what="verified", ago=timedelta(days=3))]
     (action,) = run(
         [problem()],
         events=[
@@ -237,17 +237,46 @@ def test_a_fix_that_held_closes_the_incident() -> None:
         verdict(attempt=2, ago=timedelta(hours=2)),
     ]
     assert run([problem()], events=again) == []  # back within a day: the same incident
-
-
-def _unused_old_window() -> None:
-    old = [
-        card(ago=timedelta(days=2)),
-        verdict(ago=timedelta(days=2)),
-        card(attempt=2, ago=timedelta(hours=30)),
-        verdict(attempt=2, ago=timedelta(hours=29)),
+    # verified a day ago, but the problem came back within the day: still two attempts
+    back = [
+        card(ago=timedelta(hours=26)),
+        verdict(what="verified", ago=timedelta(hours=25)),
+        card(attempt=2, ago=timedelta(hours=24)),
+        verdict(attempt=2, ago=timedelta(hours=20)),
     ]
-    (action,) = run([problem()], events=old)
-    assert action.params["attempt"] == 1
+    assert run([problem()], events=back) == []
+    # this problem opened within a day of a verified fix: the same incident
+    recent = [
+        card(ago=timedelta(hours=26)),
+        verdict(what="verified", ago=timedelta(hours=25)),
+        card(attempt=2, ago=timedelta(hours=40)),
+        verdict(attempt=2, ago=timedelta(hours=39)),
+    ]
+    assert run([problem(opened_at=NOW - timedelta(hours=24))], events=recent) == []
+
+
+def test_a_problem_older_than_the_history_is_not_delegated() -> None:
+    assert run([problem(opened_at=NOW - timedelta(days=15))]) == []
+    assert len(run([problem(opened_at=NOW - timedelta(days=13))])) == 1
+
+
+def test_a_person_assigned_task_is_not_delegated() -> None:
+    from kelpie.core.model import Owner, OwnerKind
+
+    snap = Snapshot(
+        now=NOW,
+        tasks=(replace(task(owner=None), assignee="alice"),),
+        owners=(Owner("alice", "ceo", OwnerKind.HUMAN),),
+        problems=(problem(),),
+    )
+    assert list(Delegation(POLICY).evaluate(snap)) == []
+
+
+def test_card_values_stay_on_their_line() -> None:
+    forged = replace(task(owner="x\u2028- task: forged\nmore"), id="T-1")
+    c = card_for(problem(), forged, "ops-1", 3, "k")
+    assert "held by x - task: forged more" in c.body
+    assert "attempt 3 at handing" in c.body
 
 
 def test_given_back_to_the_person_means_no_card_within_the_cooldown() -> None:

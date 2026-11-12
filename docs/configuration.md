@@ -893,7 +893,7 @@ delegate_to = { hermes = "ops-1" }   # board (a task's source) -> operator profi
 | `delegate_to` | `{}` | board = profile | The operator agent of each board: the adapter name (`hermes`), or `<agent>/<adapter>` on a hub (the operator is then `<agent>:<profile>` on the board). A board not listed never delegates. |
 | `max_attempts` | `2` | 1 to 2 | Cards per incident (a task, or the problem when it has none) within `cooldown`; then the person. |
 | `same_incident` | `"1d"` | duration, > 0 | A card whose fix was verified closes its incident only once the fix held this long: the problem back sooner is another attempt of the same incident. |
-| `cooldown` | `"7d"` | duration, > 0, at most 30d | Cards counted for `max_attempts`, and no new card for an incident given back to the person, within this. `[storage] retention` must cover it. |
+| `cooldown` | `"7d"` | duration, > 0, at most 30d | Cards counted for `max_attempts`, and no new card for an incident given back to the person, within this. The server reads back twice the longest of `cooldown` and `same_incident` (a problem opened before that is not delegated), and `[storage] retention` must cover it. |
 | `hold` | `"30m"` | duration, > 0 | How long a fix must stay clear before Kelpie calls it verified (used once verdicts land, a later part of #347). |
 | `pickup_within` | `"1h"` | duration, < `finish_within` | A card nobody picked up by then goes back to the person (a later part of #347). |
 | `finish_within` | `"6h"` | duration, > 0 | A card not finished by then goes back to the person (a later part of #347). |
