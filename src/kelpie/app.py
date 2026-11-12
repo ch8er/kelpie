@@ -2823,7 +2823,17 @@ def connector_steps(
     db = settings.db_path
     if registry is None and settings.conditions.enabled and db is not None and db.exists():
         scopes = {t.name: t.scope for t in settings.traces.tokens}
-        registry = ConditionRegistry(settings.conditions, db, clock, readonly=True, scopes=scopes)
+        # as serve attaches them: the shared token's rows only while a shared token is set
+        # (its variable in this environment, or named in the config, or no per-agent ones)
+        conditions = settings.conditions
+        shared = (
+            conditions.token_env_explicit
+            or bool(os.environ.get(conditions.token_env, "").strip())
+            or not scopes
+        )
+        registry = ConditionRegistry(
+            conditions, db, clock, readonly=True, scopes=scopes, shared_rows=shared
+        )
     if registry is not None:
         steps.insert(0, ("registered_conditions", registry))
     if settings.human_tasks is not None and settings.human_tasks.enabled:

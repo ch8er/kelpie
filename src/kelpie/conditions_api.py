@@ -29,12 +29,16 @@ entry's scope (its owners, roles or boards, or a session of the task in scope, t
 scoping as its spans, :func:`kelpie.traces.scope.own_task`). A registration for any other
 task, or for a task the board does not place, is 403 with the same answer either way (it
 does not tell whether the task exists), a ledger line (:data:`AUDIT_RULE`, at most one an
-hour per token and task, repeats counted on it) and a counter. A registration attaches only
+hour per token and task, repeats counted on it; past :data:`AUDIT_PER_TOKEN` an hour, one
+for all the token's tasks) and a counter. Scopes come from the last tick: until the first
+one after a start a per-agent token gets 503 with ``Retry-After``. A registration attaches only
 while its token is still configured and the task still in its scope, so removing an agent's
 entry (or moving its task to another agent) also drops what it registered. Each token has
 its own rate (``max_per_minute``, 429 beyond) and its own share of live registrations
 (``max_per_token``, 507 beyond), so a flood from one token leaves the others alone. The
-shared ``token_env`` token (deprecated) still registers for any task, as before.
+shared ``token_env`` token (deprecated) still registers for any task, as before; its
+registrations (and those older than #442, which name no token) attach only while a shared
+token is set (``shared_rows``), and are deleted once it is not.
 
 **Checks, before the body is read:** the bearer token (every token compared, in constant
 time each; a missing or wrong one is 401), no ``Origin`` header (a web page, not an agent:
@@ -160,6 +164,10 @@ _COLUMNS = "id, task_id, kind, params, registered_at, bound_to, token"
 AUDIT_RULE = "conditions"  # the ledger's rule for a refused registration: no rule acted
 AUDIT_EVERY = timedelta(hours=1)  # one ledger line per token and task this often
 MAX_AUDITED = 10_000  # (token, task) pairs remembered for that
+# Ledger lines of one token's refusals an hour; beyond, they fold into one line per token, so
+# a token naming made-up task ids cannot fill the ledger and the log.
+AUDIT_PER_TOKEN = 20
+NOT_READ_YET = 30  # seconds: Retry-After while no tick has read the board since the start
 # kelpie_conditions_refused_total reasons
 OUT_OF_SCOPE = "out_of_scope"
 RATE_LIMITED = "rate_limited"
@@ -326,6 +334,9 @@ class ConditionRegistry:
     audit: AuditLog | None = None  # the ledger's store: refused registrations
     observer: Any = None  # Metrics: conditions_refused(reason)
     index: ScopeIndex = field(default_factory=ScopeIndex)  # the board, from each snapshot
+    # Whether the shared token's registrations (and those from before #442, which carry no
+    # token) attach: only while a shared token is configured. None: when ``token`` is set.
+    shared_rows: bool | None = None
     _lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
     _db: sqlite3.Connection | None = field(default=None, init=False, repr=False)
     _closed: bool = field(default=False, init=False, repr=False)
@@ -338,12 +349,18 @@ class ConditionRegistry:
     _audited: OrderedDict[str, datetime] = field(
         default_factory=OrderedDict, init=False, repr=False
     )
+    _audit_counts: dict[str, tuple[datetime, int]] = field(
+        default_factory=dict, init=False, repr=False
+    )
+    _read_board: bool = field(default=False, init=False, repr=False)  # a tick ran
 
     def __post_init__(self) -> None:
         if not self.token and not self.scoped and not self.readonly:
             raise ValueError("a condition registry needs a token")
         if any(t.name not in self.scopes for t in self.scoped):
             raise ValueError("every per-agent conditions token needs its scope")
+        if self.shared_rows is None:
+            self.shared_rows = bool(self.token)
 
     def _conn(self) -> sqlite3.Connection:
         if self._closed:
@@ -390,8 +407,8 @@ class ConditionRegistry:
         given = credentials.strip() if scheme.lower() == "bearer" else ""
         found: Caller | None = None
         for scoped in self.scoped:
-            verdict = scoped.check(given) if given else TokenCheck.INVALID
-            if verdict is not TokenCheck.INVALID and found is None:
+            verdict = scoped.check(given)
+            if verdict is not TokenCheck.INVALID and given and found is None:
                 found = Caller(scoped.name)
         shared = hmac.compare_digest(given.encode(), self.token.encode())
         if found is not None:
@@ -456,6 +473,12 @@ class ConditionRegistry:
             return Answer(400, {"error": str(exc)})
         now = self.clock()
         if caller.token is not None:
+            if not self._read_board:  # just started: no scope is known yet, refuse nothing
+                return Answer(
+                    503,
+                    {"error": "the board is not read yet, retry later"},
+                    {"Retry-After": str(NOT_READ_YET)},
+                )
             scope = self.scopes.get(caller.token)
             owned = own_task(self.index, scope, task) if scope is not None else None
             if owned is None:  # another agent's task, or none the board shows: one answer
@@ -512,11 +535,17 @@ class ConditionRegistry:
 
     def _refuse_foreign(self, name: str, task: str, kind: ConditionKind, now: datetime) -> None:
         """Count a registration refused for a task that is not the token's own, and write
-        its ledger line: one per token and task an hour, later ones counted on it."""
+        its ledger line: one per token and task an hour, later ones counted on it; past
+        :data:`AUDIT_PER_TOKEN` lines of a token in an hour, one line for all its tasks."""
         self._refused(OUT_OF_SCOPE)
-        raw = to_json([AUDIT_RULE, OUT_OF_SCOPE, name, task])
-        fingerprint = hashlib.sha256(raw.encode()).hexdigest()[:32]
         with self._rate_lock:
+            start, count = self._audit_counts.get(name, (now, 0))
+            if not timedelta(0) <= now - start < AUDIT_EVERY:
+                start, count = now, 0
+            folded = count >= AUDIT_PER_TOKEN
+            shown = "(several tasks)" if folded else task
+            raw = to_json([AUDIT_RULE, OUT_OF_SCOPE, name, None if folded else task])
+            fingerprint = hashlib.sha256(raw.encode()).hexdigest()[:32]
             last = self._audited.get(fingerprint)
             fresh = last is None or not timedelta(0) <= now - last < AUDIT_EVERY
             if fresh:
@@ -524,11 +553,13 @@ class ConditionRegistry:
                 self._audited.move_to_end(fingerprint)
                 while len(self._audited) > MAX_AUDITED:
                     self._audited.popitem(last=False)
+                if not folded:
+                    self._audit_counts[name] = (start, count + 1)
         if fresh:
             log.warning(
                 "conditions: token %r asked to register for task %r, not one of its tasks: refused",
                 name,
-                task[:80],
+                shown[:80],
             )
         if self.audit is None:
             return
@@ -542,9 +573,10 @@ class ConditionRegistry:
             outcome=Outcome.OBSERVED,
             reason=(
                 f"Per-agent token {name!r} asked to register a {kind.value} condition for "
-                f"{task}, which is not one of its tasks (or not on the board): refused (403)."
+                f"{shown}, which is not one of its tasks (or not on the board): refused (403)."
+                + (" Its further refusals this hour are counted on this line." if folded else "")
             ),
-            task_id=task,
+            task_id=None if folded else task,
             params={"token": name, "kind": kind.value, "status": 403},
         )
         try:
@@ -564,6 +596,7 @@ class ConditionRegistry:
         configured and the task in its scope. Each call also reads the board into the index
         the endpoint judges scopes against."""
         self.index.update(snapshot)
+        self._read_board = True
         try:
             rows = self._live(snapshot)
         except (OSError, sqlite3.Error) as exc:
@@ -578,6 +611,8 @@ class ConditionRegistry:
             task = tasks.get(task_id)
             if ident in known or task is None or task.status not in ATTACH_TO:
                 continue  # not on the board now, or not a task a registration attaches to
+            if token is None and not self.shared_rows:
+                continue  # the shared token's (or older): only while a shared token is set
             if token is not None and not self._still_owned(token, task_id):
                 continue  # its token was removed, or the task is another agent's now
             try:
@@ -646,10 +681,21 @@ class ConditionRegistry:
         old = db.execute(
             "SELECT 1 FROM registered_conditions WHERE registered_at < ? LIMIT 1", (oldest,)
         ).fetchone()
-        if not finished and old is None:
+        # Rows of tokens no longer configured (and the shared token's, once none is set)
+        # never attach again: they go, and stop counting toward max_registered.
+        tokens = {r[0] for r in db.execute("SELECT DISTINCT token FROM registered_conditions")}
+        gone = [t for t in tokens if t is not None and t not in self.scopes]
+        shared_gone = None in tokens and not self.shared_rows
+        if not finished and old is None and not gone and not shared_gone:
             return  # nothing to delete: no write transaction
         with db:
             db.execute("DELETE FROM registered_conditions WHERE registered_at < ?", (oldest,))
+            if shared_gone:
+                db.execute("DELETE FROM registered_conditions WHERE token IS NULL")
+            for i in range(0, len(gone), 500):
+                part = gone[i : i + 500]
+                marks = ", ".join("?" * len(part))
+                db.execute(f"DELETE FROM registered_conditions WHERE token IN ({marks})", part)
             for i in range(0, len(finished), 500):
                 chunk = finished[i : i + 500]
                 marks = ", ".join("?" * len(chunk))

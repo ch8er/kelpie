@@ -353,10 +353,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
   a session of the task in scope). A registration for another agent's task, or for a task
   the board does not show, gets the same 403 (it does not tell whether the task exists),
   a ledger line (rule `conditions`, kind `register`, one an hour per token and task, repeats
-  counted on it) and `kelpie_conditions_refused_total{reason="out_of_scope"}`. A
-  registration attaches only while its token is configured and the task in its scope, so
-  removing an agent's entry, or moving its task to another agent, also drops what it
-  registered. Each token has its own rate (`[conditions] max_per_minute`, 60; 429 with
+  counted on it, folded into one line per token past 20 an hour) and
+  `kelpie_conditions_refused_total{reason="out_of_scope"}`. Until the first tick after a
+  start a per-agent token gets 503 with `Retry-After`. A registration attaches only while
+  its token is configured and the task in its scope, so removing an agent's entry, or
+  moving its task to another agent, also drops what it registered; the shared token's
+  registrations (and older ones) attach only while a shared token is set. Each token has its own rate (`[conditions] max_per_minute`, 60; 429 with
   `Retry-After`) and share of live registrations (`max_per_token`, 100; 507), so a flood
   from one token leaves the others alone. `kelpie serve` refuses a weak per-agent token or
   one equal to the shared token. The shared `[conditions] token_env` token keeps working

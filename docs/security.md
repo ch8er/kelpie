@@ -473,11 +473,18 @@ add an unmet condition to another agent's waiting task and so hold back that tas
   database is read, so the answer does not tell whether the task exists or what it waits
   on. Each refusal is counted (`kelpie_conditions_refused_total{reason="out_of_scope"}`),
   logged, and written to the ledger with the token's name and the task (one line an hour
-  per token and task; repeats are counted on it), so `kelpie why <task>` shows who tried.
+  per token and task; repeats are counted on it; past 20 lines of one token in an hour,
+  one line for all its tasks, so made-up task ids cannot fill the ledger), so
+  `kelpie why <task>` shows who tried. Scopes are read on each tick: until the first tick
+  after a start a per-agent token gets 503 with `Retry-After` (not a refusal), and a task
+  that reached the board since the last tick reads as unknown (an agent may retry once).
 - **Checked again on every tick.** A registration carries the token that made it, and
   attaches only while that token is configured and the task is in its scope. Removing an
-  agent's entry refuses its token (401) and drops what it registered; a task moved to
-  another agent no longer carries the old agent's registrations.
+  agent's entry refuses its token (401) and drops what it registered (deleted at the next
+  prune); a task moved to another agent no longer carries the old agent's registrations,
+  unless one of the old agent's sessions is still on the task. The shared token's
+  registrations, and those from before per-agent tokens, attach only while a shared token
+  is set, and are deleted once it is not.
 - **Floods stay with their token.** Each token has its own rate (`max_per_minute`, 429)
   and its own share of live registrations (`max_per_token`, 507), so one token's flood
   does not hold back another token's registrations.
@@ -499,8 +506,9 @@ dispatch gate would park it).
    make shows up as a 403, in `kelpie_conditions_refused_total{reason="out_of_scope"}` and
    in the ledger: widen that entry's scope rather than going back to the shared token.
 3. Unset `$KELPIE_CONDITIONS_TOKEN`, remove `[conditions] token_env` and restart. From
-   then on only the agents' tokens register, and `kelpie doctor` passes "conditions tokens
-   per agent".
+   then on only the agents' tokens register, what the shared token registered is deleted
+   (agents register again with their own tokens), and `kelpie doctor` passes "conditions
+   tokens per agent".
 
 ## CI and release workflows
 

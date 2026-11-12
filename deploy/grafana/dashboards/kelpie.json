@@ -1298,7 +1298,7 @@
     {
       "id": 33,
       "type": "timeseries",
-      "title": "OTLP requests per minute by code",
+      "title": "OTLP and condition requests per minute by code",
       "datasource": {
         "type": "prometheus",
         "uid": "kelpie-prometheus"
@@ -1327,6 +1327,24 @@
           "refId": "B",
           "expr": "sum by (code) (rate(kelpie_metrics_requests_total[5m])) * 60",
           "legendFormat": "metrics {{code}}"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "kelpie-prometheus"
+          },
+          "refId": "C",
+          "expr": "sum by (code) (rate(kelpie_conditions_requests_total[5m])) * 60",
+          "legendFormat": "conditions {{code}}"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "kelpie-prometheus"
+          },
+          "refId": "D",
+          "expr": "sum by (reason) (rate(kelpie_conditions_refused_total[5m])) * 60",
+          "legendFormat": "conditions refused {{reason}}"
         }
       ],
       "fieldConfig": {

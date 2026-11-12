@@ -2723,21 +2723,27 @@ owners = ["agent-dev-1"]
   its sessions (owner, role, board or a `sessions` pattern), exactly as for spans. A task
   may be named by its id or by its id on its board (`t_1a` for `qr:t_1a`, as Hermes names
   it); the registration is stored under the full id. A registration for another agent's
-  task, or for a task the board does not show (scopes are read from the last tick, so none
-  are known until the first tick after a start), gets `403` with the same body either way:
-  the answer does not tell whether the task exists. It is counted in
+  task, or for a task the board does not show, gets `403` with the same body either way:
+  the answer does not tell whether the task exists. Scopes are read from the last tick: a
+  task that reached the board since then reads as unknown, so an agent may retry a 403
+  once after a tick (`[engine] interval`); until the first tick after a start, a per-agent
+  token gets `503` with `Retry-After` instead. A refusal is counted in
   `kelpie_conditions_refused_total{reason="out_of_scope"}`, logged and written to the
   ledger (rule `conditions`, kind `register`, the token's name and the task; one line an
-  hour per token and task, repeats counted on it), so `kelpie why <task>` shows it. A
-  registration attaches only while its token is still configured and the task still in its
-  scope: removing an agent's entry, or moving its task to another agent, also drops what
-  it registered. Kelpie refuses to start when an entry's token is unset, unreadable, weak
+  hour per token and task, repeats counted on it, and past 20 lines of one token in an
+  hour one line for all its tasks), so `kelpie why <task>` shows it. A registration
+  attaches only while its token is still configured and the task still in its scope:
+  removing an agent's entry drops what it registered (deleted at the next prune), and
+  moving its task to another agent does too, unless one of the old agent's sessions is
+  still on the task. Kelpie refuses to start when an entry's token is unset, unreadable, weak
   (the strength rules of OTLP tokens, on loopback too) or equal to another token.
 - **The shared token (deprecated).** `token_env` (`$KELPIE_CONDITIONS_TOKEN`) still works:
   whoever holds it may register for any task, as before, so an agent holding it can add an
   unmet condition to another agent's waiting task and hold back its wake. It is optional
   once per-agent tokens are configured (required only when `token_env` is in the config),
-  and `kelpie doctor` warns ("conditions tokens per agent") while it is set. Moving off it:
+  and `kelpie doctor` warns ("conditions tokens per agent") while it is set. Its
+  registrations (and those made before per-agent tokens) attach only while it is set: once
+  it is unset, they are deleted. Moving off it:
   [security.md](security.md#per-agent-conditions-tokens). Off loopback, put the listener
   behind TLS (every token is a bearer token).
 - **Before the body is read:** the bearer token (every token compared, in constant time

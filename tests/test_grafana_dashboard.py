@@ -103,6 +103,8 @@ def _metrics() -> Metrics:
     metrics.actions[("rule-a", "alert", "observe", "observed")] += 1
     metrics.spans_rejected("too_big", 1)
     metrics.traces_request(200)
+    metrics.set_conditions(True, ("out_of_scope", "rate_limited", "token_cap"))
+    metrics.conditions_request(201)
     metrics.resource_failed("timeout")
     metrics.budgets = (
         BudgetStatus("b", BudgetScope.DAY, "farm", BudgetUnit.USD, 1.0, runs_out_at=NOW),

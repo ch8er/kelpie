@@ -281,19 +281,73 @@ def test_a_table_from_before_per_agent_tokens_gets_the_column(tmp_path: Path) ->
             " '{}', ?, NULL)",
             (NOW.isoformat(),),
         )
-    reader = make(tmp_path, tokens=(), readonly=True)
+    reader = make(tmp_path, tokens=(), readonly=True, shared_rows=True)
     try:
         assert attached(reader) == ["T-B"]  # read as the shared token's, column or not
     finally:
         reader.close()
     CLOCK[:] = [NOW]
-    registry = make(tmp_path)
+    registry = make(tmp_path, shared=SHARED_TOKEN)  # the shared token is still set
     try:
         registry(BOARD)
         assert registry.register(body("T-A"), A).status == 201
         assert sorted(attached(registry)) == ["T-A", "T-B"]
     finally:
         registry.close()
+    # The shared token unset: its (and older) registrations stop attaching, and go.
+    registry = make(tmp_path)
+    try:
+        assert attached(registry) == ["T-A"]
+        with sqlite3.connect(tmp_path / "k.db") as db:
+            rows = db.execute("SELECT task_id, token FROM registered_conditions").fetchall()
+        assert rows == [("T-A", "agent-a")]
+    finally:
+        registry.close()
+
+
+def test_registrations_of_a_removed_token_are_deleted(tmp_path: Path) -> None:
+    CLOCK[:] = [NOW]
+    registry = make(tmp_path)
+    registry(BOARD)
+    assert registry.register(body("T-B"), B).status == 201
+    registry.close()
+    only_a = make(tmp_path, tokens=TOKENS[:1], scopes={"agent-a": SCOPES["agent-a"]})
+    try:
+        only_a(BOARD)
+        with sqlite3.connect(tmp_path / "k.db") as db:
+            assert db.execute("SELECT COUNT(*) FROM registered_conditions").fetchone()[0] == 0
+    finally:
+        only_a.close()
+
+
+def test_before_the_first_tick_a_token_is_asked_to_retry(
+    tmp_path: Path, ledger: MemoryLedgerStore, metrics: Metrics
+) -> None:
+    CLOCK[:] = [NOW]
+    registry = make(tmp_path, audit=ledger, observer=metrics)
+    try:
+        answer = registry.register(body("T-A"), A)  # no tick read the board yet
+        assert answer.status == 503 and int(answer.headers["Retry-After"]) > 0
+        assert ledger.since(NOW - timedelta(hours=1)) == []  # not a refusal
+        assert 'reason="out_of_scope"} 0' in metrics.render()
+        registry(BOARD)
+        assert registry.register(body("T-A"), A).status == 201
+    finally:
+        registry.close()
+
+
+def test_made_up_task_ids_fold_into_one_ledger_line_per_token(
+    registry: ConditionRegistry, ledger: MemoryLedgerStore
+) -> None:
+    from kelpie.conditions_api import AUDIT_PER_TOKEN
+
+    for n in range(AUDIT_PER_TOKEN + 30):
+        assert registry.register(body(f"T-MADE-UP-{n}"), A).status == 403
+    lines = ledger.since(NOW - timedelta(hours=1))
+    assert len(lines) == AUDIT_PER_TOKEN + 1
+    assert lines[-1].task_id is None and lines[-1].suppressed == 29
+    assert registry.register(body("T-A"), B).status == 403  # another token: its own lines
+    assert ledger.since(NOW - timedelta(hours=1))[-1].task_id == "T-A"
 
 
 def test_settings_of_per_agent_tokens() -> None:

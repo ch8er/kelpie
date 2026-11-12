@@ -674,21 +674,29 @@ def check_conditions_tokens(settings: Settings, environ: Mapping[str, str]) -> C
     if settings.hub is not None or settings.agent is not None:
         return _skip(CONDITIONS_CHECK, "[conditions] is single-host only: serve refuses it here")
     tokens = settings.traces.tokens
+    try:
+        shared = conditions.shared_token(environ)
+    except ValueError as exc:
+        return _fail(CONDITIONS_CHECK, str(exc), f"set ${conditions.token_env} to a strong token")
+    seen: dict[str, str] = {} if shared is None else {shared: f"${conditions.token_env}"}
     for entry in tokens:
         try:
             value = entry.token(environ)
         except ValueError as exc:
             return _fail(CONDITIONS_CHECK, str(exc), "set the variable, or fix token_file")
+        if (other := seen.get(value)) is not None:  # serve refuses it; names, never values
+            return _fail(
+                CONDITIONS_CHECK,
+                f"{entry.name}: its token is the same as {other}'s; serve refuses it",
+                "give every agent a token of its own",
+            )
+        seen[value] = entry.name
         if (weak := weak_token(value)) is not None:
             return _fail(
                 CONDITIONS_CHECK,
                 f"{entry.name}: the token in {entry.where} {weak}; serve refuses it",
                 f"`kelpie traces rotate-token --token {entry.name}`, or a longer random token",
             )
-    try:
-        shared = conditions.shared_token(environ)
-    except ValueError as exc:
-        return _fail(CONDITIONS_CHECK, str(exc), f"set ${conditions.token_env} to a strong token")
     if shared is None and not tokens:
         return _fail(
             CONDITIONS_CHECK,
@@ -1817,7 +1825,8 @@ def run_checks(
     if settings.view.enabled:  # only when on, so the output of others stays as it was
         checks.append(check_view(settings, environ))
     checks.append(check_traces_scopes(settings, loaded, environ))
-    checks.append(check_conditions_tokens(settings, environ))
+    if settings.conditions.enabled:  # only when on, so the output of others stays as it was
+        checks.append(check_conditions_tokens(settings, environ))
     checks.append(check_private_files(settings))
     checks.append(check_database(settings, at))
     checks.append(check_prices(settings, at))
