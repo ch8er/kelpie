@@ -42,6 +42,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
   `delegated` in the ledger, so the person hears once on hand-off and once at the end; a
   problem it held back that the rule does not hand over is said to be the person's, and
   the circuit breaker alerts once. Critical problems always reach the person.
+- Delegation, fourth part (#347): the daily report's "Delegation to operator agents"
+  section: cards handed over (and those suggest mode would have handed), alerts held back,
+  the verdicts the person got, cards by operator, and the tokens operator agents spent on
+  Kelpie's cards.
 - `POST /conditions`: an agent registers the condition its task waits for (task id, kind,
   params), off by default (`[conditions] enabled`). On the main listener (loopback by
   default, behind the Host and connection guards), with a bearer token of its own
