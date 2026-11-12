@@ -124,6 +124,7 @@ from pathlib import Path
 from typing import Any, ClassVar
 
 from kelpie.adapters import _spool
+from kelpie.adapters._common import format_age
 from kelpie.adapters.hermes.git_state import (
     DEFAULT_TIMEOUT,
     GitState,
@@ -646,14 +647,6 @@ def _block_category(
     if status_event is not None and status_event["kind"] == "gave_up":
         return "guard"
     return None
-
-
-def format_age(delta: timedelta) -> str:
-    seconds = max(0, int(delta.total_seconds()))
-    for unit, size in (("d", 86400), ("h", 3600), ("m", 60)):
-        if seconds >= size:
-            return f"{seconds // size}{unit}"
-    return f"{seconds}s"
 
 
 @dataclass(frozen=True, slots=True)

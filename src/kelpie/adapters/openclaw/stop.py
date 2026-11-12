@@ -42,7 +42,6 @@ import json
 import os
 import re
 import shutil
-import signal
 import subprocess
 import time
 import unicodedata
@@ -50,6 +49,7 @@ from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 
+from kelpie.adapters._common import kill_group as _kill_group
 from kelpie.adapters._spool import write_in_dir
 
 DEFAULT_STOP_DIR = Path("~/.openclaw/kelpie/stop")
@@ -247,14 +247,3 @@ def _json_tail(out: str | None) -> object:
         except ValueError:
             start = text.find("{", start + 1)
     return None
-
-
-def _kill_group(proc: subprocess.Popen[str]) -> None:
-    """Kill the command and anything it started; it is our own child in its own session."""
-    try:
-        if hasattr(os, "killpg"):
-            os.killpg(proc.pid, signal.SIGKILL)
-        else:  # pragma: no cover - Windows
-            proc.kill()
-    except (ProcessLookupError, PermissionError):
-        pass
