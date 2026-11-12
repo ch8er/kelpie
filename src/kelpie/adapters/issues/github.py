@@ -65,6 +65,7 @@ from kelpie.adapters.issues.mapping import (
     LinkedPull,
     login_key,
 )
+from kelpie.adapters.issues.mapping import parse_time as _time
 from kelpie.adapters.issues.writes import WriteGate
 from kelpie.connectors.github.client import GitHubClient, GitHubError
 from kelpie.connectors.github.connector import valid_repo, web_host
@@ -110,16 +111,6 @@ _ID = re.compile(r"(?P<repo>[a-z0-9_.-]{1,100}/[a-z0-9_.-]{1,100})#(?P<number>[1
 
 def issue_id(repo: str, number: int) -> str:
     return f"{repo}#{number}"
-
-
-def _time(value: Any) -> datetime | None:
-    if not isinstance(value, str):
-        return None
-    try:
-        at = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    return at if at.tzinfo is not None else at.replace(tzinfo=UTC)
 
 
 def _iso(at: datetime) -> str:

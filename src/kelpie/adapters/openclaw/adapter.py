@@ -61,6 +61,8 @@ from pathlib import Path
 from typing import Any
 
 from kelpie.adapters import _spool
+from kelpie.adapters._common import epoch_utc as _utc
+from kelpie.adapters._common import format_age, spool_act_locks, warn_once
 from kelpie.adapters.openclaw import workboard
 from kelpie.adapters.openclaw.plugin.kelpie_hook import (
     peer_key_path,
@@ -79,7 +81,6 @@ from kelpie.adapters.openclaw.stop import (
     write_marker,
 )
 from kelpie.adapters.openclaw.workboard import Card, WorkboardError
-from kelpie.core import actlock
 from kelpie.core.actions import ActionResult
 from kelpie.core.actlock import ActLock
 from kelpie.core.model import Owner, Session, Snapshot, Span, SpanKind, Status, Task
@@ -140,15 +141,6 @@ class OpenClawError(RuntimeError):
         self.public_reason = public_reason
 
 
-def _utc(epoch: Any) -> datetime | None:
-    if isinstance(epoch, bool) or not isinstance(epoch, int | float):
-        return None
-    try:
-        return datetime.fromtimestamp(float(epoch), UTC)
-    except (ValueError, OverflowError, OSError):
-        return None
-
-
 def _text(value: Any) -> str | None:
     return (value.strip()[:MAX_FIELD] or None) if isinstance(value, str) else None
 
@@ -157,14 +149,6 @@ def _count(value: Any) -> int | None:
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
         return None
     return value
-
-
-def format_age(delta: timedelta) -> str:
-    seconds = max(0, int(delta.total_seconds()))
-    for unit, size in (("d", 86400), ("h", 3600), ("m", 60)):
-        if seconds >= size:
-            return f"{seconds // size}{unit}"
-    return f"{seconds}s"
 
 
 @dataclass(frozen=True, slots=True)
@@ -297,14 +281,8 @@ class OpenClawAdapter:
             self.spool = Path(self.spool).expanduser()
 
     def act_locks(self) -> tuple[ActLock, ...]:
-        """The act lock next to the spool (audit M7): instances that read one spool see the
-        same sessions, and both would stop them. None without a spool or a stop folder:
-        nothing can be stopped then."""
-        if self.spool is None or self.stop_dir is None:
-            return ()
-        # The hook makes the spool's folder (0700) on its first line: a fresh host has none.
-        lock = ActLock(f"{self.name} ({self.spool})", actlock.beside(self.spool), True)
-        return (lock,)
+        """The act lock next to the spool (:func:`kelpie.adapters._common.spool_act_locks`)."""
+        return spool_act_locks(self.name, self.spool, self.stop_dir)
 
     # --- status --------------------------------------------------------------------------
 
@@ -628,9 +606,7 @@ class OpenClawAdapter:
         return None if self.spool is None else read_peer_key(peer_key_path(self.spool))
 
     def _warn(self, key: str, message: str, *args: object) -> None:
-        if key not in self._warned:
-            self._warned.add(key)
-            log.warning(message, *args)
+        warn_once(log, self._warned, key, message, *args)
 
     # --- PlatformAdapter -----------------------------------------------------------------
 
