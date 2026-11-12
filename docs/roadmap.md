@@ -608,7 +608,7 @@ them into `Resource` readings per host. Works the same for a laptop, a cloud VM 
 - [x] Disk, memory, load and process count per host
 - [x] PromQL queries configurable
 - [x] Prometheus unavailability degrades gracefully (rule sees no data, alert once): a warning is logged once per cause, `kelpie_resource_read_failures_total` counts it, and rule 7 alerts once per cause that the host checks are blind (#371; fixture `03-resources-unreadable.yaml`)
-- [ ] While host resources cannot be read (`Snapshot.resources_failure`), open disk, memory and load states stay open instead of resolving as "no recent reading any more" next to the blind warning
+- [x] While host resources cannot be read (`Snapshot.resources_failure`), open disk, memory and load states stay open instead of resolving as "no recent reading any more" next to the blind warning (rule hook `holds`, #451)
 
 ### connectors: GitHub PR and CI
 labels: P0, week-2, area:connectors

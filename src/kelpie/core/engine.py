@@ -497,6 +497,7 @@ class Engine:
             s
             for s in gone
             if not _blind(s.task_id, snapshot.unobserved, self._reads_boards(s.rule, s.id))
+            and not self._holds(s.rule, s.id, snapshot)
         ]
         results: list[Dispatched] = []
         for state in gone:
@@ -566,6 +567,17 @@ class Engine:
             return self._process(action, snapshot)
         finally:
             self._transitions.pop(action.key, None)
+
+    def _holds(self, rule: str, state: str, snapshot: Snapshot) -> bool:
+        """Whether a rule keeps one of its unreported states open (``Rule`` docs: ``holds``)."""
+        hook = getattr(self._by_name.get(rule), "holds", None)
+        if not callable(hook):
+            return False
+        try:
+            return bool(hook(state, snapshot))
+        except Exception:
+            log.exception("rule %s: holds(%r) failed", rule, state)
+            return False
 
     def _reads_boards(self, rule: str, state: str) -> bool:
         """Whether a rule's state depends on the boards (``Rule`` docs: ``boards``)."""

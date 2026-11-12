@@ -448,7 +448,11 @@ When the host resources cannot be read (Prometheus down, unreachable, refusing t
 one `warning` says that the host checks are blind, with the cause and since when: a lasting
 state (`resources:source`), announced once per cause (a new cause is a "changed" notice) and
 resolved when readings come back. Failed optional queries (growth, directory sizes) do not
-raise it: the other readings continue.
+raise it: the other readings continue. Meanwhile the disk, memory, load, process and
+heavy-task alerts already open stay open: Kelpie cannot tell whether they cleared, so no
+"no recent reading any more" notice goes out next to the blind warning. Once readings are
+back, each resolves or carries on as its reading says. Provider quota and credential alerts
+are read elsewhere and are not held.
 
 Host thresholds (any can be `false` to turn it off; warning must be below critical):
 
