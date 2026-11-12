@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import ipaddress
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -12,6 +11,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import SplitResult, urlsplit, urlunsplit
 
+from kelpie.core.loopback import is_loopback as core_is_loopback
 from kelpie.core.serde import parse_duration
 from kelpie.traces.auth import (
     TokenFileError,
@@ -327,12 +327,8 @@ def weak_token(token: str) -> str | None:
 
 
 def is_loopback(host: str) -> bool:
-    if host.strip().lower() == "localhost":
-        return True
-    try:
-        return ipaddress.ip_address(host.strip("[]")).is_loopback
-    except ValueError:
-        return False
+    """A bind host or a URL's host name as given (:func:`kelpie.core.loopback.is_loopback`)."""
+    return core_is_loopback(host)
 
 
 def load_traces(section: Any) -> TraceSettings:

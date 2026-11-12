@@ -18,6 +18,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from kelpie.core.actions import ActionKind
+from kelpie.core.loopback import is_loopback
 from kelpie.core.serde import parse_duration
 from kelpie.remote.protocol import (
     ADAPTER_NAMES,
@@ -285,10 +286,9 @@ def _relay(value: Any) -> tuple[str, int] | None:
 
 
 def _loopback(host: str) -> bool:
-    try:
-        return ipaddress.ip_address(host).is_loopback
-    except ValueError:
-        return False
+    """An IP literal as written, no name and no brackets (``_listen`` takes them off and
+    ``_relay`` maps ``localhost`` itself); the check is :mod:`kelpie.core.loopback`'s."""
+    return is_loopback(host, names=False, brackets=False)
 
 
 def load_hub(section: Any) -> HubSettings | None:

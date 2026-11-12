@@ -276,6 +276,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 - Linear: a task whose time comes from when Kelpie first saw it as it is (no history
   read) now counts again from its last change when its workflow state changes, as it
   already did for labels and assignees.
+- Internal, no behaviour change (#248 D12): one loopback check, `kelpie.core.loopback`,
+  for the listeners' connection guards (`kelpie.httpguard`), `[agent] relay`, and the
+  traces and resources settings; each caller keeps its own normalization (tested against
+  the copies it had).
 - Internal, no behaviour change (#248 D13, adapter twins): one copy of the adapters'
   shared helpers in `kelpie.adapters._common`: `format_age` (Hermes, Claude Code,
   OpenClaw), the spool time `_utc` and `_warn`/`act_locks` (Claude Code, OpenClaw), the
