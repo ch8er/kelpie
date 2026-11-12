@@ -23,7 +23,7 @@ configure what exists.
   [return_causes](#return_causes), [dispatch_gate](#dispatch_gate),
   [needs_you](#13-needs_you), [output_offenders](#output_offenders),
   [instruction_bloat](#instruction_bloat), [unanswered_asks](#unanswered_asks)
-- [[storage]](#storage), [[snooze]](#snooze)
+- [[storage]](#storage), [[snooze]](#snooze), [[doctor]](#doctor)
 - [[adapters.hermes]](#adaptershermes), [[adapters.claude_code]](#adaptersclaude_code),
   [[adapters.openclaw]](#adaptersopenclaw), [[adapters.github_issues]](#adaptersgithub_issues),
   [[adapters.linear]](#adapterslinear)
@@ -1030,6 +1030,29 @@ never in the cost of chaos. A CI, merge, outage or hold wait stays what it is.
 | `max_days` | `90` | How far ahead `kelpie snooze --until` may reach, 1 to 365 days. A bare date is counted by date: the date exactly `max_days` after today is the last one allowed. A later one is refused (exit 2), and the message names the last date or time allowed. |
 | `marker` | `false` | Read `until:` markers in block reasons. A marker that is not a valid date, or ends too late (`marker_max_days`), is ignored and logged once; `kelpie doctor` counts them on every local board ("snooze markers parse"). |
 | `marker_max_days` | `30` | How long after its block was set (`Block.since`, when the agent wrote the reason) a marker may end, 1 to `max_days`. A bare date is counted by date: the date exactly `marker_max_days` after the block's is the last one allowed. A marker ending later is never honoured, even once that date comes within reach; a new block starts a new period. The default is lowered to `max_days` when that is smaller. |
+
+## [doctor]
+
+Settings only `kelpie doctor` reads. `pr_block_acks` acknowledges a reviewed exception of
+the "PR blocks have conditions" check, per task: a block that names a PR and reads as
+waiting on it, but that you checked and know waits on something no `[[block_conditions]]`
+pattern should resolve (a "PR merged" pattern would close it wrongly). Each entry needs an
+expiry, so a reviewed WARN comes back instead of staying hidden: an entry past its `until`,
+or ending more than 90 days after the doctor run, acknowledges nothing, and doctor names it
+("acknowledgements that no longer hold"). An entry covers the task, not one block: a new
+block on the same task stays acknowledged until the entry expires. Kelpie's rules do not
+read this section.
+
+```toml
+[doctor]
+pr_block_acks = [
+  { task = "t_42", until = 2026-12-01, note = "reviewed: waits on the vendor, not the PR" },
+]
+```
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `pr_block_acks` | `[]` | Tables of `task` (the task id, on any local board), `until` (a date, through that day, or a date and time; without an offset in `[report] timezone`; required) and an optional `note` (up to 300 characters). At most 200 entries, one per task. |
 
 ## [adapters.hermes]
 
