@@ -25,7 +25,6 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
   delegation with `[hub]` is gone; a `delegate_to` board naming an agent the hub does not
   know, or a bare adapter name, is refused instead. `[agent] actions` without `delegate`
   turns cards off on that host.
-
 - Hermes makes WIP commits (#399, option 1): `checkpoints` in `act` mode commits a dirty
   worktree locally on the task branch after its session ended, and never pushes. Git runs
   with a fixed environment (no global or system config, no hooks, no signing, a fixed
