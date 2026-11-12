@@ -20,7 +20,8 @@ SENT_BACK = frozenset({Status.BACKLOG, Status.READY, Status.IN_PROGRESS})
 
 def bounces(steps: Sequence[StatusStep]) -> int:
     """How often the task went back from review, accepted or done to backlog, ready or in
-    progress, within the history."""
+    progress, within the history. Its first step may be the status the window began in,
+    so one bounce may be older than the window."""
     return sum(1 for s in steps if s.previous in HANDED_ON and s.status in SENT_BACK)
 
 
