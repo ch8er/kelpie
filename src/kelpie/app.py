@@ -3050,9 +3050,11 @@ def _open_span_store(db_path: Path | None) -> SpanStore:
 
 
 # Rules whose effects on a platform are actions the Hermes adapter carries out: stop, wait
-# (park), wake of a parked task, comment (plus alerts). Update with the adapter.
+# (park), wake of a parked task, comment, a local WIP commit (plus alerts). Update with the
+# adapter.
 HERMES_ACT_RULES = frozenset(
     {
+        "checkpoints",
         "loop_breaker",
         "wait_condition",
         "conflict_warning",

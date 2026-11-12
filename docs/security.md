@@ -201,6 +201,29 @@ so it is kept for Kelpie's own user:
   `/data` 0700, owned by the `kelpie` user; a named volume takes that mode when it is
   first created, an existing volume or bind mount keeps its own.
 
+## Git in agents' worktrees
+
+Agents' worktrees are untrusted: everything git reads there (config, attributes, objects)
+was written by an agent. Kelpie reads git state there with a fixed environment and
+read-only plumbing, and on Hermes makes one kind of write: a **local WIP commit, never
+pushed** (#399, option 1), for `checkpoints` in `act` mode. Git runs with no system or
+global config (`GIT_CONFIG_NOSYSTEM`, `GIT_CONFIG_GLOBAL=/dev/null`), only `PATH` and
+`HOME` from Kelpie's environment (no tokens, no inherited `GIT_*`), no hooks
+(`core.hooksPath=/dev/null`), no fsmonitor, no signing, no automatic gc, no transport
+(`GIT_ALLOW_PROTOCOL=none`, `protocol.allow=never`), and a fixed author. A worktree whose own
+config has includes or filter drivers, a changed file with a filter attribute (LFS), an
+operation in progress, unmerged or submodule changes, a nested repository, another branch
+than the task's, or a file over 25 MiB is refused and a person is told. The commit is
+plumbing (`add -A`, `write-tree`, `commit-tree`) and lands with a compare-and-swap
+(`update-ref <branch> <new> <old>`). No push means no remote, credential helper or SSH
+command the worktree names is ever run. Details: the Hermes README, "Trust model" and "WIP
+commits".
+
+Residual risk: git itself parses the hostile repository, and a worker started between
+Kelpie's run check and the commit races with it (the lock and the compare-and-swap make
+that a failure, not a lost change). Run Kelpie as the user that owns the worktrees (it
+refuses another owner's) and keep its own secrets out of their reach.
+
 ## Outbound connections
 
 Every outbound client (the `kelpie.net` requests of the alert channels, Prometheus, LLM

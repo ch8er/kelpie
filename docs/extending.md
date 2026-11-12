@@ -134,7 +134,7 @@ out.
 | `requeue`, `wake` | task back to the ready queue | platform adapter `requeue` |
 | `unblock` | clear the block | platform adapter `unblock` |
 | `comment` | comment on the task | platform adapter `comment` |
-| `wip_commit` | commit and push the worktree | platform adapter `wip_commit` |
+| `wip_commit` | commit the worktree (and push it, where the adapter pushes; Hermes commits locally only) | platform adapter `wip_commit` |
 | `reassign` | new owner (`params.owner_id`) | adapter with `SupportsReassign` |
 | `close` | move the task to done | adapter with `SupportsClose` |
 | `wait` | park in `waiting` on `params.conditions` | adapter with `SupportsWait` |

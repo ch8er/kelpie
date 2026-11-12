@@ -311,7 +311,7 @@ Implement `requeue`, `unblock`, `comment`, `wake`, `reassign` and `wip_commit` f
 - [x] Actions are idempotent (re-running the same action is a no-op) (the ledger stops repeats; an action already in effect raises `NothingToDo` and is recorded as nothing to do with a note: a second park, a wake of an awake task, a requeue of a task already queued, an unblock of an unblocked task, a reassignment to the current assignee, #378; a requeue of a task neither queued nor parked by Kelpie still reaches a person, as Hermes cannot carry it out)
 - [x] Concurrent writes with Hermes handled safely (transactions, retry on lock) (Kelpie never writes `kanban.db`: every write goes through the `hermes kanban` CLI; reads are read-only with a busy timeout; #13, #75)
 - [x] Tasks in Kelpie's `waiting` status are reported to the Hermes dispatcher as waiting and alive, never as dead (the "waiting" heartbeat of rule 2) (a parked task sits in Hermes `scheduled`, which the dispatcher does not treat as dead; `test_a_parked_ready_task_does_not_make_its_assignee_look_active`, #75)
-- [ ] `unblock`, `reassign` and `wip_commit` for Hermes (`unblock` and `reassign` done and declared, tested against the simulated Hermes CLI, #367; `wip_commit` raises `NotImplementedError` and is not declared: how it may commit and push in an agent's worktree is a decision, #399)
+- [x] `unblock`, `reassign` and `wip_commit` for Hermes (`unblock` and `reassign` done and declared, tested against the simulated Hermes CLI, #367; `wip_commit` commits locally in the task's worktree and never pushes, `draft_pr` is unsupported, #399 option 1)
 
 ### adapters: Hermes plugin for post_tool_call and on_session_end
 labels: P0, week-1, area:adapters

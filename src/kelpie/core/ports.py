@@ -84,16 +84,22 @@ class PlatformAdapter(Protocol):
 
     def wip_commit(
         self, task_id: str, message: str, *, branch: str | None = None, draft_pr: bool = False
-    ) -> None:
-        """Commit and push everything uncommitted in the task's worktree, on ``branch`` when
-        given. With ``draft_pr`` the push goes to a draft PR (which does not run CI) instead
-        of relying on ``[skip ci]`` in the message. Afterwards the adapter reports the new
-        commit as the session's ``last_commit``, so the next session can resume from it.
+    ) -> str | None:
+        """Commit everything uncommitted in the task's worktree, on ``branch`` when given,
+        and, where the adapter pushes at all, push it. With ``draft_pr`` the push goes to a
+        draft PR (which does not run CI) instead of relying on ``[skip ci]`` in the message.
+        Afterwards the adapter reports the new commit as the session's ``last_commit``, so the
+        next session can resume from it. May return a few words on what was committed (the
+        ledger keeps them).
 
-        The commit and the push go to ``branch`` exactly: rule 5 checked that branch for open
-        PRs, not whatever the worktree has checked out. Raise (do nothing) when ``branch`` is
-        None, the worktree's HEAD is another branch, or a run is active on the task (a new
-        session may be starting in that worktree)."""
+        An adapter may commit locally and never push (Hermes, #399): the work then survives
+        in the task's branch for the next session in the same worktree, and ``draft_pr``
+        raises :class:`UnsupportedAction`.
+
+        The commit (and any push) goes to ``branch`` exactly: rule 5 checked that branch for
+        open PRs, not whatever the worktree has checked out. Raise (do nothing) when
+        ``branch`` is None, the worktree's HEAD is another branch, or a run is active on the
+        task (a new session may be starting in that worktree)."""
         ...
 
     def events(self, since: datetime) -> Iterable[PlatformEvent]: ...

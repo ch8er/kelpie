@@ -170,7 +170,7 @@ is accepted and ignored with a warning. Rules run in the order below.
 
 | # | Name | Priority | Status | Actions | Act needs |
 | --- | --- | --- | --- | --- | --- |
-| – | `checkpoints` | P0 | implemented | `comment`, `wip_commit` | adapter `comment`, `wip_commit` (not in Hermes yet) |
+| – | `checkpoints` | P0 | implemented | `comment`, `wip_commit` | adapter `comment`, `wip_commit` (Hermes: a local commit, never pushed) |
 | 1 | `exit_contract` | P0 | implemented | `requeue`, `alert`, `comment` | adapter `requeue` (not in Hermes yet), `comment` (acceptance criteria) |
 | 2 | `wait_condition` | P0 | implemented | `wake`, `comment`, `alert` | adapter `requeue` (a wake puts the task back in the ready queue), `comment` (not in Hermes yet) |
 | 3 | `orphan_status` | P0 | implemented | `alert`, `reassign` | adapter with `SupportsReassign` |

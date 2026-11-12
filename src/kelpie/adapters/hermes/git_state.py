@@ -205,9 +205,16 @@ def git_env(path: Path | None = None) -> dict[str, str]:
 
 
 def _run(
-    cmd: list[str], timeout: float, deadline: float | None, path: Path | None = None
+    cmd: list[str],
+    timeout: float,
+    deadline: float | None,
+    path: Path | None = None,
+    env: dict[str, str] | None = None,
+    stdin: str | None = None,
 ) -> tuple[int, str, str]:
-    """``(returncode, stdout, stderr)`` of ``cmd``; raises ``_Stop`` if it cannot finish."""
+    """``(returncode, stdout, stderr)`` of ``cmd``; raises ``_Stop`` if it cannot finish.
+    ``env`` replaces :func:`git_env` (a WIP commit adds its fixed author); ``stdin`` is
+    written to git's standard input (closed otherwise)."""
     limit, cut = timeout, False
     if deadline is not None:
         left = deadline - time.monotonic()
@@ -218,10 +225,10 @@ def _run(
     try:
         proc = subprocess.Popen(
             cmd,
-            stdin=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL if stdin is None else subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            env=git_env(path),
+            env=git_env(path) if env is None else env,
             encoding="utf-8",
             errors="replace",
             start_new_session=True,  # its own process group, killed as a whole on timeout
@@ -232,7 +239,7 @@ def _run(
         log.debug("hermes: cannot run git: %s", exc)
         raise _Stop(Problem.FAILED) from exc
     try:
-        out, err = proc.communicate(timeout=limit)
+        out, err = proc.communicate(stdin, timeout=limit)
     except subprocess.TimeoutExpired as exc:
         _kill_group(proc)
         raise _Stop(Problem.BUDGET if cut else Problem.TIMEOUT) from exc

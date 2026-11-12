@@ -232,7 +232,8 @@ def test_sources_say_what_keeps_a_rule_from_acting(
     """The report gets the same answer as kelpie serve's startup check (issue 142)."""
     monkeypatch.delenv("KELPIE_DB", raising=False)
     src = sources(load_settings(config(tmp_path, "[adapters.hermes]\n")))
-    assert src.act_blockers["checkpoints"] == "Hermes can't make WIP commits yet"
+    assert src.act_blockers["exit_contract"] == "Hermes requeues only tasks Kelpie parked"
+    assert "checkpoints" not in src.act_blockers  # local WIP commits (#399)
     assert "stale_blocks" not in src.act_blockers
     assert "loop_breaker" not in src.act_blockers
 
