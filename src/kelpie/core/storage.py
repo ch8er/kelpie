@@ -973,27 +973,40 @@ def _span_row(span: Span, received: str, version: int) -> tuple[object, ...]:
     )
 
 
+_SPAN_KINDS = {k.value: k for k in SpanKind}
+# Positions in a row selected as _SPAN_COLUMNS: reading a row by index is faster than by
+# name, and the report and the output offenders decode hundreds of thousands (#248).
+(
+    _TRACE, _SPAN_ID, _PARENT, _NAME, _KIND, _START, _END, _LAST, _TASK, _SESSION, _MODEL,
+    _TOOL, _ARGS, _IN, _OUT, _CACHED, _OUTCOME, _ATTRS, _RECEIVED, _VERSION, _COUNTED,
+    _CACHE_WRITE,
+) = range(len(_SPAN_COLUMNS.split(",")))  # fmt: skip
+
+
 def _span(r: sqlite3.Row) -> Span:
-    attributes = json.loads(r["attributes"])
+    """A span from a row selected as :data:`_SPAN_COLUMNS` (by position)."""
+    raw = r[_ATTRS]
+    attributes = {} if raw == "{}" else json.loads(raw)  # most spans carry none
+    end = r[_END]
     return Span(
-        trace_id=r["trace_id"],
-        span_id=r["span_id"],
-        parent_id=r["parent_id"],
-        name=r["name"],
-        kind=SpanKind(r["kind"]),
-        start=datetime.fromisoformat(r["start"]),
-        end=None if r["end_at"] is None else datetime.fromisoformat(r["end_at"]),
-        task_id=r["task_id"],
-        session_id=r["session_id"],
-        model=r["model"],
-        tool=r["tool"],
-        args_hash=r["args_hash"],
-        input_tokens=r["input_tokens"],
-        output_tokens=r["output_tokens"],
-        cached_tokens=r["cached_tokens"],
-        outcome=r["outcome"],
+        trace_id=r[_TRACE],
+        span_id=r[_SPAN_ID],
+        parent_id=r[_PARENT],
+        name=r[_NAME],
+        kind=_SPAN_KINDS.get(r[_KIND]) or SpanKind(r[_KIND]),
+        start=datetime.fromisoformat(r[_START]),
+        end=None if end is None else datetime.fromisoformat(end),
+        task_id=r[_TASK],
+        session_id=r[_SESSION],
+        model=r[_MODEL],
+        tool=r[_TOOL],
+        args_hash=r[_ARGS],
+        input_tokens=r[_IN],
+        output_tokens=r[_OUT],
+        cached_tokens=r[_CACHED],
+        outcome=r[_OUTCOME],
         attributes=attributes if isinstance(attributes, dict) else {},
-        cache_write_tokens=r["cache_write_tokens"],
+        cache_write_tokens=r[_CACHE_WRITE],
     )
 
 
@@ -1140,6 +1153,15 @@ class SqliteSpanStore:
     def spans_since(self, after: datetime) -> Sequence[Span]:
         sql = f"SELECT {_SPAN_COLUMNS} FROM spans WHERE last_at >= ? ORDER BY start, rowid_"
         return [_span(r) for r in self._read(sql, (_ts(after),))]
+
+    def spans_between(self, start: datetime, end: datetime) -> Sequence[Span]:
+        """Spans whose last time falls in ``[start, end)``, in start order: a report of an
+        earlier day reads its range, not everything since."""
+        sql = (
+            f"SELECT {_SPAN_COLUMNS} FROM spans WHERE last_at >= ? AND last_at < ?"
+            " ORDER BY start, rowid_"
+        )
+        return [_span(r) for r in self._read(sql, (_ts(start), _ts(end)))]
 
     def tool_spans_since(self, after: datetime) -> Sequence[Span]:
         sql = (

@@ -13,7 +13,7 @@ import pytest
 
 from kelpie.core import storage
 from kelpie.core.model import Span, SpanKind, SpanTotals
-from kelpie.core.spans import MemorySpanStore, SpanStore, TokenUsage, totals, usage
+from kelpie.core.spans import MemorySpanStore, SpanStore, TokenUsage, last_at, totals, usage
 from kelpie.core.storage import SqliteLedgerStore, SqliteSpanStore
 from kelpie.traces.store import SpanRetention, SpanWindow, merge_spans
 
@@ -514,3 +514,38 @@ def test_links_are_inherited_across_requests(store: SpanStore) -> None:
     assert store.inherit_links({"t" * 32}) == 0
     assert store.inherit_links({"other"}) == 0
     assert [t.session_id for t in store.totals_since(NOW)] == ["own-session", "run-1"]
+
+
+def test_spans_between_is_spans_since_cut_at_the_end(tmp_path: Path) -> None:
+    """The report's bounded read (#248) returns what reading since the start and dropping
+    spans whose last time is at or after the end returned, in the same order; and a row
+    decodes to the span that was stored, with or without attributes."""
+    store = SqliteSpanStore(tmp_path / "kelpie.db")
+    h = timedelta(hours=1)
+    spans = [
+        span(1, NOW - 5 * h),
+        span(2, NOW - 3 * h, end=NOW - h, kind=SpanKind.TOOL),  # ends after the range
+        span(3, NOW - 2 * h, end=NOW - 4 * h),  # an end before its start: last is start
+        replace(span(4, NOW - 2 * h, kind=SpanKind.TOOL), attributes={}),
+        span(5, NOW),
+    ]
+    store.append_spans(spans, NOW)
+    start, end = NOW - 4 * h, NOW - h
+    since = [s for s in store.spans_since(start) if last_at(s) < end]
+    assert store.spans_between(start, end) == since
+    assert [s.span_id for s in since] == [f"{n:016x}" for n in (3, 4)]
+    assert sorted(store.spans_since(NOW - 9 * h), key=lambda s: s.span_id) == spans
+    store.close()
+
+
+def test_an_unknown_span_kind_in_a_row_still_fails_loudly(tmp_path: Path) -> None:
+    path = tmp_path / "kelpie.db"
+    store = SqliteSpanStore(path)
+    store.append_spans([span(1, NOW)], NOW)
+    db = sqlite3.connect(path)
+    db.execute("UPDATE spans SET kind = 'bogus'")
+    db.commit()
+    db.close()
+    with pytest.raises(ValueError):
+        store.spans_since(NOW - timedelta(days=1))
+    store.close()

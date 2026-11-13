@@ -107,13 +107,13 @@ def large_farm(tasks: int = 2000, spans_per_session: int = 40, seed: int = 7) ->
 
 
 def _session_spans(
-    rng: random.Random, sid: str, tid: str, start: datetime, count: int
+    rng: random.Random, sid: str, tid: str, start: datetime, count: int, until: datetime = NOW
 ) -> list[Span]:
     out: list[Span] = []
     at = start
     for k in range(count):
         at += timedelta(seconds=rng.randint(5, 120))
-        if at >= NOW:
+        if at >= until:
             break
         if k % 3 == 0:
             out.append(
