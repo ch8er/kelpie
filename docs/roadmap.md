@@ -711,7 +711,7 @@ trigger-by-trigger record. What is left is the act run, gated per rule by
 [docs/act-checklist.md](act-checklist.md).
 
 **Acceptance criteria**
-- [x] Observe on the real farm with the rule triggers reviewed: the observe runs behind incidents 14–20, each turned into fixtures and a fix (#444, #PRNUM)
+- [x] Observe on the real farm with the rule triggers reviewed: the observe runs behind incidents 14–20, each turned into fixtures and a fix (#444, #470)
 - [ ] Rules 1–4 in `act` mode for 48 h, each rule promoted through `docs/act-checklist.md`; every trigger recorded as a true or false positive, and every false positive filed as an issue with a fixture reproducing it
 
 ## Week 3
