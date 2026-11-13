@@ -26,6 +26,7 @@ from kelpie.core.model import (
 from kelpie.core.offers import Expect
 
 if TYPE_CHECKING:
+    from kelpie.core.facts import FactChange, FactKind
     from kelpie.core.transitions import StatusChange
 
 
@@ -354,6 +355,23 @@ class TransitionStore(Protocol):
 
     def transitions(self, start: datetime, end: datetime) -> Sequence[StatusChange]:
         """Rows in ``[start, end)``, plus each task's newest row before ``start``."""
+        ...
+
+
+class FactStore(Protocol):
+    """Where the control loop keeps the owner, block and condition changes it observes;
+    :class:`kelpie.core.facts.FactRecorder` writes it. Rules never read it."""
+
+    def last_facts(self) -> Mapping[tuple[FactKind, str], FactChange]:
+        """The newest stored change per fact (what a restart compares with)."""
+        ...
+
+    def record_facts(self, changes: Sequence[FactChange]) -> None:
+        """Store a tick's changes in one write; raise when they cannot be stored."""
+        ...
+
+    def facts(self, start: datetime, end: datetime) -> Sequence[FactChange]:
+        """Rows in ``[start, end)``, plus each fact's newest row before ``start``."""
         ...
 
 

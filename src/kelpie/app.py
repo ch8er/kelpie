@@ -100,6 +100,7 @@ from kelpie.core.delegation import RULE as DELEGATION
 from kelpie.core.delegation import Policy
 from kelpie.core.delegation import history as delegation_history
 from kelpie.core.engine import Engine
+from kelpie.core.facts import FactRecorder, MemoryFactStore
 from kelpie.core.host_sleep import SleepWatch
 from kelpie.core.ledger import LedgerStore, MemoryLedgerStore
 from kelpie.core.model import (
@@ -117,6 +118,7 @@ from kelpie.core.model import (
 from kelpie.core.ports import (
     ActionConnector,
     CostReportReader,
+    FactStore,
     PlatformAdapter,
     ProviderReader,
     ResourceHealth,
@@ -2164,7 +2166,9 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
     transitions: TransitionStore = (
         store if isinstance(store, SqliteLedgerStore) else MemoryTransitionStore()
     )
-    ledger_retention = build_ledger_retention(settings, store, states, clock, transitions)
+    # Observed owners, blocks and conditions: in the same database.
+    facts: FactStore = store if isinstance(store, SqliteLedgerStore) else MemoryFactStore()
+    ledger_retention = build_ledger_retention(settings, store, states, clock, transitions, facts)
     metrics.set_alert_channels(c.name for c in settings.alerts.channels)
     costs = cost_report_steps(settings, metrics, costs_source)
     enrich += costs
@@ -2179,6 +2183,7 @@ def build_app(settings: Settings, clock: Callable[[], datetime] = utc_now) -> Ap
         sleep_watch=sleep_watch(settings.engine, clock),
         sleep_log=store.record_sleeps if isinstance(store, SqliteLedgerStore) else None,
         transitions=TransitionRecorder(transitions),
+        facts=FactRecorder(facts),
     )
     farm = None
     if hub is not None:
@@ -2353,10 +2358,12 @@ def build_ledger_retention(
     states: StateStore,
     clock: Callable[[], datetime],
     transitions: TransitionStore | None = None,
+    facts: FactStore | None = None,
 ) -> LedgerRetention:
     """The action ledger's retention (#318): SQLite rows summed per day and pruned on a
     connection of their own; in memory, entries and closed states older than retention.
-    Observed status transitions (#157) follow the same retention and row cap."""
+    Observed status transitions (#157) and owner, block and condition changes follow the
+    same retention and row cap."""
     kept = settings.storage
     keep = ledger_keep(settings.engine)
     if isinstance(store, SqliteLedgerStore) and settings.db_path is not None:
@@ -2374,6 +2381,9 @@ def build_ledger_retention(
             moved = opened[0].prune_transitions(now, kept.retention, kept.max_rows, keep)
             if moved:
                 log.info("transition retention: %d row(s) deleted", moved)
+            facts_gone = opened[0].prune_facts(now, kept.retention, kept.max_rows, keep)
+            if facts_gone:
+                log.info("fact retention: %d row(s) deleted", facts_gone)
             return pruned
 
         closed = threading.Event()
@@ -2393,6 +2403,8 @@ def build_ledger_retention(
         )
         if isinstance(transitions, MemoryTransitionStore):
             transitions.prune(now - kept.retention, kept.max_rows)
+        if isinstance(facts, MemoryFactStore):
+            facts.prune(now - kept.retention, kept.max_rows)
         return gone, closed
 
     # in the control loop's thread: the in-memory stores are not thread-safe
