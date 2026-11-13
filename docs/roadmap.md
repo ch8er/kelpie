@@ -1189,7 +1189,8 @@ labels: P1, area:core
 labels: P1, area:rules
 Issue #297. Agents ask each other in task comments and carry on; nothing reminds the other
 agent. Rule `unanswered_asks` keeps an agent's `@question` to another agent open until it is
-answered. Questions to people stay rule 13's (blocks with approval reasons).
+answered. Questions to people stay rule 13's (blocks with approval reasons, and agents'
+comment questions to people since #461).
 
 **Acceptance criteria**
 - [x] An ask (task → another agent) from task comments: who asked, whom, since when, answered or not (`open_asks`)
@@ -1197,7 +1198,7 @@ answered. Questions to people stay rule 13's (blocks with approval reasons).
 - [x] Delivery not confirmed is `unknown`, never assumed failed or resent
 - [x] Fixtures: answered (no alert), unanswered with the recipient busy (no reminder), idle (one reminder), snoozed (silent until the date)
 - [x] The daily report counts agent-hours spent on unanswered asks, by recipient (the "Unanswered asks" section; #423)
-- [ ] Asks from block reasons (blocked tasks stay rule 4's today) and comment asks to people (rule 13 reads blocks only)
+- [x] Asks from block reasons and comment asks to people (#461, decisions 1a and 2a: a block that asks another agent is `unanswered_asks`', and rule 4 treats it as a wait on that agent; rule 13 lists agents' comment questions to a person with their cost of delay; boundary fixtures `field-09-ask-in-block*`, `13-agent-comment-asks-a-person` and `tests/rules/test_ask_boundaries.py`; #PRNUM)
 
 ### docs: reconcile the roadmap with what is merged
 labels: P1, documentation

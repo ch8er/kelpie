@@ -53,6 +53,16 @@ rule's too, so every block reaches a person through exactly one rule:
   ``condition_reasons``) or has an unmet linked condition other than a human task: it waits
   on that condition.
 
+**Blocks that ask another agent are rule ``unanswered_asks``'** (#461). A block whose reason
+asks another agent of the farm a question (``@architect-1 which schema version?``, no
+condition) is a wait on that agent: while that rule reaches agents, ``kelpie.app`` gives this
+rule its settings (``unanswered_asks``, else ``false``), and this rule sends no "nothing
+Kelpie can check" alert for such a block and leaves it out of block storms, while that rule
+reminds about it (:meth:`~kelpie.rules.unanswered_asks.UnansweredAsks.block_asks`, within
+its ``stop_after``). Once the agent answered and the block stays, or the question is past
+``stop_after``, this rule alerts as on any block, the latter saying the question went
+unanswered (``params.asks``: the agent asked).
+
 A condition the connector stopped checking alerts whoever lists the task (Kelpie's
 plumbing, not the person's question). The block is still cleared once its conditions hold.
 Without rule 13 reaching people (it is not loaded, or it runs in ``observe`` while this rule
@@ -94,7 +104,7 @@ rules share (``behind_lookup``), which is also ``params.stuck_ids`` where an ale
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import timedelta
 from types import MappingProxyType
@@ -104,8 +114,9 @@ from kelpie.core.actions import Action, ActionKind, Severity
 from kelpie.core.incidents import is_outage_state
 from kelpie.core.model import Condition, ConditionKind, KelpieMark, Snapshot, Status, Task
 from kelpie.core.serde import parse_duration
-from kelpie.rules import needs_you, register
+from kelpie.rules import needs_you, register, unanswered_asks
 from kelpie.rules._alerts import alert_params, check_connectors
+from kelpie.rules._asks import Ask
 from kelpie.rules._block_storm import resolved_text, storms
 from kelpie.rules._chains import behind_lookup, behind_text
 from kelpie.rules._params import human as _human
@@ -119,6 +130,7 @@ from kelpie.rules._tasks import (
     linked_conditions,
 )
 from kelpie.rules._toolchain import DEFAULT_WINDOW as TOOLCHAIN_WINDOW
+from kelpie.rules.unanswered_asks import UnansweredAsks
 
 NAME = "stale_blocks"
 
@@ -134,6 +146,10 @@ class StaleBlocks:
     # Rule 13 as it reaches people (kelpie.app sets it from needs_you's config while it
     # does), or None: the blocks it lists that ask a person are left to it.
     inbox: needs_you.NeedsYou | None = None
+    # Rule unanswered_asks as it reaches agents (kelpie.app sets it from that rule's config
+    # while it does), or None: a block that asks another agent is a wait on that agent,
+    # which that rule reminds (#461), not a block with nothing Kelpie can check.
+    asks: UnansweredAsks | None = None
     # Block storms (#229): this many tasks blocked on the same reason within storm_window
     # are one outage; 0 turns it off.
     storm_min_tasks: int = 5
@@ -148,9 +164,10 @@ class StaleBlocks:
         behind = behind_lookup(snapshot)
         listed = needs_you.inbox_task_ids(snapshot, self.inbox) if self.inbox is not None else None
         snoozed = checker(snapshot)  # one graph for every block's growth check
+        asked = self._asked(snapshot)
         for task in snapshot.tasks:
             if task.status is Status.BLOCKED and task.block is not None:
-                actions.extend(self._check(task, snapshot, behind, listed, snoozed))
+                actions.extend(self._check(task, snapshot, behind, listed, snoozed, asked))
         observe = self.storm_mode == "observe"
         actions.extend(
             storms(
@@ -161,9 +178,19 @@ class StaleBlocks:
                 observe,
                 snoozed,
                 self.toolchain_window,
+                skip=frozenset(t for t, ask in asked.items() if self._handed_off(ask, snapshot)),
             )
         )
         return actions
+
+    def _asked(self, snapshot: Snapshot) -> dict[str, Ask]:
+        """The blocks that ask another agent, unanswered, by task id, while rule
+        ``unanswered_asks`` reaches agents (:meth:`UnansweredAsks.block_asks`); else none."""
+        return self.asks.block_asks(snapshot) if self.asks is not None else {}
+
+    def _handed_off(self, ask: Ask, snapshot: Snapshot) -> bool:
+        """Whether rule ``unanswered_asks`` still reminds about the block's ask."""
+        return self.asks is not None and self.asks.within(ask, snapshot)
 
     def _check(
         self,
@@ -172,6 +199,7 @@ class StaleBlocks:
         behind: Callable[[str], list[str]],
         listed: frozenset[str] | None = None,
         snoozed: Callable[[str], SnoozeCheck | None] | None = None,
+        asked: Mapping[str, Ask] | None = None,
     ) -> Iterable[Action]:
         block = task.block
         assert block is not None
@@ -195,6 +223,9 @@ class StaleBlocks:
         if not conditions:
             if theirs:
                 return  # a question for a person: nothing to check, rule 13 lists it
+            ask = (asked or {}).get(task.id)
+            if ask is not None and self._handed_off(ask, snapshot):
+                return  # a wait on the agent it asks: rule unanswered_asks reminds that agent
             if held and not missing:
                 return  # snoozed: the person knows (a condition Kelpie cannot see is broken)
             if self.unlinked_alert_after is not None and age >= self.unlinked_alert_after:
@@ -209,10 +240,12 @@ class StaleBlocks:
                     "unlinked",
                     f"Task {task.id} has been blocked for {_human(age)} on "
                     f"'{block.reason}' and {what}, so nothing will clear it automatically."
+                    + _unanswered(ask, self.asks)
                     + behind_text(stuck)
                     + _back(snooze),
                     {
                         "stuck_ids": stuck,
+                        **({"asks": ask.recipient.id} if ask is not None else {}),
                         **_snooze_params(snooze),
                         # a snooze holds it unless the condition is one Kelpie cannot see
                         **({} if missing else {"snooze_task": task.id}),
@@ -372,9 +405,18 @@ class StaleBlocks:
             return None
         behind = behind_lookup(snapshot)
         listed = needs_you.inbox_task_ids(snapshot, self.inbox) if self.inbox is not None else None
-        reported = any(a.state == state_id for a in self._check(task, snapshot, behind, listed))
+        asked = self._asked(snapshot)
+        reported = any(
+            a.state == state_id for a in self._check(task, snapshot, behind, listed, None, asked)
+        )
         if reported:
             return None  # still reported: nothing held it
+        ask = asked.get(task.id)
+        if ask is not None and self._handed_off(ask, snapshot):
+            return (
+                f"Task {task.id}'s block asks {ask.recipient.id} a question: a wait on that "
+                f"agent, which rule unanswered_asks reminds while it is idle."
+            )
         snooze = checker(snapshot)(task.id)
         if snooze is not None and snooze.holds:
             others = {k: v for k, v in snapshot.snoozes.items() if k != task.id}
@@ -419,6 +461,16 @@ class StaleBlocks:
             # Long or unexplained, not broken: a CI outage that explains the block folds it.
             about_wait=about_wait or kind == "overdue",
         )
+
+
+def _unanswered(ask: Ask | None, asks: UnansweredAsks | None) -> str:
+    """For a block whose ask rule ``unanswered_asks`` stopped reminding about: so."""
+    if ask is None or asks is None:
+        return ""
+    return (
+        f" Its question to {ask.recipient.id} has had no answer in "
+        f"{_human(asks.stop_after)} of awake time, and is no longer reminded."
+    )
 
 
 def _back(snooze: SnoozeCheck | None) -> str:
@@ -492,6 +544,8 @@ def build(config: dict[str, Any]) -> StaleBlocks:
             kwargs[key] = None if value is False else _duration(value, key)
     if "needs_you" in config:
         kwargs["inbox"] = needs_you.hand_off(config.pop("needs_you"))
+    if "unanswered_asks" in config:
+        kwargs["asks"] = unanswered_asks.hand_off(config.pop("unanswered_asks"))
     if "storm_min_tasks" in config:
         value = config.pop("storm_min_tasks")
         if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 1000:

@@ -164,9 +164,9 @@ P0 is the MVP; P1 and P2 rules are backlog.
 | – | Output offenders (P1) | A command whose output floods a role's context on several days → `comment` to the owner of the role's instructions with the filter to add | field |
 | 12 | Conflict warning | Two live tasks editing the same files → comment on both; optionally hold the later one until the earlier is done (files from the task's worktree on Hermes) | 7 |
 | – | Dispatch gate | A ready task whose prerequisite is not met (a referenced PR red or not merged, a parent task not done) → parked in waiting on it; rule 2 wakes it | field |
-| 13 | "Needs you" inbox (P1) | Per person: human tasks with agent work behind them and agents waiting for their input or approval, sorted by cost of delay (agent-hours waited) → one escalation per person | 13 |
+| 13 | "Needs you" inbox (P1) | Per person: human tasks with agent work behind them, agents waiting for their input or approval, and agents' unanswered comment questions to them, sorted by cost of delay (agent-hours waited) → one escalation per person | 13 |
 | 14 | Compaction gate (P2) | Agent acts against the task's gate right after a context compaction | field |
-| – | Unanswered asks (P1) | An agent's `@question` to another agent in a task comment, unanswered while the recipient is idle → one reminder per escalation step (1h, 4h, 12h, 24h); snoozable; blocked and waiting tasks and questions to people stay with rules 4, 2 and 13 | field |
+| – | Unanswered asks (P1) | An agent's `@question` to another agent in a task comment, or in the reason it blocked its task on, unanswered while the recipient is idle → one reminder per escalation step (1h, 4h, 12h, 24h); snoozable; rule 4 leaves such a block to it; other blocks, waiting tasks and questions to people stay with rules 4, 2 and 13 | field |
 | – | Delegation (P1) | A problem another rule keeps open whose class the farm lists as `agent` (board hygiene), at warning severity → a card on the operator agent's queue; Kelpie verifies the fix itself; off by default (#347, in progress) | 1, 8, 11 |
 | – | Instruction bloat (P1) | A skill or role instruction file that crosses a size, grows fast or is large and read into every session, and copies of sections and values across a role's files → alert recommending a short core plus topic references; Kelpie never edits the files | 21 |
 

@@ -1,0 +1,93 @@
+id: "field-09-ask-in-block"
+incident: null
+title: "An agent blocks its task on a question to another agent; the other agent is reminded"
+description: >
+  A developer blocked its task with the reason "@architect-1 which schema version should the
+  migration target?" and ended its run. Rule 4 used to say "blocked with nothing Kelpie can
+  check", which reached a person, while the architect, who could answer, was never told
+  (#461). The block is now an obligation of the architect: Kelpie reminds it while it is
+  idle, and leaves blocks that ask a person, wait on a condition, or were answered alone.
+rule: unanswered_asks
+config:
+  steps: ["1h", "4h", "12h", "24h"]
+  stop_after: "3d"
+snapshot:
+  now: "2026-03-02T15:00:00+00:00"
+  owners:
+    - {id: agent-dev-1, role: developer}
+    - {id: agent-dev-2, role: developer}
+    - {id: architect-1, role: architect}
+    - {id: human-owner, role: owner, kind: human}
+  tasks:
+    # Blocked on a question to the architect for 3h, the architect is idle: one reminder.
+    - id: T-911
+      title: "Migrate the orders table"
+      status: blocked
+      status_since: "2026-03-02T12:00:00+00:00"
+      role: developer
+      owner_id: agent-dev-1
+      block: {reason: "@architect-1 which schema version should the migration target?", since: "2026-03-02T12:00:00+00:00"}
+    # The architect answered on the task since the block: no reminder (rule 4's again).
+    - id: T-912
+      title: "Add the audit log"
+      status: blocked
+      status_since: "2026-03-02T10:00:00+00:00"
+      role: developer
+      owner_id: agent-dev-2
+      block: {reason: "@architect-1 one table per service or a shared one?", since: "2026-03-02T10:00:00+00:00"}
+      comments:
+        - {author: architect-1, text: "One per service.", at: "2026-03-02T11:15:00+00:00"}
+    # A block that asks a person (rule 13's approval), even naming an agent: not this rule's.
+    - id: T-913
+      title: "Drop the v1 endpoint"
+      status: blocked
+      status_since: "2026-03-02T10:00:00+00:00"
+      role: developer
+      owner_id: agent-dev-2
+      block: {reason: "needs_input: can we drop v1? @architect-1 agreed already?", since: "2026-03-02T10:00:00+00:00"}
+    # A block that waits on a condition Kelpie checks: rule 4's, whatever it says.
+    - id: T-914
+      title: "Ship the cache"
+      status: blocked
+      status_since: "2026-03-02T10:00:00+00:00"
+      role: developer
+      owner_id: agent-dev-1
+      block: {reason: "@architect-1 merge PR #12 when green?", since: "2026-03-02T10:00:00+00:00", condition_id: "pr:12"}
+    # A comment ask on a blocked task stays rule 4's, as before.
+    - id: T-915
+      title: "Tidy the fixtures"
+      status: blocked
+      status_since: "2026-03-02T10:00:00+00:00"
+      role: developer
+      owner_id: agent-dev-2
+      block: {reason: "tests flaky on the runner", since: "2026-03-02T10:00:00+00:00"}
+      comments:
+        - {author: agent-dev-2, text: "@architect-1 should we quarantine the flaky suite?", at: "2026-03-02T10:05:00+00:00"}
+    - id: T-916
+      title: "Service boundaries note"
+      status: in_progress
+      status_since: "2026-03-02T09:00:00+00:00"
+      role: architect
+      owner_id: architect-1
+  conditions:
+    - {id: "pr:12", kind: pr_merged, satisfied: false, checked_at: "2026-03-02T14:55:00+00:00", params: {pr: 12}}
+  sessions:
+    # The architect's last run ended at 12:30: idle since.
+    - {id: S-916, task_id: T-916, owner_id: architect-1, started_at: "2026-03-02T11:30:00+00:00", ended_at: "2026-03-02T12:30:00+00:00"}
+expected_actions:
+  - kind: alert
+    task_id: T-911
+    severity: info
+    reason_contains: "blocked task T-911 on a question to architect-1"
+    params: {asker: agent-dev-1, recipient: architect-1, source: block, recipient_state: idle, step: 1, open_hours: 3.0}
+not_expected_actions:
+  - kind: alert
+    task_id: T-912
+  - kind: alert
+    task_id: T-913
+  - kind: alert
+    task_id: T-914
+  - kind: alert
+    task_id: T-915
+  - kind: alert
+    task_id: T-916

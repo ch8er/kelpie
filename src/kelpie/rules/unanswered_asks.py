@@ -6,9 +6,13 @@ version should the migration target?") and carry on, or end their run. Nothing r
 other agent; the question sits until a person notices. This rule keeps such asks open and
 reminds once the recipient is free to answer.
 
-**What is an ask.** A comment on an open task, written by an agent (not a person, not
-Kelpie: adapters leave Kelpie's own comments out), that mentions another agent of the farm
-as ``@<owner id>`` (case-insensitive) and contains a question mark. The recipient must be
+**What is an ask** (:mod:`kelpie.rules._asks`, shared with rule 13). A comment on an open
+task, written by an agent (not a person, not Kelpie: adapters leave Kelpie's own comments
+out), that mentions another agent of the farm as ``@<owner id>`` (case-insensitive) and
+contains a question mark. Or a block reason (#461): an agent blocked its task on a question
+to another agent ("@architect-1 which schema version?"), with no condition linked to the
+block; the task's owner is the asker, the first agent mentioned (by name) the recipient,
+and the ask opens when the block was set. The recipient must be
 an agent owner in the snapshot (:class:`~kelpie.core.model.OwnerKind.AGENT`) that serves
 the task's machine; a mention of anyone else is no ask. On a multi-host farm owner ids are
 ``<host>:<id>`` and comment authors are not: ``@dev-1`` names the ``dev-1`` of the task's
@@ -24,7 +28,8 @@ for a question that was answered somewhere Kelpie can see):
 - any later comment by the recipient on any task of the same machine that mentions the
   asker (``@<asker>``);
 - any later comment by a person on the same task (a person settled it, or took it over);
-- the task reaching a terminal status (done, failed, cancelled).
+- the task reaching a terminal status (done, failed, cancelled); for a block ask, the block
+  clearing.
 
 **When it reminds.** Only while the recipient is idle: no live session of the recipient
 (:func:`~kelpie.rules._tasks.is_live`, ``session_stale_after``). A recipient that is busy
@@ -56,17 +61,26 @@ already reminded before the snooze is not reminded again).
   default ``approval_reasons``, not a customised ``[engine.rules.needs_you]``) is left to
   rule 13's digest.
 - A *blocked* asking task is rule 4's (``stale_blocks``) or rule 13's: one of them already
-  announces the block (no condition, overdue, a dead end, or the person's digest). A
-  *waiting* one is rule 2's (``wait_condition``, overdue). This rule only reminds about asks
-  on tasks that are not blocked or waiting (backlog, ready, in progress, review, accepted),
-  so a wait is announced by one rule, never by two.
+  announces the block (no condition, overdue, a dead end, or the person's digest), so its
+  comment asks are not reminded here. A *waiting* one is rule 2's (``wait_condition``,
+  overdue). Comment asks are reminded only on tasks that are not blocked or waiting
+  (backlog, ready, in progress, review, accepted), so a wait is announced by one rule.
+- A *block that asks another agent* is this rule's (#461, decision 1a): a wait on that
+  agent, reminded here, and rule 4 sends no "nothing Kelpie can check" alert for it while
+  this rule reminds about it (``kelpie.app`` gives rule 4 this rule's settings while this
+  rule reaches agents: it is loaded and not in ``observe`` while rule 4 is not), nor counts
+  it in a block storm. Once the ask is answered and the block stays, or once it is past
+  ``stop_after``, rule 4 alerts as on any block (saying the question went unanswered).
+  A block rule 13 lists (it asks a person, by rule 13's own settings while rule 13 reaches
+  people, ``needs_you``; else by its defaults) is rule 13's, not an ask here.
 - Rule 6 (``bottlenecks``) counts idle agents; it never says that one of them owes an answer.
 
 **Actions.** One ``alert`` per ask and step, ``info`` for the first step and ``warning``
 from the second on, about the asking task, with ``params``: ``asker``, ``recipient``,
 ``asked_at`` (ISO 8601), ``question`` (the comment, capped), ``delivery`` (``seen`` or
 ``unknown``), ``recipient_state`` (``idle``), ``step`` (1-based), ``open_hours`` (hours of
-awake time since the ask) and ``snooze`` when an expired or grown snooze sent it again. The
+awake time since the ask), ``source`` (``comment`` or ``block``) and ``snooze`` when an
+expired or grown snooze sent it again. The
 rule only alerts; Kelpie never edits agents' instructions or writes to their sessions.
 
 **Rate limit.** The reminders are ``own_budget`` alerts: ``[engine]
@@ -78,18 +92,19 @@ another rule's action on the task (#390).
 
 from __future__ import annotations
 
-import re
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import timedelta
 from itertools import pairwise
 from typing import Any
 
 from kelpie.core.actions import Action, ActionKind, Severity
-from kelpie.core.model import Comment, Owner, OwnerKind, Snapshot, Status, Task
+from kelpie.core.model import OwnerKind, Snapshot, Status
 from kelpie.core.serde import parse_duration
-from kelpie.rules import register
+from kelpie.rules import _asks, needs_you, register
 from kelpie.rules._alerts import alert_params
+from kelpie.rules._asks import Ask
+from kelpie.rules._asks import local as _local
 from kelpie.rules._snoozes import SnoozeCheck, checker
 from kelpie.rules._tasks import DEFAULT_STALE_AFTER, asks_a_person, is_live, task_awake
 
@@ -107,45 +122,8 @@ DEFAULT_STOP_AFTER = timedelta(days=3)
 MAX_STOP_AFTER = timedelta(days=6)
 MAX_QUESTION = 300  # characters of the question quoted in the alert
 
-_MENTION = re.compile(r"(?<![\w@])@([A-Za-z0-9][\w.:-]*)")
 # Statuses whose wait other rules announce: rule 4 / rule 13 (blocked), rule 2 (waiting).
 _LEFT_TO_OTHERS = frozenset({Status.BLOCKED, Status.WAITING})
-
-
-def _local(name: str) -> str:
-    """A name without a host prefix (``host-a:dev-1`` -> ``dev-1``), case-folded."""
-    return name.rsplit(":", 1)[-1].casefold()
-
-
-def _mentions(text: str) -> set[str]:
-    """The names mentioned as ``@name`` or ``@host:name`` (case-folded, without a trailing
-    sentence dot or colon)."""
-    return {m.rstrip(".:-").casefold() for m in _MENTION.findall(text)}
-
-
-def _resolve(name: str, task: Task, agents: dict[str, list[Owner]]) -> Owner | None:
-    """The agent a mention on ``task`` names: among the agents with that id (without its
-    host prefix), the first by id that serves the task's machine; ``@host:name`` must name
-    that host too (on a multi-host farm, owner ids are ``<host>:<id>``)."""
-    host, _, local = name.rpartition(":")
-    for owner in agents.get(local, ()):
-        if host and owner.id.casefold() != name and (owner.host or "").casefold() != host:
-            continue
-        if owner.serves(task):
-            return owner
-    return None
-
-
-# (machine, author, a name the author mentioned) -> when that author last mentioned it
-Replies = dict[tuple[str | None, str, str], datetime]
-
-
-@dataclass(frozen=True, slots=True)
-class Ask:
-    task: Task
-    asker: str
-    recipient: Owner
-    comment: Comment  # the first ask of the pair since the last answer
 
 
 @dataclass(frozen=True, slots=True)
@@ -153,23 +131,20 @@ class UnansweredAsks:
     steps: tuple[timedelta, ...] = DEFAULT_STEPS
     stop_after: timedelta = DEFAULT_STOP_AFTER
     session_stale_after: timedelta = DEFAULT_STALE_AFTER
+    # Rule 13 as it reaches people (kelpie.app sets it from needs_you's config while it
+    # does), or None: the blocks it lists are left to it, as rule 4 leaves them.
+    inbox: needs_you.NeedsYou | None = None
     name: str = NAME
 
     def evaluate(self, snapshot: Snapshot) -> Sequence[Action]:
         actions: list[Action] = []
         snoozed = checker(snapshot)
         live = self._live_owners(snapshot)  # once per tick: asks x sessions was quadratic
-        for ask in open_asks(snapshot):
+        for ask in self._announced(snapshot):
             task = ask.task
-            if task.status in _LEFT_TO_OTHERS:
-                continue
-            if task.block is not None and asks_a_person(task, snapshot):
-                continue  # waits on a person: rule 13's digest
             age = task_awake(task, ask.comment.at, snapshot)
-            if age < self.steps[0] or age >= self.stop_after:
+            if age < self.steps[0] or not self.within(ask, snapshot):
                 continue
-            if snapshot.now - ask.comment.at >= MAX_STOP_AFTER:
-                continue  # a host that slept a lot: the ledger's once-window is wall-clock
             if ask.recipient.id in live:
                 continue  # busy mid-run: not interrupted
             snooze = snoozed(task.id)
@@ -178,6 +153,54 @@ class UnansweredAsks:
             step = sum(1 for s in self.steps if age >= s)
             actions.append(self._remind(ask, step, age, snapshot, snooze))
         return actions
+
+    def _announced(self, snapshot: Snapshot) -> list[Ask]:
+        """The asks this rule reminds about: comment asks on tasks that are not blocked or
+        waiting (and whose block, if any, does not ask a person), then block asks."""
+        settings = self.inbox or needs_you.NeedsYou()
+        found = [
+            ask
+            for ask in open_asks(snapshot)
+            if ask.task.status not in _LEFT_TO_OTHERS
+            and not (
+                ask.task.block is not None
+                and asks_a_person(
+                    ask.task, snapshot, settings.approval_reasons, settings.condition_reasons
+                )
+            )
+        ]
+        return found + list(self.block_asks(snapshot).values())
+
+    def block_asks(self, snapshot: Snapshot) -> dict[str, Ask]:
+        """The unanswered asks in block reasons this rule announces, by task id
+        (:func:`kelpie.rules._asks.block_ask`): every one, except a block rule 13 lists
+        while it reaches people (:func:`~kelpie.rules.needs_you.inbox_task_ids`), else a
+        block that asks a person by rule 13's default test. Rule 4 sends no "nothing Kelpie
+        can check" alert for these while :meth:`within` holds (#461)."""
+        agents = _asks.owners_by_name(snapshot, OwnerKind.AGENT)
+        if not agents:
+            return {}
+        answered = _asks.replies(snapshot)
+        listed = needs_you.inbox_task_ids(snapshot, self.inbox) if self.inbox is not None else None
+        found: dict[str, Ask] = {}
+        for task in snapshot.tasks:
+            ask = _asks.block_ask(task, snapshot, agents, answered)
+            if ask is None:
+                continue
+            if listed is not None and task.id in listed:
+                continue  # rule 13's: a person is asked, or it is parked on a person's task
+            if listed is None and asks_a_person(task, snapshot):
+                continue  # a person is asked: rule 13's test, its defaults
+            found[task.id] = ask
+        return found
+
+    def within(self, ask: Ask, snapshot: Snapshot) -> bool:
+        """Whether the ask is still this rule's to remind about: less than ``stop_after`` of
+        the task host's awake time and six days of wall-clock time old."""
+        if task_awake(ask.task, ask.comment.at, snapshot) >= self.stop_after:
+            return False
+        # a host that slept a lot: the ledger's once-window is wall-clock
+        return snapshot.now - ask.comment.at < MAX_STOP_AFTER
 
     def _live_owners(self, snapshot: Snapshot) -> set[str]:
         return {
@@ -203,8 +226,13 @@ class UnansweredAsks:
             else f"Kelpie cannot tell whether {who} has seen it (delivery unknown)"
         )
         again = f" Reminding again: {snooze.text()}." if snooze is not None else ""
+        where = (
+            f"blocked task {task.id} on a question to {who}"
+            if ask.in_block
+            else f"asked {who} a question on task {task.id}"
+        )
         reason = (
-            f"{asker} asked {who} a question on task {task.id} at {asked_at.isoformat()} "
+            f"{asker} {where} at {asked_at.isoformat()} "
             f"({hours:g}h of awake time ago) and has no answer yet; {seen}. {who} is idle now "
             f"(no live session), so this is a good moment to answer. Question: "
             f'"{question}".{again}'
@@ -216,6 +244,7 @@ class UnansweredAsks:
             "question": question,
             "delivery": delivery,
             "recipient_state": "idle",
+            "source": "block" if ask.in_block else "comment",
             "step": step,
             "open_hours": hours,
             **alert_params(
@@ -230,7 +259,8 @@ class UnansweredAsks:
             NAME,
             reason,
             task_id=task.id,
-            key=f"{NAME}:{task.id}:{_local(asker)}:{who}:{asked_at.isoformat()}:{step}",
+            key=f"{NAME}:{task.id}:{_local(asker)}:{who}:{asked_at.isoformat()}:{step}"
+            + (":block" if ask.in_block else ""),
             severity=Severity.INFO if step == 1 else Severity.WARNING,
             since=min(asked_at, snapshot.now),
             once=True,
@@ -243,67 +273,10 @@ class UnansweredAsks:
 
 
 def open_asks(snapshot: Snapshot) -> list[Ask]:
-    """Every unanswered ask on the board's open tasks, in task order, then by when it was
-    asked. Pure; status filters and thresholds are the rule's."""
-    agents: dict[str, list[Owner]] = {}
-    for o in sorted(snapshot.owners, key=lambda o: o.id):
-        if o.kind is OwnerKind.AGENT:
-            agents.setdefault(_local(o.id), []).append(o)
-    if not agents:
-        return []
-    # When each agent last mentioned each name, per machine: an answer to the asker anywhere
-    # on the same machine (agents of two hosts may share a name).
-    replies: Replies = {}
-    for t in snapshot.tasks:
-        for c in t.comments:
-            if not c.human:
-                author = _local(c.author)
-                for name in {_local(m) for m in _mentions(c.text)}:
-                    key = (t.host, author, name)
-                    if key not in replies or c.at > replies[key]:
-                        replies[key] = c.at
-    found: list[Ask] = []
-    for task in snapshot.tasks:
-        if task.status.is_terminal or not task.comments:
-            continue
-        found.extend(_task_asks(task, agents, replies))
-    return found
-
-
-def _task_asks(
-    task: Task,
-    agents: dict[str, list[Owner]],
-    replies: Replies,
-) -> list[Ask]:
-    comments = sorted(task.comments, key=lambda c: c.at)
-    pending: dict[tuple[str, str], Ask] = {}
-    for c in comments:
-        author = _local(c.author)
-        if c.human:
-            pending.clear()  # a person spoke on the task: what was asked is theirs now
-            continue
-        for pair in [p for p in pending if _local(p[1]) == author]:
-            del pending[pair]  # the recipient spoke on the task after the ask
-        if "?" not in c.text:
-            continue
-        for name in sorted(_mentions(c.text)):
-            owner = _resolve(name, task, agents)
-            if owner is None or _local(owner.id) == author:
-                continue
-            pending.setdefault((author, owner.id), Ask(task, c.author.strip(), owner, c))
-    return [
-        ask
-        for pair, ask in sorted(pending.items(), key=lambda x: (x[1].comment.at, x[0]))
-        if not _answered_elsewhere(task.host, pair, ask.comment.at, replies)
-    ]
-
-
-def _answered_elsewhere(
-    host: str | None, pair: tuple[str, str], asked_at: datetime, replies: Replies
-) -> bool:
-    asker, recipient = pair
-    latest = replies.get((host, _local(recipient), asker))
-    return latest is not None and latest > asked_at
+    """Every unanswered comment ask to an agent on the board's open tasks, in task order,
+    then by when it was asked (:func:`kelpie.rules._asks.open_asks`). Pure; status filters
+    and thresholds are the rule's."""
+    return _asks.open_asks(snapshot, OwnerKind.AGENT)
 
 
 def _delivery(ask: Ask, snapshot: Snapshot) -> str:
@@ -350,6 +323,21 @@ def build(config: dict[str, Any]) -> UnansweredAsks:
         kwargs["session_stale_after"] = _duration(
             config.pop("session_stale_after"), "session_stale_after"
         )
+    if "needs_you" in config:
+        kwargs["inbox"] = needs_you.hand_off(config.pop("needs_you"))
     if config:
         raise ValueError(f"unknown parameters: {sorted(config)}")
     return UnansweredAsks(**kwargs)
+
+
+def hand_off(value: Any) -> UnansweredAsks | None:
+    """The ``unanswered_asks`` setting of rule 4: false (this rule does not reach agents:
+    rule 4 keeps its alerts on blocks that ask an agent), true (this rule's defaults) or
+    this rule's config section, which :func:`build` validates."""
+    if value is False:
+        return None
+    if value is True:
+        return build({})
+    if isinstance(value, Mapping):
+        return build(dict(value))
+    raise ValueError("unanswered_asks must be false, true or the rule's settings")

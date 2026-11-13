@@ -8,6 +8,21 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ## [Unreleased]
 
+### Added
+
+- **Asks in block reasons and questions to people** (#461), observe by default like every
+  rule. An agent that blocks its task on a question to another agent ("@architect-1 which
+  schema version?", no condition) now opens an `unanswered_asks` obligation: the agent asked
+  is reminded while it is idle (`source: block`), and rule 4 (`stale_blocks`) no longer
+  alerts "nothing Kelpie can check" on that block, nor counts it in a block storm, while
+  the reminders run; once the question is answered and the block stays, or it is past
+  `stop_after`, rule 4 alerts as before (saying the question went unanswered, `asks`).
+  Rule 13 (`needs_you`) now also lists an agent's unanswered comment question to a person
+  (`@<human owner>` with a question mark, on a task that is not blocked or waiting) as that
+  person's item (`kind: question`, `asker`, `questions`), with its cost of delay. Each wait
+  has one announcer: `kelpie.app` gives rule 4 the asks rule's settings, and the asks rule
+  rule 13's, from the rules' modes, as rule 4 already gets rule 13's.
+
 ### Changed
 
 - **The database schema is now 13**: `kelpie serve` migrates a schema 12 database at start

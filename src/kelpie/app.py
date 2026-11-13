@@ -1043,7 +1043,9 @@ def _rule_config(
     ``registry`` holds the rules being loaded (default: every registered one)."""
     section = dict(config.rules.get(name, {}))
     if name in _LEAVES_TO_INBOX:
-        return _with_inbox(name, section, config, REGISTRY if registry is None else registry)
+        found = REGISTRY if registry is None else registry
+        section = _with_inbox(name, section, config, found)
+        return _with_asks(section, config, found) if name == "stale_blocks" else section
     if name == "needs_you":
         return _needs_you_section(section, config)
     if name == "return_causes" and "expected_shared" not in section:
@@ -1097,8 +1099,38 @@ def _needs_you_section(section: dict[str, Any], config: EngineConfig) -> dict[st
 
 
 # Rules that leave the tasks rule 13 lists to it, with its settings (``needs_you``): rule 4
-# for blocks (#169), rule 2 for waits (#213).
-_LEAVES_TO_INBOX = frozenset({"stale_blocks", "wait_condition"})
+# for blocks (#169), rule 2 for waits (#213), unanswered_asks for blocks that ask (#461).
+_LEAVES_TO_INBOX = frozenset({"stale_blocks", "wait_condition", "unanswered_asks"})
+
+
+def _with_asks(
+    section: dict[str, Any], config: EngineConfig, registry: Mapping[str, RuleFactory]
+) -> dict[str, Any]:
+    """Rule 4 leaves a block that asks another agent to rule ``unanswered_asks`` (#461), as
+    a wait on that agent, while that rule reaches agents: it is loaded, and it is not in
+    ``observe`` while rule 4 is not. Rule 4 then gets that rule's whole config section
+    (with its ``needs_you`` hand-off, so both read the same blocks as rule 13's) as
+    ``unanswered_asks``; else ``unanswered_asks = false`` and rule 4 alerts on such a block
+    as on any block with nothing Kelpie can check."""
+    if "unanswered_asks" in section:
+        raise ValueError(
+            "unanswered_asks is set automatically from the rules' modes (whether that rule "
+            "reaches agents), not in [engine.rules.stale_blocks]"
+        )
+    active = "unanswered_asks" in registry and (
+        config.mode_for("unanswered_asks") is not Mode.OBSERVE
+        or config.mode_for("stale_blocks") is Mode.OBSERVE
+    )
+    if not active:
+        section["unanswered_asks"] = False
+        return section
+    asks = _rule_config("unanswered_asks", config, registry)
+    try:
+        registry["unanswered_asks"](dict(asks))
+    except Exception as exc:
+        raise ConfigError(f"bad config for rule 'unanswered_asks': {exc}") from exc
+    section["unanswered_asks"] = asks
+    return section
 
 
 def _with_inbox(

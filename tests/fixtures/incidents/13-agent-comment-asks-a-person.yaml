@@ -1,0 +1,80 @@
+id: "13-agent-comment-asks-a-person"
+incident: 13
+title: "An agent's comment question to a person joins that person's needs-you digest"
+description: >
+  A developer asked the owner in a task comment whether the v1 endpoint could be dropped,
+  and carried on. Rule 13 read only blocks, so the question reached nobody (#461). It is now
+  an item of the person asked, with its cost of delay, answered by a later comment from a
+  person on the task or from the person naming the asker elsewhere. Questions to other
+  agents stay rule unanswered_asks', and a blocked task's question stays its block's.
+rule: needs_you
+config: {}
+snapshot:
+  now: "2026-03-02T15:00:00+00:00"
+  owners:
+    - {id: agent-dev-1, role: developer}
+    - {id: agent-dev-2, role: developer}
+    - {id: architect-1, role: architect}
+    - {id: human-owner, role: owner, kind: human}
+    - {id: human-lead, role: lead, kind: human}
+  tasks:
+    # Asked the owner 3h ago, unanswered: an item of human-owner.
+    - id: T-931
+      title: "Remove the v1 API"
+      status: in_progress
+      status_since: "2026-03-02T11:00:00+00:00"
+      role: developer
+      owner_id: agent-dev-1
+      comments:
+        - {author: agent-dev-1, text: "@human-owner can we drop the v1 endpoint this release?", at: "2026-03-02T12:00:00+00:00"}
+    # The lead answered on the task: nothing for the lead.
+    - id: T-932
+      title: "Rename the billing tables"
+      status: review
+      status_since: "2026-03-02T10:00:00+00:00"
+      role: developer
+      owner_id: agent-dev-2
+      comments:
+        - {author: agent-dev-2, text: "@human-lead ok to rename during business hours?", at: "2026-03-02T10:30:00+00:00"}
+        - {author: human-lead, text: "Yes.", at: "2026-03-02T11:00:00+00:00", human: true}
+    # A question to an agent is unanswered_asks', never a person's item.
+    - id: T-933
+      title: "Cache the price lookups"
+      status: in_progress
+      status_since: "2026-03-02T10:00:00+00:00"
+      role: developer
+      owner_id: agent-dev-2
+      comments:
+        - {author: agent-dev-2, text: "@architect-1 is a 5 minute TTL acceptable?", at: "2026-03-02T10:30:00+00:00"}
+    # A blocked task's comment question to the lead: the block is announced as such (rule 4).
+    - id: T-934
+      title: "Flaky suite"
+      status: blocked
+      status_since: "2026-03-02T10:00:00+00:00"
+      role: developer
+      owner_id: agent-dev-1
+      block: {reason: "runner image broken", since: "2026-03-02T10:00:00+00:00"}
+      comments:
+        - {author: agent-dev-1, text: "@human-lead can you rebuild the runner image?", at: "2026-03-02T10:05:00+00:00"}
+    # Asked 10 minutes ago: not yet past approval_wait_after (30m).
+    - id: T-935
+      title: "Tidy the fixtures"
+      status: in_progress
+      status_since: "2026-03-02T14:00:00+00:00"
+      role: developer
+      owner_id: agent-dev-2
+      comments:
+        - {author: agent-dev-2, text: "@human-lead keep the old fixtures?", at: "2026-03-02T14:50:00+00:00"}
+expected_actions:
+  - kind: escalate
+    reason_contains: "agent-dev-1 asked you"
+    params:
+      escalate_to: human-owner
+      questions: [T-931]
+      approvals: []
+      waiting: [T-931]
+not_expected_actions:
+  - kind: escalate
+    params: {escalate_to: human-lead}
+  - kind: escalate
+    params: {escalate_to: architect-1}
