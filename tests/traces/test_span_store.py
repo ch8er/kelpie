@@ -6,7 +6,7 @@ import sqlite3
 import threading
 from collections.abc import Iterator
 from dataclasses import replace
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -548,4 +548,49 @@ def test_an_unknown_span_kind_in_a_row_still_fails_loudly(tmp_path: Path) -> Non
     db.close()
     with pytest.raises(ValueError):
         store.spans_since(NOW - timedelta(days=1))
+    store.close()
+
+
+def test_span_row_positions_follow_the_column_names(tmp_path: Path) -> None:
+    """Decoding by position (#248) reads each field from its own column: a span whose
+    fields all differ comes back equal."""
+    store = SqliteSpanStore(tmp_path / "kelpie.db")
+    every = Span(
+        trace_id="a" * 32,
+        span_id="b" * 16,
+        name="n",
+        kind=SpanKind.TOOL,
+        start=NOW,
+        end=NOW + timedelta(seconds=3),
+        parent_id="c" * 16,
+        task_id="T-9",
+        session_id="s-9",
+        model="m-9",
+        tool="tool-9",
+        args_hash="h-9",
+        input_tokens=11,
+        output_tokens=22,
+        cached_tokens=5,
+        outcome="error",
+        attributes={"k": "v"},
+        cache_write_tokens=3,
+    )
+    store.append_spans([every], NOW)
+    assert list(store.spans_since(NOW - timedelta(days=1))) == [every]
+    for name, at in storage._SPAN_AT.items():
+        assert storage._SPAN_COLUMNS.split(",")[at].strip() == name
+    store.close()
+
+
+def test_spans_between_bounds_and_time_zones(tmp_path: Path) -> None:
+    store = SqliteSpanStore(tmp_path / "kelpie.db")
+    h = timedelta(hours=1)
+    start, end = NOW - 2 * h, NOW
+    store.append_spans([span(1, start), span(2, end), span(3, NOW - h)], NOW)
+    found = [s.span_id for s in store.spans_between(start, end)]
+    assert found == [f"{1:016x}", f"{3:016x}"]  # at start in, at end out
+    east = timezone(timedelta(hours=5))
+    assert store.spans_between(start.astimezone(east), end.astimezone(east)) == list(
+        store.spans_between(start, end)
+    )
     store.close()

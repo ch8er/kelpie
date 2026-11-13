@@ -39,7 +39,7 @@ def main() -> None:
     parser.add_argument("--top", type=int, default=25)
     parser.add_argument("--no-profile", action="store_true", help="times only")
     args = parser.parse_args()
-    path = args.db or Path(tempfile.mkdtemp()) / "kelpie.db"
+    path = args.db or Path(tempfile.mkdtemp()) / "kelpie.db"  # kept: reuse it with --db
     if not path.exists():
         started = time.perf_counter()
         build(path, NOW, spans=args.spans, ledger_days=args.ledger_days)

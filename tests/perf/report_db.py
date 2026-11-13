@@ -19,6 +19,9 @@ from pathlib import Path
 
 from kelpie.core.ledger import to_json
 from kelpie.core.model import Span
+
+# The generator writes rows the way storage's writers do (their private helpers, on
+# purpose): a million spans through the stores' own batching would take an hour.
 from kelpie.core.storage import (
     _COLUMNS,
     _SPAN_COLUMNS,
@@ -122,7 +125,7 @@ def _ledger(
     per_day: int,
     tasks: int,
 ) -> int:
-    sql = f"INSERT INTO actions ({_COLUMNS}) VALUES ({', '.join('?' * 14)})"
+    sql = f"INSERT INTO actions ({_COLUMNS}) VALUES ({', '.join('?' * len(_COLUMNS.split(',')))})"
     start = end - timedelta(days=days)
     step = timedelta(days=1) / per_day
     rows: list[tuple[object, ...]] = []

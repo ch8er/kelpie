@@ -974,13 +974,18 @@ def _span_row(span: Span, received: str, version: int) -> tuple[object, ...]:
 
 
 _SPAN_KINDS = {k.value: k for k in SpanKind}
-# Positions in a row selected as _SPAN_COLUMNS: reading a row by index is faster than by
-# name, and the report and the output offenders decode hundreds of thousands (#248).
-(
-    _TRACE, _SPAN_ID, _PARENT, _NAME, _KIND, _START, _END, _LAST, _TASK, _SESSION, _MODEL,
-    _TOOL, _ARGS, _IN, _OUT, _CACHED, _OUTCOME, _ATTRS, _RECEIVED, _VERSION, _COUNTED,
-    _CACHE_WRITE,
-) = range(len(_SPAN_COLUMNS.split(",")))  # fmt: skip
+# Positions in a row selected as _SPAN_COLUMNS, by column name: reading a row by index is
+# faster than by name, and the report and the output offenders decode hundreds of
+# thousands (#248).
+_SPAN_AT = {c.strip(): i for i, c in enumerate(_SPAN_COLUMNS.split(","))}
+_TRACE, _SPAN_ID, _PARENT, _NAME = (
+    _SPAN_AT[c] for c in ("trace_id", "span_id", "parent_id", "name")
+)
+_KIND, _START, _END = (_SPAN_AT[c] for c in ("kind", "start", "end_at"))
+_TASK, _SESSION, _MODEL, _TOOL = (_SPAN_AT[c] for c in ("task_id", "session_id", "model", "tool"))
+_ARGS, _IN, _OUT = (_SPAN_AT[c] for c in ("args_hash", "input_tokens", "output_tokens"))
+_CACHED, _OUTCOME, _ATTRS = (_SPAN_AT[c] for c in ("cached_tokens", "outcome", "attributes"))
+_CACHE_WRITE = _SPAN_AT["cache_write_tokens"]
 
 
 def _span(r: sqlite3.Row) -> Span:
@@ -1156,7 +1161,8 @@ class SqliteSpanStore:
 
     def spans_between(self, start: datetime, end: datetime) -> Sequence[Span]:
         """Spans whose last time falls in ``[start, end)``, in start order: a report of an
-        earlier day reads its range, not everything since."""
+        earlier day reads its range, not everything since. A SQLite read of the report
+        (:class:`kelpie.report.store.ReportStore`), not part of :class:`SpanStore`."""
         sql = (
             f"SELECT {_SPAN_COLUMNS} FROM spans WHERE last_at >= ? AND last_at < ?"
             " ORDER BY start, rowid_"
