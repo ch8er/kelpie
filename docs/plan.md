@@ -220,7 +220,7 @@ Three weeks, three steps: the core with traces and the first adapter, the full r
 - [x] Budgets and spend: budget config, thresholds, burn-rate forecast, spend from traces, Claude Code metrics and provider cost APIs (farm-wide dollar budgets count settled days at the bill, #205)
 - [x] Resource reading via Prometheus and node_exporter for any machine: laptop, cloud VM, container — works; an unreachable Prometheus is alerted once per cause
 - [x] Condition connectors: GitHub and CI, LLM provider quotas, human tasks — all three work; `quota_reset` is evaluated from the provider probes (#424); limit hits are counted from spans per provider too
-- [ ] Run on our own farm and record every rule trigger — observe runs on the farm produced incidents 14–20 and their fixes; the recorded 24 h observe and 48 h act runs of the roadmap item were not done
+- [ ] Run on our own farm and record every rule trigger — the observe runs on the farm produced incidents 14–20 and their fixes, and are credited (#444); the 48 h act run of rules 1–4, gated by `docs/act-checklist.md`, is left
 
 **Week 3, Oct 29 – Nov 4**
 
@@ -243,10 +243,10 @@ Week plans hold P0 work plus the P1 items listed in week 3 above. Every other P1
 - the rest of the model gaps: sessions tied to a host, owner availability, the fixtures migrated to the new fields
 - status history in storage for owners, blocks and conditions (task statuses are recorded, #157)
 - instruction files measured on `kelpie agent` hosts
-- the live-run records: 24 h in `observe` and 48 h in `act` on a real farm (#444)
+- the live-run record: 48 h of rules 1–4 in `act` on a real farm, through `docs/act-checklist.md`
 - the rest of #248, the code-health leftovers on the engine's dispatch and stop path (#445)
 - delegation cards on Claude Code
 - asks in block reasons and agents' comment questions to people (#461)
 - owner-only items: 10 conversations with farm owners, the USPTO search, live issue-agent and Linear checks (#446)
 
-**In progress:** none of the items above has a PR open; #444, #445, #446 and #461 wait on the owner's decision.
+**In progress:** #445, #446 and #461 were decided on the owner's behalf (2026-11-12) and are being built for 0.1.0a5; the other items above have no PR open.
