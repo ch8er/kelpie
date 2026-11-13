@@ -8,8 +8,393 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ## [Unreleased]
 
+## [0.1.0a4] - 2026-11-13
+
+Fourth alpha: the per-agent condition tokens, the Host check on loopback listeners,
+delegation to an operator agent, answering an agent from Telegram, the read-only farm
+view, task status history, Hermes WIP commits and the hook spool read incrementally. Like
+the earlier alphas it starts in global dry-run (`dry_run = true`) with every rule in
+`observe` mode, and every new feature that can change a board is off by default.
+
+### Before you install
+
+These are the release notes for the tag, ahead of what changed.
+
+**Upgrading from 0.1.0a3**
+
+- **Back up `kelpie.db` first if you may go back.** `kelpie serve` migrates it to schema 12
+  on its first start, and 0.1.0a3 and earlier refuse a database once it is migrated. Until
+  then `kelpie report` and `kelpie status` of this version ask you to run `kelpie serve`
+  once. `[storage] retention` and `max_rows` now also prune the task status changes
+  `kelpie serve` records.
+- **Upgrade `kelpie-sre` on every host, then restart `kelpie serve` and every `kelpie
+  agent`.** The adapters (spool reading, stops, the new actions) run where `kelpie agent`
+  runs, so a new hub with old agents keeps the old evidence path. Upgrade the hub first: a
+  0.1.0a3 hub refuses a snapshot from a 0.1.0a4 agent that carries a block category.
+- **The plugin and hook files did not change since 0.1.0a3**: the Hermes plugin
+  (`kelpie/adapters/hermes/plugin.py`), the Claude Code hook
+  (`kelpie/adapters/claude_code/hook.py`) and the OpenClaw plugin
+  (`kelpie/adapters/openclaw/plugin/`) are byte-identical to 0.1.0a3's. Copies installed
+  from 0.1.0a3 can stay; copying them again from the installed package does no harm.
+  Hosts still on 0.1.0a2's or older copies must update them (see 0.1.0a3's and 0.1.0a2's
+  notes below), above all on macOS.
+- **Every listener bound to loopback now checks the `Host` header** (the main port's
+  `/metrics`, `/healthz`, `/v1/traces` and `/v1/metrics`, a loopback hub, `[view]` and the
+  `kelpie agent` OTLP relay). A request addressed to anything but `localhost`, a loopback
+  IP, the bind address or a name in the new `[server] hosts` gets 421. A Prometheus or
+  exporter that scrapes Kelpie by an `/etc/hosts` alias, or a reverse proxy or tunnel on
+  the same host that passes the client's `Host` on (Caddy's default, nginx with
+  `proxy_set_header Host $host`), must use `127.0.0.1`/`localhost` or have that name
+  added to `[server] hosts`. A tokenless ingest and the agent relay also refuse an export
+  carrying an `Origin` header (403). Listeners off loopback are unchanged.
+- **`[conditions] token_env`, the shared token of `POST /conditions`, is deprecated** in
+  favour of per-agent tokens (each agent's own `[[traces.tokens]]` entry, scoped to its
+  own tasks). It keeps working for any task as before, and `kelpie doctor` warns
+  ("conditions tokens per agent") while it is set. See
+  [docs/security.md](docs/security.md#per-agent-conditions-tokens).
+- **Off by default, and nothing listens off loopback by default**: delegation to an
+  operator agent (`[engine.rules.delegation]`), answering an agent from Telegram
+  (`answer_buttons` and `chat_answers`), `POST /conditions` (`[conditions] enabled`), the
+  read-only farm view (`[view]`), Hermes WIP commits (`checkpoints` in `act`), lifting
+  holds (`allow_lift_holds`) and rule 9's fail-fast cancels (`fail_fast_mode`). New rules
+  (`delegation`, `unanswered_asks`) start in `observe`.
+- **If `loop_breaker` (rule 10) runs in `act`**, this release changes its evidence path:
+  the hook spool is read incrementally with new caps, a run's liveness ignores Hermes spool
+  lines dated ahead, and hook spans pair with OTLP spans only within an ingest token's
+  scope. Its logic and thresholds are unchanged, but we recommend treating the upgrade as a
+  change to the rule under
+  [docs/act-checklist.md](docs/act-checklist.md#rare-safety-rules-rule-10-on-hermes): put it
+  back in `observe` before upgrading. On Hermes run `kelpie selftest stop --adapter
+  hermes` after upgrading (every step `PASS`) and wait 72 h in `observe` with no false
+  positive before `act` again; on Claude Code and OpenClaw (no self-test yet) the
+  checklist's general gate applies again.
+- **Other changes on upgrade:**
+  - `kelpie serve` refuses to start when two of its listeners (main port, `[hub]`,
+    `[view]`) share a port.
+  - Rule 1's `allowed_block_reasons` match a block's category when the adapter sets one
+    (Hermes typed blocks: `waiting_human`, `guard`), not its reason text; untyped blocks
+    are read by their reason as before.
+  - Rule 7 now warns when host resources cannot be read ("host checks are blind") and
+    keeps its open alerts open meanwhile, instead of resolving them.
+  - An alert raised again after its cooldown says how many repeats it merged ("raised 5
+    more times in 30 min"), so a channel no longer treats it as a duplicate.
+  - Rule 6 can now act (`lift_hold`), so `kelpie status` and the report say it cannot act
+    unless a connector or adapter may lift holds.
+  - `kelpie doctor`'s "PR blocks have conditions" warns about fewer blocks (only those that
+    wait on the PR they name); `[doctor] pr_block_acks` acknowledges a reviewed one.
+  - Linear: a task whose time Kelpie counts from when it first saw it now counts again
+    from its last workflow state change.
+  - New startup refusals only for new opt-in settings: a weak per-agent conditions token
+    or one equal to the shared token, `[conditions]` with `[hub]` or `[agent]`,
+    `chat_answers` with `[hub]`, a
+    `delegate_to` naming an agent the hub does not know or a bare adapter name, `[view]`
+    off loopback without a strong token.
+
+**Known residual risks.**
+
+- **Rule 10 in `act` still trusts the shared traces token and Claude Code or OpenClaw spool
+  lines** (audit M1, narrowed; unchanged from 0.1.0a3). Spans under the shared token or a
+  tokenless ingest still report for every session, and Claude Code and OpenClaw spool
+  lines name their session themselves. Where agents that do not trust each other share a
+  farm, give each its own `[[traces.tokens]]` entry and set `spool_stops = false` in
+  `[adapters.claude_code]` / `[adapters.openclaw]`, or keep rule 10 in `observe` or
+  `suggest`. Agents on one host share that host's tokenless OTLP relay.
+- **The shared `[conditions] token_env` token** still registers for any task: its holder
+  can hold back another agent's waiting task until the registration's `max_age` (7 days by
+  default) or the task finishes. Per-agent tokens close it; a `roles` or `boards` token
+  entry covers every agent it matches.
+- **M7, what is left:** one acting instance per board is enforced on one machine, not
+  across machines or users for a GitHub repository or Linear team. Run one acting Kelpie
+  per tracker.
+- Audit #275's L4, L13 and L14 (#336) are fixed in this release (below). Details of what is
+  left: [docs/security.md](docs/security.md#known-residual-risks).
+
+**Think before exposing `kelpie serve` off loopback**, as before: `/metrics` and `/healthz`
+are unauthenticated; firewall the port or put an authenticating proxy in front
+([docs/security.md](docs/security.md#listeners)).
+
+**Known limits.** Not verified live before this release: delegation (Hermes `kanban
+create`, GitHub Issues cards, over `[hub]`), answering from Telegram, Hermes WIP commits
+and pause-hold lifts, `POST /conditions` with per-agent tokens, the GitHub CI connector's
+fail-fast cancel, and the farm view on a phone, all on real platforms; live runs on real
+Hermes, Claude Code and OpenClaw platforms with this version; the recorded 24 h observe
+and 48 h act runs; the Docker image (the release workflow builds and publishes it); and
+GitHub Issues and Linear beyond the token check. `POST /v1/metrics` takes only the shared
+traces token, not a per-agent one. Answering from Telegram and `POST /conditions` are
+single-host only. The wheel and sdist were installed in clean
+environments on Python 3.12 and 3.13, and `kelpie --version`, `kelpie demo --fast` and
+`kelpie doctor` (empty config) run there. Upgrading from 0.1.0a2 or older: read 0.1.0a3's and 0.1.0a2's
+notes below first.
+
+### Security
+
+- `POST /conditions` takes per-agent tokens (#442): each agent registers with its own
+  `[[traces.tokens]]` token (the same entry as its spans, also with `[traces]` off), and
+  only for its own tasks, scoped from the board as its spans are (owners, roles, boards, or
+  a session of the task in scope). A registration for another agent's task, or for a task
+  the board does not show, gets the same 403 (it does not tell whether the task exists),
+  a ledger line (rule `conditions`, kind `register`, one an hour per token and task,
+  repeats counted on it, folded into one line per token past 20 an hour) and
+  `kelpie_conditions_refused_total{reason="out_of_scope"}`. Until the first tick after a
+  start a per-agent token gets 503 with `Retry-After`. A registration attaches only while
+  its token is configured and the task in its scope, so removing an agent's entry, or
+  moving its task to another agent, also drops what it registered; the shared token's
+  registrations (and older ones) attach only while a shared token is set. Each token has
+  its own rate (`[conditions] max_per_minute`, 60; 429 with `Retry-After`) and share of
+  live registrations (`max_per_token`, 100; 507), so a flood from one token leaves the
+  others alone. `kelpie serve` refuses a weak per-agent token or one equal to the shared
+  token. The shared `[conditions] token_env` token keeps working (any task, as before) but
+  is deprecated: `kelpie doctor` warns ("conditions tokens per agent") while it is set, and
+  it is no longer required when per-agent tokens are configured. New metric
+  `kelpie_conditions_requests_total{code}`.
+- Every listener bound to loopback (the main port's `/metrics`, `/healthz`, `/v1/traces`
+  and `/v1/metrics`, a loopback hub, `[view]` and the `kelpie agent` OTLP relay) answers 421 to
+  a request addressed to a name other than `localhost`, a loopback IP, its bind address or
+  a name in the new `[server] hosts`: a web page could rebind its own name to 127.0.0.1 and
+  read `/metrics` or the farm view, or post forged spans to a tokenless ingest, through the
+  operator's browser. A tokenless ingest and the agent relay also refuse an export
+  carrying an `Origin` header (403). An exporter or scraper on the Kelpie host that names
+  it by an `/etc/hosts` alias, or a reverse proxy or tunnel on that host that passes the
+  client's `Host` on to a loopback listener, needs that name in `[server] hosts`; listeners
+  off loopback are unchanged (#406, #395).
+- Hook fold across ingest tokens (#374): an OTLP tool span takes the hook span of the same
+  call only when its scoped ingest token may report the folded span (the hook's session and
+  task; a token no longer configured takes none), and in the live loop never the call of a
+  session the board does not place yet (the board is read before the fold); the daily
+  report and the tool-output scan fold alike. Another token's span carrying a run's call
+  ids could fold the run's verified hook calls into a span the scope check then deleted, so
+  rule 10 missed the run's loop. Rule 10's logic and thresholds are unchanged.
+- Per-agent traces tokens (#374): past the million bindings Kelpie holds, bindings of names
+  no longer configured go first, then the token holding the most loses its least recently
+  used ones, so a token flooding unplaced ids over days evicts its own bindings before
+  those of any token holding fewer (whose ids it could otherwise claim). A binding is
+  kept, past retention, the hour a span may be dated ahead. Log slots past their minute
+  are pruned. A `kelpie agent` report can no longer carry the ingest token mark on its
+  spans (the hub drops it), and spans marked with a token no longer configured share one
+  log line a minute, however many names they hold. An unplaced id not used for more than a
+  day counts toward the token's 10,000 again when it is used again.
+- The Hermes, Claude Code and OpenClaw adapters read the hook spool incrementally: each
+  tick parses only the lines appended since the last one (an offset per file, by inode, so
+  a rotation keeps it; a truncated or rewritten file is read again), instead of up to
+  2 × 64 MiB every tick. An agent appending past the hook's rotation is capped, each cap
+  counted and logged once: the newest 64 MiB read per file and tick, 400,000 lines parsed
+  per tick and kept between ticks (at most 128 MiB of them), and 20,000 tool calls per
+  named run or session in a snapshot (the newest, and the run's first line). A spool the
+  hooks rotate at 20 MiB reaches none of them, so rule 10 sees the same evidence (#392).
+- The Hermes adapter drops spool lines dated more than 5 minutes ahead, as the Claude Code
+  and OpenClaw adapters do: a forged or mis-clocked line no longer keeps a dead run live
+  until the spool rotates (#368).
+- Stop markers of the Claude Code and OpenClaw adapters are written relative to a handle
+  on the stop folder, opened without following a symlink: an agent can no longer swap the
+  folder for a symlink between Kelpie's check and its write (audit L4, #336).
+- Outbound clients (`kelpie.net`, the GitHub client, trace forwarding, the doctor's
+  Prometheus check) share one connect deadline across every resolved address, instead of
+  giving each address the whole remaining time (audit L13, #336).
+- The Docker image's base images are pinned by digest without hand-copied values: the new
+  `pin-base-images` workflow resolves each base image's multi-platform index digest on
+  GitHub Actions (`docker buildx imagetools inspect`, checked for linux/amd64 and
+  linux/arm64) and opens a PR writing `image:tag@sha256:…` into the Dockerfile
+  (`scripts/pin_base_images.py`); Dependabot's `docker` ecosystem keeps the digests
+  current, and a test fails on a base image that is not pinned. The Dockerfile is now
+  pinned (audit L14, #336).
+- `unanswered_asks` reminders count toward `[engine] max_actions_per_task_per_hour` on a
+  budget of their own per task (`Action.own_budget`), not the task's: one comment
+  mentioning many agents (an honest broadcast, or an agent dodging a stop) gave one alert
+  per agent and used up the task's hourly budget, so a stop or requeue of that task by
+  another rule came back rate-limited (#390).
+- A block storm's "Block storm over" notice counts the tasks Kelpie listed, not a list an
+  agent wrote into its block reason (#404).
+- The multi-host hub refuses a snapshot from a `kelpie agent` that sets a required field to
+  null or a map to a list: rules read such fields unguarded and raised for the whole farm
+  (#385).
+- A Hermes, Claude Code or OpenClaw spool line, a Claude Code task file or a Hermes event
+  payload nested too deep for the JSON decoder (about 10 KB of `[`) is skipped like any
+  malformed line. It used to raise `RecursionError` out of the adapter, so one such line
+  from any agent left the adapter's whole snapshot out of every tick, and `kelpie spool
+  scrub` aborted. OTLP tool arguments nested that deep are hashed as text, no longer
+  rejecting the span as malformed (#364).
+- A Claude Code or OpenClaw spool line whose `type` is a JSON list or object, and a Hermes
+  or Claude Code tool call with a duration too large for the datetimes, no longer raise out
+  of the adapter's snapshot: the first is skipped, a tool call's duration is cut to a
+  week, as OpenClaw already did (#383).
+- A Claude Code or OpenClaw stop marker dated far ahead or far back (year 9999, year 1) no
+  longer raises `OverflowError` out of the adapter's snapshot, which blinded every rule on
+  that adapter while the marker stayed: a marker dated outside the range in which it can
+  still flag a tool call of the spool is ignored (one dated ahead with one warning per
+  session, as the hook and plugin ignore it; one long expired quietly), and the
+  unenforced-stop check compares differences instead of adding to the marker's date.
+  Markers inside that range work exactly as before. An OpenClaw Workboard card moved to
+  `blocked` at a time in year 1 no longer raises out of the board read either (#388).
+
 ### Added
 
+- **Delegation to an operator agent** (#347), off by default. The `delegation` rule and
+  its policy in `[engine.rules.delegation]`: problem classes (`agent`, `human`, `kelpie`)
+  per rule as config data with an empty default, `delegate_to` per board, and the loop
+  guards (one open card per incident, at most two attempts then a cooldown, no delegation
+  about cards or the operator's own tasks, hourly and daily limits, a circuit breaker).
+  Only `warning` problems of an `agent` class are delegated; `critical`, notices, outages
+  and human-only rules never are. The `delegate` action carries the card's text (facts,
+  the rule's text quoted as data, what counts as fixed, a fixed how-to-handle block).
+  - Hermes carries it out with `hermes kanban create` (assigned to the board's operator; a
+    card made before is found by its key line, so a retried create makes no second card;
+    the card's id read from `--json`), and `delegation` may run in act mode on Hermes
+    behind the act checklist. An operator that is a person or Kelpie is refused.
+  - GitHub Issues: `delegate_to = { "github-issues" = "<agent>" }` hands a problem to one
+    of `[adapters.github_issues] agents` as a new issue in the task's repository (the
+    board's `label`, the card quoted inert, the key on its last line), and starts the agent
+    on it as on any issue. A card Kelpie's token opened for the key is found again instead
+    of made twice. The operator is checked at startup; Linear refuses cards.
+  - Under `[hub]`: a `delegate` action crosses the wire to the `kelpie agent` whose board
+    holds the task, and the agent's adapter makes the card. The card is checked on the
+    wire (an operator profile name; exactly a title, body and key within size limits, the
+    body ending with its key line), names the task in the agent's own ids, and its id comes
+    back in the agent's namespace so delegation verifies the fix on the merged board. A
+    `delegate_to` board naming an agent the hub does not know, or a bare adapter name, is
+    refused at startup. `[agent] actions` without `delegate` turns cards off on that host.
+  - Verification and the person's messages: a delegated problem is "fixed, verified" only
+    when Kelpie's own state for it has been closed for `hold`; a card the operator closes
+    while the problem stays gives "agent says fixed, still broken" and a second card; a
+    blocked card, a failed last attempt or a missed pick-up or finish deadline gives "not
+    fixed, yours now". In act mode the engine holds back the alerts (and the resolved
+    notice) of a problem the operator has, recorded as `delegated` in the ledger, so the
+    person hears once on hand-off and once at the end; a problem it held back that the rule
+    does not hand over is said to be the person's, and the circuit breaker alerts once.
+    Critical problems always reach the person.
+  - The daily report's "Delegation to operator agents" section: cards handed over (and
+    those suggest mode would have handed), alerts held back, the verdicts the person got,
+    cards by operator, and the tokens operator agents spent on Kelpie's cards.
+- **Answering an agent's question from Telegram** (#300), Hermes first, off by default.
+  When an agent lists its own options in a comment (`Options:` then `A)` … `D)`,
+  optionally `Recommend: B`), rule 13's digest item shows them and, on a Telegram channel
+  with `answer_buttons = true`, a button per option. A press answers with a confirmation
+  that restates the option from Kelpie's record; only the confirm of the same person
+  writes one comment on the task quoting the agent's option (inert), then unblocks it, both
+  re-checked against the board right before the write. On only with the channel
+  (`answer_buttons`), the board (`chat_answers` in `[adapters.hermes]` or per
+  `[[adapters.hermes.boards]]`) and the global dry-run off; optional `answer_users` limits
+  an answer to the person the item is for. Single-use signed references, one answer per
+  question, a ledger entry (kind `answer`) around every write; `kelpie status` and `kelpie
+  doctor` say whether answers are on, and doctor lists answers left pending. Not with
+  `[hub]` yet. The threat model, guards and rejected presses are in
+  [docs/security.md](docs/security.md#answering-an-agents-question-from-the-chat-design-300).
+- **`POST /conditions`**: an agent registers the condition its task waits for (task id,
+  kind, params), off by default (`[conditions] enabled`). On the main listener (loopback by
+  default, behind the Host and connection guards), with a bearer token (per agent, see
+  Security; compared in constant time before the body is read), no `Origin`, at most
+  16 KiB of JSON. Duplicates are idempotent (`200`, same id, counted from now).
+  Attach-only: a registered condition attaches to its task inside Kelpie (in progress or
+  waiting, never blocked or ready) for one wait and the connectors evaluate it; nothing on
+  the board changes. Only kinds something evaluates, and never the keys evaluators write.
+  Registrations are dropped when their task finishes or after `max_age`; `kelpie why` and
+  the report read them. Single-host `kelpie serve` only for now.
+- **The farm view.** `kelpie status` shows the farm after the rules: tasks per status (per
+  board), waiting conditions, open alert states and the last actions per rule, read-only
+  (the board offline, the database without writing to it; with no adapter, the last
+  statuses `kelpie serve` observed). `--json` prints the farm view alone for scripts,
+  `--server [URL]` reads it from a running `kelpie serve`. The view model is
+  `kelpie.core.farmview`.
+- **`[view]`** (off by default): `kelpie serve` serves the farm view read-only on a
+  listener of its own (127.0.0.1:9466, apart from the hub's 9465): JSON at `GET /v1/farm`,
+  and a page for a phone at `GET /` (#299) with today's cost of chaos and spend so far,
+  then per board the open tasks by attention (needs you, stuck or blocked, running long
+  past `[view] long_after`, the rest) and the open alerts. No write endpoint, no script, no
+  form; with `[view] token_env` set every request needs the bearer token (a browser gives
+  it as the password of its sign-in prompt), and off loopback `kelpie serve` refuses to
+  start without a strong one; `kelpie doctor` warns about it first. A web manifest lets a
+  phone add the page to the home screen.
+- **Task status history.** `kelpie serve` records the task status changes it observes on
+  every tick (status and the platform's own status, per task, board and adapter) in its
+  database (#157), and the daily report's "Farm throughput" stages use them where the board
+  keeps no history: queue time before a task's first pickup, and status changes between
+  sessions. The section says which source it used. Rules see each task's recent observed
+  history (#462): `Snapshot.status_history`, the changes over the last 7 days per task (at
+  most 32, with the status the window began in), read back from the database at start.
+  `kelpie.rules._history` reads time-to-accept and bounces back from review or done from
+  it. No rule uses it yet; fixtures may carry their own `status_history`.
+- **Hermes makes WIP commits** (#399, option 1): `checkpoints` in `act` mode commits a dirty
+  worktree locally on the task branch after its session ended, and never pushes. Git runs
+  with a fixed environment (no global or system config, no hooks, no signing, a fixed
+  author `Kelpie <kelpie@kelpie.invalid>`) through plumbing with a compare-and-swap on the
+  branch; a worktree with includes or filter drivers in its config, a filter attribute on a
+  changed file (LFS), an operation in progress, unmerged files, submodule changes, a nested
+  repository, another branch or a very large file is refused and a person is told. The
+  ledger keeps the commit. `wip_ci = "draft_pr"` is unsupported on Hermes.
+- Resume notes carry a short git log: `Session.recent_commits` (up to 5 commits, newest
+  first, only commits since the branch last met its base when the base is known), read by
+  the Hermes adapter with `git cat-file commit` per commit (never `git log`; each read
+  capped), and listed by `checkpoints` in the note of a requeued task with the commit,
+  branch and progress note (params `git_log`). The note is capped at 2000 characters:
+  Hermes puts a task's newest comments (2048 characters each) in the next worker's context,
+  so the note reaches its prompt whole.
+- The Hermes adapter carries out `unblock` (`hermes kanban unblock`, only the block its
+  snapshot showed, never Kelpie's own stop) and `reassign` (`hermes kanban assign` of a
+  `todo`, `ready` or `review` task no run claims, to an agent's profile, with a comment
+  saying why), and declares both. `stale_blocks` and `orphan_status` may now run in `act`
+  on Hermes (they stay in `observe` by default). The simulated Hermes CLI applies
+  `unblock --reason`, `assign` and `comment`.
+- Idempotent actions: an adapter raises `NothingToDo` (`kelpie.core.ports`) for an action
+  already in effect, and the engine records "nothing to do" with the adapter's note in the
+  ledger instead of a failure or an alert; `kelpie agent` relays the note to the hub. On
+  Hermes: a second park of a task Kelpie parked on those conditions, a wake of a task
+  already woken, a requeue of a task already in the queue, an unblock of a task no longer
+  blocked and a reassignment to the current assignee. A requeue Hermes cannot carry out
+  (a task neither queued nor parked by Kelpie) still reaches a person.
+- **Rule 6 holds** matched by flag or pause, not only by label: `kind = "flag"` (a platform
+  flag, the new `Task.flags`) or `kind = "pause"` (a blocked or waiting task whose block is
+  a pause: category `pause`, or a reason matching the hold's `pattern`, by default one
+  starting with "paused"). A hold that names its owner (`executor`) also gets the new
+  `lift_hold` action past its expiry, announced by its alert and carried out only in act
+  mode; nothing acts by default. What lifts holds, each off by default:
+  - the GitHub pull request step, label holds on PRs, as executor `github_pulls`
+    (`[connectors.github.pulls] allow_lift_holds`, `lift_repos` and a token of its own in
+    `lift_token_env`);
+  - GitHub Issues and Linear, pause holds: a board's `pause_labels` (both) and Linear's
+    `pause_states` make an open issue `blocked` on a pause (block category `pause`); a
+    locked GitHub issue carries the flag `locked`. With `allow_lift_holds` the adapter
+    takes the pause label the hold is named after (only that one) off each held task that
+    still carries it, at most 4 a lift; a pause state, a flag or a label hold is left to a
+    person. Rule 4 still alerts on a paused task as on any block without a condition.
+  - Hermes, pause holds whose `executor` is `"hermes"` (`[adapters.hermes]
+    allow_lift_holds`): the held tasks' blocks are cleared through `hermes kanban
+    unblock`, with every guard of an unblock (only the block the snapshot showed, never
+    Kelpie's stop or the circuit breaker), at most 5 a lift (the rest left to a person).
+    Hermes records no labels or flags; a pause is a block whose text reads as one, so two
+    pause holds whose patterns both match a task lift it alike.
+
+  Adapters gain the optional `SupportsLiftHold` capability; `lift_hold` is not offered to a
+  hub.
+- **Rule 9 fails fast** (`ci_economy`, observe by default): when a cheap required check
+  (`fail_fast_checks`) already failed on a pull request's commit, the queued or running
+  expensive builds of that commit (`fail_fast_cancel`, e.g. a macOS build) get
+  `cancel_build`, since the fix push builds them again. A refused job or a re-run in
+  progress is no verdict. Only logged until `fail_fast_mode = "rule"`, and the rule's own
+  mode and the global dry-run still apply. The GitHub CI connector carries it out (#450):
+  a queued or running `push` or `pull_request` run on that commit is cancelled, under the
+  same `[connectors.github.ci]` cancel policy as superseded runs (`allow_cancel`,
+  `cancel_repos`, `cancel_workflows`, `cancel_branches`; never the default branch). Never a
+  re-run (a human's decision) or a held run (an approval, a concurrency group). Right
+  before the cancel it re-reads the run (still active and unheld, same attempt and commit)
+  and the check's runs on that commit outside the cache (the last to finish ended in
+  `failure`, none running); otherwise it does nothing. Until now it refused every
+  fail-fast cancel.
+- Rule `unanswered_asks` (P1, #297, observe by default): an agent's `@question` to another
+  agent in a task comment is an obligation until the recipient (or a person) answers.
+  Kelpie reminds only while the recipient is idle, at most once per step (`steps`, default
+  1h, 4h, 12h, 24h), stops after `stop_after` (3d), says `delivery: unknown` when it
+  cannot tell the question was seen, and honours snoozes on the asking task. Blocked and
+  waiting tasks and questions to people stay with rules 4, 2 and 13, so nothing is alerted
+  twice. The daily report's new "Unanswered asks" section counts the agent-hours agents'
+  questions to other agents stayed open within the day, by the agent asked.
+- Block storms (rule 4, #229): once `storm_mode = "rule"`, rule 13's "needs you" digest
+  folds the person's items of a storm's tasks into one item for the storm, so the person
+  reads one cause instead of each block again; a task joining the storm no longer
+  re-announces the digest. A storm's "resolved" notice says how many of its tasks were
+  unblocked ("Block storm over: 5 of 7 tasks unblocked") and which are still blocked.
+- Rule 7 (`resources`) says when it is blind: if the host resources cannot be read
+  (Prometheus down, unreachable, refusing the token), one warning names the cause and since
+  when, once per cause, and a "resolved" notice follows when readings come back (until now
+  only a log line and `kelpie_resource_read_failures_total`).
 - `Resource.events_window`: the period a source's event count (`events`, e.g. a quota's
   rate-limit errors) covers, ending at the reading's time (#456). Rule 7 counts those
   events only when the window is unknown or no longer than `rate_limit_window`, so a
@@ -22,112 +407,29 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
   (`kelpie_budget_sources_disagree`), and a hard threshold only the bill passes is held at
   soft (nothing is stopped for it). The daily report's bill check names the budgets that
   count the bill.
-- Rules see each task's recent observed status history (#462): `Snapshot.status_history`,
-  the status changes `kelpie serve` records (#157) over the last 7 days per task (at most
-  32, with the status the window began in), read back from the database at start.
-  `kelpie.rules._history` reads time-to-accept and bounces back from review or done from
-  it. No rule uses it yet; fixtures may carry their own `status_history`.
-- The GitHub CI connector carries out rule 9's fail-fast `cancel_build` (#450): a queued
-  or running `push` or `pull_request` run on a PR commit whose cheap required check
-  already failed is cancelled, under the same `[connectors.github.ci]` cancel policy as
-  superseded runs (`allow_cancel`, `cancel_repos`, `cancel_workflows`, `cancel_branches`;
-  never the default branch). The connector checks this itself: never a re-run (a human's
-  decision) or a held run (an approval, a concurrency group). Right before the cancel it
-  re-reads the run (still active and unheld, same attempt and commit) and the check's runs
-  on that commit outside the cache (the last to finish ended in `failure`, none running);
-  otherwise it does nothing. Until now it refused every fail-fast cancel. Rule 9's
-  fail-fast cancels stay observe-only until `fail_fast_mode = "rule"`, and the rule's own
-  mode and the global dry-run still apply.
-- The Grafana dashboard links to traces in Langfuse (#455). Set the new **Langfuse traces
-  URL** variable to your project's traces page, and the "Traces in Langfuse" dashboard
-  link and the trace panels' links open it. The variable is empty by default; see
-  docs/dashboard.md.
-- Multi-host: `kelpie agent`'s OTLP relay forwards Claude Code's cost and token metrics
-  (`/v1/metrics`) to the hub under the agent's token, as it does spans; the hub ingests
-  them with `/v1/metrics`' checks and puts every point's session and task in the agent's
-  namespace. Trace and metric exports share one budget of two in flight per agent (more
-  get 503 with `Retry-After`), half of ingest's default decode slots.
-  `POST /conditions` stays single-host.
-- Delegation under `[hub]` (#347): a `delegate` action crosses the wire to the
-  `kelpie agent` whose board holds the task, and the agent's adapter makes the card
-  (Hermes: `hermes kanban create`). The card is checked on the wire (an operator profile
-  name; exactly a title, body and key within size limits, the body ending with its key
-  line), names the task in the agent's own ids, and its id comes back in the agent's
-  namespace so delegation verifies the fix on the merged board. The startup refusal of
-  delegation with `[hub]` is gone; a `delegate_to` board naming an agent the hub does not
-  know, or a bare adapter name, is refused instead. `[agent] actions` without `delegate`
-  turns cards off on that host.
-- Hermes makes WIP commits (#399, option 1): `checkpoints` in `act` mode commits a dirty
-  worktree locally on the task branch after its session ended, and never pushes. Git runs
-  with a fixed environment (no global or system config, no hooks, no signing, a fixed
-  author `Kelpie <kelpie@kelpie.invalid>`) through plumbing with a compare-and-swap on the
-  branch; a worktree with includes or filter drivers in its config, a filter attribute on a
-  changed file (LFS), an operation in progress, unmerged files, submodule changes, a nested
-  repository, another branch or a very large file is refused and a person is told. The
-  ledger keeps the commit. `wip_ci = "draft_pr"` is unsupported on Hermes. `checkpoints`
-  may now run in `act` mode on Hermes.
-- Delegation to an operator agent, first part (#347): the `delegation` rule and its policy
-  in `[engine.rules.delegation]`: problem classes (`agent`, `human`, `kelpie`) per rule as
-  config data with an empty default, `delegate_to` per board, and the loop guards (one open
-  card per incident, at most two attempts then a cooldown, no delegation about cards or the
-  operator's own tasks, hourly and daily limits, a circuit breaker). Only `warning`
-  problems of an `agent` class are delegated; `critical`, notices, outages and human-only
-  rules never are. The rule asks for a `delegate` action with the card's text (facts, the
-  rule's text quoted as data, what counts as fixed, a fixed how-to-handle block); no
-  adapter carries it out yet, so it stays in observe or suggest. Off by default.
-- Delegation, second part (#347): Hermes carries out `delegate` with `hermes kanban create`
-  (assigned to the board's operator; a card made before is found by its key line, so a
-  retried create makes no second card; the card's id read from `--json`), and
-  `delegation` may run in act mode on Hermes behind the act checklist. Not with `[hub]`
-  yet (refused at startup). An operator that is a person or Kelpie is refused.
-- Delegation, third part (#347): verification and the person's messages. A delegated
-  problem is "fixed, verified" only when Kelpie's own state for it has been closed for
-  `hold`; a card the operator closes while the problem stays gives "agent says fixed,
-  still broken" and a second card; a blocked card, a failed last attempt or a missed
-  pick-up or finish deadline gives "not fixed, yours now". In act mode the engine holds
-  back the alerts (and the resolved notice) of a problem the operator has, recorded as
-  `delegated` in the ledger, so the person hears once on hand-off and once at the end; a
-  problem it held back that the rule does not hand over is said to be the person's, and
-  the circuit breaker alerts once. Critical problems always reach the person.
-- Delegation, fourth part (#347): the daily report's "Delegation to operator agents"
-  section: cards handed over (and those suggest mode would have handed), alerts held back,
-  the verdicts the person got, cards by operator, and the tokens operator agents spent on
-  Kelpie's cards.
-- `POST /conditions`: an agent registers the condition its task waits for (task id, kind,
-  params), off by default (`[conditions] enabled`). On the main listener (loopback by
-  default, behind the Host and connection guards), with a bearer token of its own
-  (`[conditions] token_env`, compared in constant time before the body is read), no
-  `Origin`, at most 16 KiB of JSON. Duplicates are idempotent (`200`, same id, counted
-  from now). Attach-only: a registered condition attaches to its task inside Kelpie (in
-  progress or waiting, never blocked or ready) for one wait and the connectors evaluate it;
-  nothing on the board changes. Only kinds something evaluates, and never the keys
-  evaluators write. Registrations are dropped when their task finishes or after `max_age`;
-  `kelpie why` and the report read them. Single-host `kelpie serve` only for now.
-- Rule 6 holds matched by flag or pause, not only by label: `kind = "flag"` (a platform
-  flag, the new `Task.flags`) or `kind = "pause"` (a blocked or waiting task whose block is
-  a pause: category `pause`, or a reason matching the hold's `pattern`, by default one
-  starting with "paused"). No adapter reports flags yet. A hold that names its owner
-  (`executor`) also gets the new `lift_hold` action past its expiry, announced by its
-  alert and carried out only in act mode; nothing acts by default. Rule 6 now has an
-  effect, so `kelpie status` and the report say it cannot act unless a connector may lift
-  holds. The GitHub pull request step lifts label holds on PRs as executor
-  `github_pulls`, off by default: `[connectors.github.pulls] allow_lift_holds`, `lift_repos`
-  and a token of its own in `lift_token_env`.
 - `POST /v1/metrics`: Claude Code's OpenTelemetry cost and token metrics as a spend source,
   behind the same token, `Origin`, size, media type and slot checks as `/v1/traces` (only
   the shared token, not a per-agent one). Only `claude_code.token.usage` and
   `claude_code.cost.usage` delta points with a `session.id` are kept (session, task, model,
   token type, value); other metrics are ignored and never stored. Their tokens count for
   budgets for sessions with no model call in traces in the window, so a session exported
-  both ways counts once. On a multi-host farm `kelpie agent` relays it to the hub. New
-  metrics `kelpie_metrics_requests_total`, `kelpie_metric_points_total` and
-  `kelpie_metric_points_rejected_total`.
+  both ways counts once. New metrics `kelpie_metrics_requests_total`,
+  `kelpie_metric_points_total` and `kelpie_metric_points_rejected_total`. Multi-host:
+  `kelpie agent`'s OTLP relay forwards them to the hub under the agent's token, as it does
+  spans; the hub ingests them with `/v1/metrics`' checks and puts every point's session and
+  task in the agent's namespace. Trace and metric exports share one budget of two in
+  flight per agent (more get 503 with `Retry-After`), half of ingest's default decode
+  slots.
 - Limit hits counted from traces per provider (a model call refused with HTTP 429 or a
   rate-limit `error.type`) with a suggested concurrency: one below the lowest number of
   sessions running at once when the limit was hit. The daily report's new "Provider
   limits" section (the day) and the gauges `kelpie_llm_provider_trace_limit_hits` and
   `kelpie_llm_provider_suggested_concurrency` (the spans each tick sees) show them; Kelpie
   never changes concurrency.
+- `quota_reset` conditions are evaluated with `[connectors.llm_quotas]` (#424): a task
+  parked on a provider's quota is woken once that provider's latest probe reads quota left
+  and the condition's own reset time (if any) has passed; a provider not probed here goes
+  by that reset time; a failed, empty or missing probe is unknown.
 - Daily report: each of the top 3 recommendations says whether it is only *proposed* or
   *accepted*, and how to accept it (`kelpie fix` with the `--rule`, `--command` or `--role`
   the line shows). Accepted means a fix noted for it in the days the report reads, with
@@ -137,120 +439,30 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
   for the top 3 ("Relieve the <role> bottleneck in <stage>"), worth its task-hours beyond
   the next role and stage, unless rule 6 has its own line in the cost of chaos. Section
   advice carries the new `Advice.accept` key (`FixKey`).
-- Daily report: the "Farm throughput" section opens with the day's bottleneck, the role
-  and waiting stage where tasks waited the most task-hours, with its share, the role's
-  utilization and the runner-up; a new "Unanswered asks" section counts the agent-hours
-  agents' questions to other agents stayed open within the day, by the agent asked.
-- `quota_reset` conditions are evaluated with `[connectors.llm_quotas]`: a task parked on a
-  provider's quota is woken once that provider's latest probe reads quota left and the
-  condition's own reset time (if any) has passed; a provider not probed here goes by that
-  reset time; a failed, empty or missing probe is unknown.
-- Answering an agent's question from Telegram (#300), Hermes first, as designed in
-  docs/security.md. When an agent lists its own options in a comment (`Options:` then
-  `A)` … `D)`, optionally `Recommend: B`), rule 13's digest item shows them and, on a
-  Telegram channel with `answer_buttons = true`, a button per option. A press answers with a
-  confirmation that restates the option from Kelpie's record; only the confirm of the same
-  person writes one comment on the task quoting the agent's option (inert), then unblocks
-  it, both re-checked against the board right before the write. Off by default: the
-  channel (`answer_buttons`), the board (`chat_answers` in `[adapters.hermes]` or per
-  `[[adapters.hermes.boards]]`) and the global dry-run off; optional `answer_users` limits an
-  answer to the person the item is for. Single-use signed references, one answer per
-  question, a ledger entry (kind `answer`) around every write; `kelpie status` and `kelpie
-  doctor` say whether answers are on, and doctor lists answers left pending. Not with
-  `[hub]` yet.
-- `kelpie run-once --dry-run` prints the actions every loaded rule asks for on one snapshot
-  (built as `kelpie why` builds it: offline, `--refresh` adds GitHub; the open alert states
-  read from the database without writing), with each rule's mode, and exits. Nothing is
-  dispatched or written; `--json` for scripts. Without `--dry-run` it refuses.
+- Daily report: the "Farm throughput" section opens with the day's bottleneck, the role and
+  waiting stage where tasks waited the most task-hours, with its share, the role's
+  utilization and the runner-up.
 - `/metrics`: `kelpie_role_idle_seconds_total`, idle time per role (agent-seconds its
   agents had no live session and no open task, counted from each tick to the next; a gap
   over 10 minutes, or 3 `[engine] interval`s when longer, is not counted), with a Grafana
   panel of idle agent-hours per hour.
-- Idempotent actions: an adapter raises `NothingToDo` (`kelpie.core.ports`) for an action
-  already in effect, and the engine records "nothing to do" with the adapter's note in the
-  ledger instead of a failure or an alert; `kelpie agent` relays the note to the hub. On
-  Hermes: a second park of a task Kelpie parked on those conditions, a wake of a task
-  already woken, a requeue of a task already in the queue, an unblock of a task no longer
-  blocked and a reassignment to the current assignee. A requeue Hermes cannot carry out
-  (a task neither queued nor parked by Kelpie) still reaches a person.
-- The Hermes adapter carries out `unblock` (`hermes kanban unblock`, only the block its
-  snapshot showed, never Kelpie's own stop) and `reassign` (`hermes kanban assign` of a
-  `todo`, `ready` or `review` task no run claims, to an agent's profile, with a comment
-  saying why), and declares both. `stale_blocks` and `orphan_status` may now run in `act`
-  on Hermes (they stay in `observe` by default). The simulated Hermes CLI applies
-  `unblock --reason`, `assign` and `comment`.
-- The `[view]` listener also serves a read-only page for a phone (`GET /`, #299): today's
-  cost of chaos and spend so far, then per board the open tasks by attention (needs you,
-  stuck or blocked, running long past `[view] long_after`, the rest) and the open alerts.
-  No script, no form; a browser gives the token as the password of its sign-in prompt. A
-  web manifest lets a phone add it to the home screen. Off by default, on loopback.
-- `kelpie status` shows the farm after the rules: tasks per status (per board), waiting
-  conditions, open alert states and the last actions per rule, read-only (the board offline,
-  the database without writing to it; with no adapter, the last statuses `kelpie serve`
-  observed). `--json` prints the farm view alone for scripts, `--server [URL]` reads it from
-  a running `kelpie serve`. The view model is `kelpie.core.farmview`.
-- Resume notes carry a short git log: `Session.recent_commits` (up to 5 commits, newest
-  first, only commits since the branch last met its base when the base is known), read by
-  the Hermes adapter with `git cat-file commit` per commit (never `git log`; each read
-  capped), and listed by `checkpoints` in the note of a requeued task with the commit,
-  branch and progress note (params `git_log`). The note is capped at 2000 characters:
-  Hermes puts a task's newest comments (2048 characters each) in the next worker's context,
-  so the note reaches its prompt whole.
-- `[view]` (off by default): `kelpie serve` serves the farm view read-only as JSON on a
-  listener of its own (`GET /v1/farm`, 127.0.0.1:9466). No write endpoint; with
-  `[view] token_env` set every request needs the bearer token, and off loopback `kelpie
-  serve` refuses to start without a strong one; `kelpie doctor` warns about it first.
-  Its port is 9466, apart from the hub's 9465, and `kelpie serve` refuses to start when two
-  of its listeners (main port, `[hub]`, `[view]`) would share a port.
-- Block storms (rule 4, #229): once `storm_mode = "rule"`, rule 13's "needs you" digest
-  folds the person's items of a storm's tasks into one item for the storm, so the person
-  reads one cause instead of each block again; a task joining the storm no longer
-  re-announces the digest. A storm's "resolved" notice says how many of its tasks were
-  unblocked ("Block storm over: 5 of 7 tasks unblocked") and which are still blocked.
-- Rule 9 fails fast (`ci_economy`, observe by default): when a cheap required check
-  (`fail_fast_checks`) already failed on a pull request's commit, the queued or running
-  expensive builds of that commit (`fail_fast_cancel`, e.g. a macOS build) get
-  `cancel_build`, since the fix push builds them again. A refused job or a re-run in
-  progress is no verdict. Only logged until `fail_fast_mode = "rule"`; the GitHub connector
-  does not carry out this cancel yet.
-- `Block.category`: the kind of block the platform records apart from the reason text,
-  set by the adapter (Hermes: `waiting_human` for a typed block, `guard` for its circuit
+- The Grafana dashboard links to traces in Langfuse (#455). Set the new **Langfuse traces
+  URL** variable to your project's traces page, and the "Traces in Langfuse" dashboard
+  link and the trace panels' links open it. The variable is empty by default; see
+  docs/dashboard.md.
+- `kelpie run-once --dry-run` prints the actions every loaded rule asks for on one snapshot
+  (built as `kelpie why` builds it: offline, `--refresh` adds GitHub; the open alert states
+  read from the database without writing), with each rule's mode, and exits. Nothing is
+  dispatched or written; `--json` for scripts. Without `--dry-run` it refuses.
+- `Block.category`: the kind of block the platform records apart from the reason text, set
+  by the adapter (Hermes: `waiting_human` for a typed block, `guard` for its circuit
   breaker; none for an untyped block). Rule 1's `allowed_block_reasons` match the category
   when there is one, so an agent's wording cannot turn a categorized block into an allowed
-  kind; blocks without a category (untyped Hermes blocks, other adapters) are read by their
-  reason as before. An entry of several words (`"waiting_human: needs_input"`) still matches
-  the prefix the adapter writes. The fixtures of Hermes-shaped typed blocks carry the
-  category now. Multi-host: upgrade the hub before its agents (an older hub refuses a
+  kind; blocks without a category (untyped Hermes blocks, other adapters) are read by
+  their reason as before. An entry of several words (`"waiting_human: needs_input"`) still
+  matches the prefix the adapter writes. The fixtures of Hermes-shaped typed blocks carry
+  the category now. Multi-host: upgrade the hub before its agents (an older hub refuses a
   snapshot with a categorized block).
-- An alert raised again after its cooldown says, in its headline line, how many repeats the
-  ledger merged into it since it was last sent ("raised 5 more times in 30 min"; Russian
-  too). Alerts about a lasting condition keep speaking only on their transitions. A re-send
-  with a count is not a duplicate of the previous send for a channel's own de-duplication.
-- Rule `unanswered_asks` (P1, #297, observe by default): an agent's `@question` to another
-  agent in a task comment is an obligation until the recipient (or a person) answers.
-  Kelpie reminds only while the recipient is idle, at most once per step (`steps`, default
-  1h, 4h, 12h, 24h), stops after `stop_after` (3d), says `delivery: unknown` when it
-  cannot tell the question was seen, and honours snoozes on the asking task. Blocked and
-  waiting tasks and questions to people stay with rules 4, 2 and 13, so nothing is alerted
-  twice.
-- `kelpie serve` records the task status changes it observes on every tick (status and the
-  platform's own status, per task, board and adapter) in its database, and the daily
-  report's "Farm throughput" stages use them where the board keeps no history: queue time
-  before a task's first pickup, and status changes between sessions. The section says
-  which source it used. Recorded rows follow `[storage] retention` and `max_rows` (#157).
-- `Return.files`: the files a merge conflict was in, when the platform records them apart
-  from the reason (at most 100). `return_causes` counts them for its hot files and parses
-  the reason only for a return without them, so returns without files (every adapter today)
-  behave as before; fixture 07 has returns of both kinds.
-- Rule 7 (`resources`) says when it is blind: if the host resources cannot be read
-  (Prometheus down, unreachable, refusing the token), one warning names the cause and since
-  when, once per cause, and a "resolved" notice follows when readings come back (until now
-  only a log line and `kelpie_resource_read_failures_total`).
-- `scripts/bootstrap.sh` prepares a fresh checkout or cloud session for the local checks
-  (uv, Python 3.12, `uv sync --frozen`) in one idempotent step; `--check` also runs them.
-- A design note in `docs/security.md` for answering an agent's question from the chat
-  (#300): threat model, guards and the rejected presses. Proposed only; nothing is
-  implemented and Telegram buttons still only snooze.
 - Shared conditions: `Condition.task_ids` lists other tasks waiting on the same fact, and
   rules read a condition for every waiter (`Condition.waiters`): linked conditions, rule
   1's evidence, snoozes, rule 3's recovery links, the task-status check (a task cannot wait
@@ -258,196 +470,86 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
   Hermes boards namespace them. `Condition.target` says what a condition waits on, typed
   (a pull request, a task or a person), read from its params. Conditions without
   `task_ids` behave as before; no adapter or connector shares one yet (a producer removes
-  a waiter from `task_ids` when it stops waiting). The farm view (`kelpie status`, `[view]`)
-  lists a shared condition under each waiter ("waiting on conditions" counts those rows),
-  and the report's waits file each waiter under the condition's cause. `kelpie agent` may
-  send at most 64 waiters per condition, checked as ids.
+  a waiter from `task_ids` when it stops waiting). The farm view (`kelpie status`,
+  `[view]`) lists a shared condition under each waiter ("waiting on conditions" counts
+  those rows), and the report's waits file each waiter under the condition's cause.
+  `kelpie agent` may send at most 64 waiters per condition, checked as ids.
+- `Return.files`: the files a merge conflict was in, when the platform records them apart
+  from the reason (at most 100). `return_causes` counts them for its hot files and parses
+  the reason only for a return without them, so returns without files (every adapter
+  today) behave as before; fixture 07 has returns of both kinds.
+- An alert raised again after its cooldown says, in its headline line, how many repeats the
+  ledger merged into it since it was last sent ("raised 5 more times in 30 min"; Russian
+  too). Alerts about a lasting condition keep speaking only on their transitions. A
+  re-send with a count is not a duplicate of the previous send for a channel's own
+  de-duplication.
 - Incident fixture `15-green-main-red-pr.yaml`: with main green and the awaited PR's head
   red, rule 4 keeps the block; a task waiting for a PR to merge stays blocked while the PR
   is open, whatever CI says.
-- Holds on issue trackers (rule 6): GitHub Issues and Linear read pauses and flags. A
-  board's `pause_labels` (both) and Linear's `pause_states` make an open issue `blocked`
-  on a pause (block category `pause`), which `kind = "pause"` holds match; a locked GitHub
-  issue carries the flag `locked`. With `allow_lift_holds` (off by default) the adapter
-  lifts a pause hold that names it as `executor` (`lift_hold`, act mode only): the pause
-  label the hold is named after (only that one) comes off each held task that still
-  carries it, at most 4 a lift. A pause state, a flag or a label hold is left to a person.
-  Rule 4 still alerts on a paused task as on any block without a condition. Adapters gain
-  the optional `SupportsLiftHold` capability; `lift_hold` is not offered to a hub.
+- `scripts/bootstrap.sh` prepares a fresh checkout or cloud session for the local checks
+  (uv, Python 3.12, `uv sync --frozen`) in one idempotent step; `--check` also runs them.
 
-- Hermes lifts forgotten pause holds (rule 6): with `[adapters.hermes] allow_lift_holds`
-  (off by default), a `kind = "pause"` hold whose `executor` is `"hermes"` gets its held
-  tasks' blocks cleared through `hermes kanban unblock`, with every guard of an unblock
-  (only the block the snapshot showed, never Kelpie's stop or the circuit breaker), at
-  most 5 a lift (the rest left to a person), act mode only. Hermes records no labels or
-  flags; a pause is a block whose text reads as one, so two pause holds whose patterns
-  both match a task lift it alike.
-- Delegation cards on GitHub Issues (#347): `delegate_to = { "github-issues" = "<agent>" }`
-  hands a problem to one of `[adapters.github_issues] agents` as a new issue in the task's
-  repository (the board's `label`, the card quoted inert, the key on its last line), and
-  starts the agent on it as on any issue. A card Kelpie's token opened for the key is found
-  again instead of made twice. The operator is checked at startup; Linear refuses cards.
 ### Changed
 
-- Linear: a task whose time comes from when Kelpie first saw it as it is (no history
-  read) now counts again from its last change when its workflow state changes, as it
-  already did for labels and assignees.
-- Internal, no behaviour change (#248 D12): one loopback check, `kelpie.core.loopback`,
-  for the listeners' connection guards (`kelpie.httpguard`), `[agent] relay`, and the
-  traces and resources settings; each caller keeps its own normalization (tested against
-  the copies it had).
-- Internal, no behaviour change (#248 D13, adapter twins): one copy of the adapters'
-  shared helpers in `kelpie.adapters._common`: `format_age` (Hermes, Claude Code,
-  OpenClaw), the spool time `_utc` and `_warn`/`act_locks` (Claude Code, OpenClaw), the
-  stop's `_kill_group` (`hermes/stop.py`, `openclaw/stop.py`; byte-identical, the stop
-  path is unchanged; `hermes/git_state.py`'s reaps and closes pipes, so it stays its own),
-  and the issues readers' `_time` (`mapping.parse_time`).
-- Internal, no behaviour change (#248 D8, D13): one copy of GitHub's time parsing in the
-  CI connector (`ci_runs.parse_time`) and of the glob test of budgets and prices
-  (`core.prices.is_glob`).
+- **The database schema is now 12**: `kelpie serve` migrates an older database at start.
+  Older Kelpie versions (0.1.0a3 and before) refuse a database once it is migrated, and
+  `kelpie report` and `kelpie status` of this version ask to run `kelpie serve` once on a
+  database not yet migrated (#157). Recorded status changes follow `[storage] retention`
+  and `max_rows`.
+- `kelpie serve` refuses to start when two of its listeners (main port, `[hub]`, `[view]`)
+  would share a port.
 - `kelpie doctor` "PR blocks have conditions" warns only about blocks that read as waiting
   on the PR they name (its merge, review or CI), not about every mention (#417): a PR named
   only as context, or a block whose wording says it waits on a person, a decision or a
   pause, is counted apart (so is a block whose category says so, though no adapter sets
-  such a category yet). A reviewed exception is acknowledged per task with
-  an expiry in the new `[doctor] pr_block_acks`.
-- **The database schema is now 12**: `kelpie serve` migrates an older database at start.
-  Older Kelpie versions (0.1.0a3 and before) refuse a database once it is migrated, and
-  `kelpie report` and `kelpie status` of this version ask to run `kelpie serve` once on a
-  database not yet migrated (#157).
+  such a category yet). A reviewed exception is acknowledged per task with an expiry in
+  the new `[doctor] pr_block_acks`.
+- Rule 6 now has an effect (`lift_hold`), so `kelpie status` and the report say it cannot
+  act unless a connector may lift holds. `checkpoints` may now run in `act` mode on Hermes.
+- Linear: a task whose time comes from when Kelpie first saw it as it is (no history read)
+  now counts again from its last change when its workflow state changes, as it already did
+  for labels and assignees.
 - docs/privacy.md and docs/install.md state what `[storage] retention` prunes (raw ledger
   rows, closed alert states, observed status transitions); they still said the ledger was
-  never pruned. The configuration reference's contents list every rule and `[instructions]`.
+  never pruned. The configuration reference's contents list every rule and
+  `[instructions]`.
+- Internal, no behaviour change (#248 D8, D12, D13): one loopback check,
+  `kelpie.core.loopback`, for the listeners' connection guards (`kelpie.httpguard`),
+  `[agent] relay`, and the traces and resources settings, each caller keeping its own
+  normalization (tested against the copies it had); one copy of the adapters' shared
+  helpers in `kelpie.adapters._common` (`format_age` for Hermes, Claude Code and OpenClaw;
+  the spool time `_utc` and `_warn`/`act_locks` for Claude Code and OpenClaw; the stop's
+  `_kill_group` for `hermes/stop.py` and `openclaw/stop.py`, byte-identical, the stop path
+  unchanged, while `hermes/git_state.py`'s reaps and closes pipes, so it stays its own;
+  the issues readers' `_time` as `mapping.parse_time`); one copy of GitHub's time parsing
+  in the CI connector (`ci_runs.parse_time`) and of the glob test of budgets and prices
+  (`core.prices.is_glob`).
 
 ### Fixed
 
-- The in-memory ledger (`[storage] path = ":memory:"`, and `kelpie demo`) looked up every
-  action by scanning all the entries it keeps (up to 100,000), so a tick slowed down as the
-  ledger filled. It now keeps an index by fingerprint and subject (#457). A tick with about
-  19,000 actions on a synthetic 2,000-task farm went from 16 s to about 1 s. A per-tick
-  time budget test on that farm (`tests/perf/`) guards it.
 - While host resources cannot be read (Prometheus down, unreachable or refusing the
   token), rule 7's disk, memory, load, process and heavy-task alerts that are already open
   stay open instead of resolving as "no recent reading any more" next to the "host checks
   are blind" warning. Once readings are back, each resolves or carries on as its reading
   says (#454). Rules may define `holds(state_id, snapshot)` to keep a state they cannot
   see open.
-- Docs: the Hermes quickstart names the rules that can act on Hermes (it said only `stop`
-  existed), the OpenClaw quickstart's doctor legend includes WARN, the multi-host
-  check says when `kelpie_agent_up` turns 1, and the Hermes README's `human_decisions`
-  example loads on its own. `kelpie doctor`'s OTLP hint no longer points at the Hermes
-  quickstart's step number. A test now loads every TOML example in the docs and parses
-  every `kelpie` command they show, so a renamed key or flag fails CI.
+- The in-memory ledger (`[storage] path = ":memory:"`, and `kelpie demo`) looked up every
+  action by scanning all the entries it keeps (up to 100,000), so a tick slowed down as the
+  ledger filled. It now keeps an index by fingerprint and subject (#457). A tick with about
+  19,000 actions on a synthetic 2,000-task farm went from 16 s to about 1 s. A per-tick
+  time budget test on that farm (`tests/perf/`) guards it.
 - Rule `unanswered_asks` takes linear time in the board's comments and sessions: on a
   synthetic board of 5,000 tasks one evaluation went from 5.8 s to 0.12 s (#391).
 - A `KELPIE_VIEW_TOKEN` with blanks around it (a trailing newline) now matches the client's
   token instead of refusing every request (#395).
 - A config duration past what Python's `timedelta` can hold (`window = 86400000000000`,
   `"99999999999d"`) is a config error naming the value, not a traceback (#393).
-
-### Security
-
-- `POST /conditions` takes per-agent tokens (#442): each agent registers with its own
-  `[[traces.tokens]]` token (the same entry as its spans, also with `[traces]` off), and
-  only for its own tasks, scoped from the board as its spans are (owners, roles, boards, or
-  a session of the task in scope). A registration for another agent's task, or for a task
-  the board does not show, gets the same 403 (it does not tell whether the task exists),
-  a ledger line (rule `conditions`, kind `register`, one an hour per token and task, repeats
-  counted on it, folded into one line per token past 20 an hour) and
-  `kelpie_conditions_refused_total{reason="out_of_scope"}`. Until the first tick after a
-  start a per-agent token gets 503 with `Retry-After`. A registration attaches only while
-  its token is configured and the task in its scope, so removing an agent's entry, or
-  moving its task to another agent, also drops what it registered; the shared token's
-  registrations (and older ones) attach only while a shared token is set. Each token has
-  its own rate (`[conditions] max_per_minute`, 60; 429 with `Retry-After`) and share of live registrations (`max_per_token`, 100; 507), so a flood
-  from one token leaves the others alone. `kelpie serve` refuses a weak per-agent token or
-  one equal to the shared token. The shared `[conditions] token_env` token keeps working
-  (any task, as before) but is deprecated: `kelpie doctor` warns ("conditions tokens per
-  agent") while it is set, and it is no longer required when per-agent tokens are
-  configured. New metric `kelpie_conditions_requests_total{code}`. Registrations stay
-  attach-only, the endpoint stays off by default, and `[hub]`/`[agent]` still refuse it.
-- Hook fold across ingest tokens (#374): an OTLP tool span takes the hook span of the same
-  call only when its scoped ingest token may report the folded span (the hook's session and
-  task; a token no longer configured takes none), and in the live loop never the call of a
-  session the board does not place yet (the board is read before the fold); the daily
-  report and the tool-output scan fold alike. Another token's span carrying a run's
-  call ids could fold the run's verified hook calls into a span the scope check then
-  deleted, so rule 10 missed the run's loop. Rule 10's logic and thresholds are unchanged.
-- The Docker image's base images are pinned by digest without hand-copied values: the new
-  `pin-base-images` workflow resolves each base image's multi-platform index digest on
-  GitHub Actions (`docker buildx imagetools inspect`, checked for linux/amd64 and
-  linux/arm64) and opens a PR writing `image:tag@sha256:…` into the Dockerfile
-  (`scripts/pin_base_images.py`); Dependabot's `docker` ecosystem keeps the digests current,
-  and a test fails on a base image that is not pinned. The Dockerfile is now pinned (audit
-  L14, #336).
-- Every listener bound to loopback (the main port's `/metrics`, `/healthz` and
-  `/v1/traces`, a loopback hub, `[view]` and the `kelpie agent` OTLP relay) answers 421 to
-  a request addressed to a name other than `localhost`, a loopback IP, its bind address or
-  a name in the new `[server] hosts`: a web page could rebind its own name to 127.0.0.1 and
-  read `/metrics` or post forged spans to a tokenless ingest through the operator's browser.
-  A tokenless ingest and the agent relay also refuse an export carrying an `Origin` header
-  (403). **Upgrade note:** an exporter or scraper on the Kelpie host that names it by an
-  `/etc/hosts` alias, or a reverse proxy or tunnel on that host that passes the client's
-  `Host` on to a loopback listener, needs that name in `[server] hosts`; listeners off
-  loopback are unchanged (#406).
-- The Hermes, Claude Code and OpenClaw adapters read the hook spool incrementally: each
-  tick parses only the lines appended since the last one (an offset per file, by inode, so
-  a rotation keeps it; a truncated or rewritten file is read again), instead of up to
-  2 × 64 MiB every tick. An agent appending past the hook's rotation is capped, each cap
-  counted and logged once: the newest 64 MiB read per file and tick, 400,000 lines parsed
-  per tick and kept between ticks (at most 128 MiB of them), and 20,000 tool calls per
-  named run or session in a snapshot (the newest, and the run's first line). A spool the
-  hooks rotate at 20 MiB reaches none of them, so rule 10 sees the same evidence (#392).
-- Per-agent traces tokens: past the million bindings Kelpie holds, bindings of names no
-  longer configured go first, then the token holding the most loses its least recently used
-  ones, so a token flooding unplaced ids over days evicts its own bindings before those of
-  any token holding fewer (whose ids it could otherwise claim). A binding is kept, past
-  retention, the hour a span may be dated ahead. Log slots past their minute are pruned
-  (#374).
-- `unanswered_asks` reminders count toward `[engine] max_actions_per_task_per_hour` on a
-  budget of their own per task (`Action.own_budget`), not the task's: one comment mentioning
-  many agents (an honest broadcast, or an agent dodging a stop) gave one alert per agent and
-  used up the task's hourly budget, so a stop or requeue of that task by another rule came
-  back rate-limited (#390).
-- A block storm's "Block storm over" notice counts the tasks Kelpie listed, not a list an
-  agent wrote into its block reason (#404).
-- The `[view]` listener on loopback answers only requests addressed to a loopback name or
-  its configured host (421 otherwise): a web page could rebind its own name to 127.0.0.1 and
-  read the farm view through the operator's browser (#395).
-- The multi-host hub refuses a snapshot from a `kelpie agent` that sets a required field to
-  null or a map to a list: rules read such fields unguarded and raised for the whole farm
-  (#385).
-- A Hermes, Claude Code or OpenClaw spool line, a Claude Code task file or a Hermes event
-  payload nested too deep for the JSON decoder (about 10 KB of `[`) is skipped like any
-  malformed line. It used to raise `RecursionError` out of the adapter, so one such line
-  from any agent left the adapter's whole snapshot out of every tick, and `kelpie spool
-  scrub` aborted. OTLP tool arguments nested that deep are hashed as text, no longer
-  rejecting the span as malformed (#364).
-- A Claude Code or OpenClaw spool line whose `type` is a JSON list or object, and a Hermes
-  or Claude Code tool call with a duration too large for the datetimes, no longer raise out
-  of the adapter's snapshot: the first is skipped, a tool call's duration is cut to a week,
-  as OpenClaw already did (#383).
-- A Claude Code or OpenClaw stop marker dated far ahead or far back (year 9999, year 1) no
-  longer raises `OverflowError` out of the adapter's snapshot, which blinded every rule on
-  that adapter while the marker stayed: a marker dated outside the range in which it can
-  still flag a tool call of the spool is ignored (one dated ahead with one warning per
-  session, as the hook and plugin ignore it; one long expired quietly), and the
-  unenforced-stop check compares differences instead of adding to the marker's date.
-  Markers inside that range work exactly as before. An OpenClaw Workboard card moved to
-  `blocked` at a time in year 1 no longer raises out of the board read either (#388).
-- Stop markers of the Claude Code and OpenClaw adapters are written relative to a handle
-  on the stop folder, opened without following a symlink: an agent can no longer swap the
-  folder for a symlink between Kelpie's check and its write (audit L4, #336).
-- Outbound clients (`kelpie.net`, the GitHub client, trace forwarding, the doctor's
-  Prometheus check) share one connect deadline across every resolved address, instead of
-  giving each address the whole remaining time (audit L13, #336).
-- Per-agent traces tokens: a `kelpie agent` report can no longer carry the ingest token mark
-  on its spans (the hub drops it), and spans marked with a token no longer configured share
-  one log line a minute, however many names they hold. An unplaced id not used for more than
-  a day counts toward the token's 10,000 again when it is used again (#374).
-- The Hermes adapter drops spool lines dated more than 5 minutes ahead, as the Claude Code
-  and OpenClaw adapters do: a forged or mis-clocked line no longer keeps a dead run live
-  until the spool rotates (#368).
+- Docs: the Hermes quickstart names the rules that can act on Hermes (it said only `stop`
+  existed), the OpenClaw quickstart's doctor legend includes WARN, the multi-host check
+  says when `kelpie_agent_up` turns 1, and the Hermes README's `human_decisions` example
+  loads on its own. `kelpie doctor`'s OTLP hint no longer points at the Hermes
+  quickstart's step number. A test now loads every TOML example in the docs and parses
+  every `kelpie` command they show, so a renamed key or flag fails CI.
 
 ## [0.1.0a3] - 2026-11-06
 
@@ -1362,7 +1464,8 @@ control loop. Each rule runs in `observe`, `suggest` or `act` mode.
   mode and the daily report ([#62](https://github.com/ch8er/kelpie/pull/62), [#73](https://github.com/ch8er/kelpie/pull/73), [#74](https://github.com/ch8er/kelpie/pull/74), [#81](https://github.com/ch8er/kelpie/pull/81)).
 - A code health and security audit plan was written before the first release ([#92](https://github.com/ch8er/kelpie/pull/92)).
 
-[Unreleased]: https://github.com/ch8er/kelpie/compare/v0.1.0a3...HEAD
+[Unreleased]: https://github.com/ch8er/kelpie/compare/v0.1.0a4...HEAD
+[0.1.0a4]: https://github.com/ch8er/kelpie/releases/tag/v0.1.0a4
 [0.1.0a3]: https://github.com/ch8er/kelpie/releases/tag/v0.1.0a3
 [0.1.0a2]: https://github.com/ch8er/kelpie/releases/tag/v0.1.0a2
 [0.1.0a1]: https://github.com/ch8er/kelpie/releases/tag/v0.1.0a1
