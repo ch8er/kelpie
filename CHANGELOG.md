@@ -120,7 +120,7 @@ GitHub Issues and Linear beyond the token check. `POST /v1/metrics` takes only t
 traces token, not a per-agent one. Answering from Telegram and `POST /conditions` are
 single-host only. The wheel and sdist were installed in clean
 environments on Python 3.12 and 3.13, and `kelpie --version`, `kelpie demo --fast` and
-`kelpie doctor` run there. Upgrading from 0.1.0a2 or older: read 0.1.0a3's and 0.1.0a2's
+`kelpie doctor` (empty config) run there. Upgrading from 0.1.0a2 or older: read 0.1.0a3's and 0.1.0a2's
 notes below first.
 
 ### Security
