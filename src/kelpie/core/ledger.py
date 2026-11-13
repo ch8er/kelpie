@@ -108,7 +108,6 @@ class Dispatched:
     mode: Mode
     outcome: Outcome
     suppression: Suppression | None = None
-    first_suppression: bool = False  # first rate-limit hit for this subject this hour
     # What the executor reported it did (e.g. "worker ended 0.4s after SIGTERM"), or the
     # public reason of a failure; recorded with the entry.
     detail: str | None = None

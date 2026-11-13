@@ -8,6 +8,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ## [Unreleased]
 
+### Internal
+
+- Removed the unread `Dispatched.first_suppression` field (#248 X2, #445). The engine still
+  raises its one rate-limit notice per subject and hour; nothing else read the field.
+
 ## [0.1.0a4] - 2026-11-13
 
 Fourth alpha: the per-agent condition tokens, the Host check on loopback listeners,
