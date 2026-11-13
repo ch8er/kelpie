@@ -954,8 +954,9 @@ Publish the open core: first public pre-release on PyPI and a container image.
 
 ### project: 10 conversations with farm owners
 labels: P1, week-3, area:project
-Validate demand: talk to 10 people who run agent farms (engineering teams with fleets of
-coding agents; self-hosted farms on Hermes, OpenClaw, Paperclip).
+Talk to 10 people who run agent farms (engineering teams with fleets of coding agents;
+self-hosted farms on Hermes, OpenClaw, Paperclip), as a source of incidents and requirements,
+not as demand validation.
 
 **Owner-only, tracked outside the roadmap.** No session can hold these conversations, so the
 criteria (10 conversations with notes kept without personal data, a summary compared with the
@@ -1155,7 +1156,6 @@ fixes.
 **Owner-only, tracked outside the roadmap.** The checks need live accounts (Copilot coding
 agent, Codex cloud and OpenHands, GitHub `blocked_by`/`sub_issues` and `labels=` scoping on a
 real repository, one Linear workspace run), so the criteria moved to #473 (#446, #474).
-Findings come back here as fixtures or fixes.
 
 ### instructions: counted skill loads, a report section and before/after for a split (#241 follow-up)
 labels: P1, area:traces

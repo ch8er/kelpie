@@ -249,4 +249,4 @@ Week plans hold P0 work plus the P1 items listed in week 3 above. Every other P1
 - asks in block reasons and agents' comment questions to people (#461)
 - owner-only items, tracked as issues outside the roadmap (#446): 10 conversations with farm owners (#471), the USPTO search (#472), live issue-agent and Linear checks (#473)
 
-**In progress:** none of the items above has a PR open; #444, #445, #446 and #461 wait on the owner's decision.
+**In progress:** #445, #446 and #461 were decided on the owner's behalf (2026-11-12) and are being built for 0.1.0a5; the other items above have no PR open.
