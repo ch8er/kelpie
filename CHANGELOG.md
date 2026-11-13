@@ -17,7 +17,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
   `kelpie serve` now records the task owners, blocks and conditions it observes as they
   change (a block's reason cut to 500 characters, as for other agent text), next to the
   status history of #157, and `[storage] retention` and `max_rows` prune them the same
-  way (a block's reason text does not outlive `retention`). No rule reads them yet ([privacy](docs/privacy.md)).
+  way (a block's reason text does not outlive `retention`). No rule reads them yet
+  ([privacy](docs/privacy.md)).
 
 ### Internal
 
