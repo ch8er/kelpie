@@ -241,7 +241,6 @@ Week plans hold P0 work plus the P1 items listed in week 3 above. Every other P1
 **Open after 0.1.0a4:**
 
 - the rest of the model gaps: sessions tied to a host, owner availability, the fixtures migrated to the new fields
-- status history in storage for owners, blocks and conditions (task statuses are recorded, #157)
 - instruction files measured on `kelpie agent` hosts
 - the live-run record: 48 h of rules 1–4 in `act` on a real farm, through `docs/act-checklist.md`
 - the rest of #248: profiling the daily report, the span store and a long ledger; the duplicate-code report

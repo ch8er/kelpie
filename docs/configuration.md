@@ -1018,9 +1018,9 @@ agents' sessions or edits their instructions.
 
 | Key | Default | Meaning |
 | --- | --- | --- |
-| `path` | `"kelpie.db"` | SQLite database: action ledger, alert states, snoozes, spans, recorded fixes, observed task status transitions. `":memory:"` keeps it in memory. `$KELPIE_DB` overrides it. |
-| `retention` | `"30d"` | Raw action-ledger rows, alert states closed, and observed task status transitions older than this are pruned, hourly. At least the ledger's own windows: `[engine] once_window`, `cooldown`, `retry_after`, a day, and, when delegation is on, twice the longer of its `cooldown` and `same_incident`; at most `3650d`. |
-| `max_rows` | `1000000` | Raw action-ledger rows kept at most, and, counted apart, observed task status transitions; past it the oldest whole days of the ledger (the oldest transitions) go first, but never within the ledger's own windows (above). In memory (`":memory:"`) the ledger keeps at most 100,000 entries, the newest, whatever their age: a farm that fills that within the ledger's windows may see an action repeat; use a database file. |
+| `path` | `"kelpie.db"` | SQLite database: action ledger, alert states, snoozes, spans, recorded fixes, observed task status transitions and owner, block and condition changes. `":memory:"` keeps it in memory. `$KELPIE_DB` overrides it. |
+| `retention` | `"30d"` | Raw action-ledger rows, alert states closed, and observed task status transitions and owner, block and condition changes older than this are pruned, hourly. At least the ledger's own windows: `[engine] once_window`, `cooldown`, `retry_after`, a day, and, when delegation is on, twice the longer of its `cooldown` and `same_incident`; at most `3650d`. |
+| `max_rows` | `1000000` | Raw action-ledger rows kept at most, and, each counted apart, observed task status transitions and observed owner, block and condition changes; past it the oldest whole days of the ledger (the oldest transitions) go first, but never within the ledger's own windows (above). In memory (`":memory:"`) the ledger keeps at most 100,000 entries, the newest, whatever their age: a farm that fills that within the ledger's windows may see an action repeat; use a database file. |
 
 What retention keeps and drops:
 
@@ -1048,6 +1048,12 @@ What retention keeps and drops:
   newest rows included, never within the ledger's own windows; a task whose last row went
   that way is recorded again as a first sighting, never as a transition; other rows go
   before a task's newest. The recorder's watch periods are pruned with `retention` too.
+- Observed owner, block and condition changes (table `fact_changes`, schema 13) are pruned
+  the same way, per fact: each task's owner and block, and each condition (its kind,
+  whether it holds and the tasks waiting on it), keep their newest row before the cut, a
+  block's without its reason text (its hash stays, so no agent text outlives `retention`).
+  Kelpie records a row when one of them changes, or is first seen set (an owner, a block);
+  never a condition's polling time.
 - Spans have their own `[traces] retention` and `max_rows`.
 
 ### Observed task status transitions

@@ -25,6 +25,7 @@ from typing import Any, NamedTuple, cast
 
 from kelpie.core.actions import ActionKind, Severity
 from kelpie.core.config import Mode
+from kelpie.core.facts import FactChange, FactKind
 from kelpie.core.files import prepare_db
 from kelpie.core.ledger import LedgerEntry, Outcome, Suppression, to_json
 from kelpie.core.model import (
@@ -299,6 +300,27 @@ CREATE TABLE task_transitions (
 CREATE INDEX task_transitions_task ON task_transitions (task_id, at);
 CREATE INDEX task_transitions_at ON task_transitions (at);
 """
+# Task owners, blocks and conditions Kelpie observed (kelpie.core.facts): one row each time
+# one changes (``value`` canonical JSON, NULL for none: no owner, no block), or is first
+# seen set. ``kind`` is owner | block | condition; ``subject`` the task id (a condition's
+# id). ``at`` is the tick that saw it, ``after_at`` the last time the old value was seen.
+# A block's reason (an agent's text) is stored cut to 500 characters, with its hash. Pruned
+# with the ledger's ``[storage] retention`` and ``max_rows``, keeping each fact's value at
+# the cut without the reason text (its hash stays).
+_V13 = """
+CREATE TABLE fact_changes (
+    id       INTEGER PRIMARY KEY,
+    at       TEXT NOT NULL,
+    kind     TEXT NOT NULL,
+    subject  TEXT NOT NULL,
+    value    TEXT,
+    after_at TEXT,
+    board    TEXT,
+    source   TEXT
+);
+CREATE INDEX fact_changes_subject ON fact_changes (kind, subject, at);
+CREATE INDEX fact_changes_at ON fact_changes (at);
+"""
 # Claude Code's OpenTelemetry metrics (``POST /v1/metrics``, kelpie.traces.metrics): delta
 # data points of its token and cost counters, per session. Created by the span store's
 # writer when missing (no schema version: an older reader just sees no metrics); pruned
@@ -326,7 +348,7 @@ SNOOZES_SINCE = 8  # the first schema with snoozes: read-only readers accept it 
 # version -> script that upgrades from version - 1. Append, never edit a released one.
 MIGRATIONS: dict[int, str] = {
     1: _V1, 2: _V2, 3: _V3, 4: _V4, 5: _V5, 6: _V6, 7: _V7, 8: _V8, 9: _V9, 10: _V10,
-    11: _V11, 12: _V12,
+    11: _V11, 12: _V12, 13: _V13,
 }  # fmt: skip
 SCHEMA_VERSION = max(MIGRATIONS)
 # Characters of an action's reason, its executor's detail and an alert state's summary
@@ -475,6 +497,22 @@ class SqliteLedgerStore:
     def transitions(self, start: datetime, end: datetime) -> list[StatusChange]:
         with self._lock:
             return read_transitions(self._db, start, end)
+
+    def record_facts(self, changes: Sequence[FactChange]) -> None:
+        """Store a tick's observed owner, block and condition changes in one transaction."""
+        rows = [_fact_row(c) for c in changes]
+        if rows:
+            self._write(lambda db: db.executemany(_INSERT_FACT, rows))
+
+    def last_facts(self) -> dict[tuple[FactKind, str], FactChange]:
+        """The newest stored change per fact."""
+        with self._lock:
+            rows = self._db.execute(_LAST_FACTS).fetchall()
+        return {(f := fact_change(r)).key: f for r in rows}
+
+    def facts(self, start: datetime, end: datetime) -> list[FactChange]:
+        with self._lock:
+            return read_facts(self._db, start, end)
 
     def by_fingerprint(self, fingerprint: str, after: datetime) -> Sequence[LedgerEntry]:
         sql = f"SELECT {_COLUMNS} FROM actions WHERE fingerprint = ? AND at > ? ORDER BY at, id"
@@ -1774,6 +1812,50 @@ def read_transitions(db: sqlite3.Connection, start: datetime, end: datetime) -> 
     return [status_change(r) for r in rows]
 
 
+_FACT_COLUMNS = "at, kind, subject, value, after_at, board, source"
+_INSERT_FACT = f"INSERT INTO fact_changes ({_FACT_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?)"
+_LAST_FACTS = (
+    "SELECT * FROM fact_changes WHERE id IN (SELECT MAX(id) FROM fact_changes"
+    " GROUP BY kind, subject)"
+)
+
+
+def _fact_row(c: FactChange) -> tuple[object, ...]:
+    return (
+        _ts(c.at),
+        str(c.kind),
+        c.subject,
+        c.value,
+        _opt_ts(c.after),
+        c.board,
+        c.source,
+    )
+
+
+def fact_change(r: sqlite3.Row) -> FactChange:
+    return FactChange(
+        at=datetime.fromisoformat(r["at"]),
+        kind=FactKind(r["kind"]),
+        subject=r["subject"],
+        value=r["value"],
+        after=None if r["after_at"] is None else datetime.fromisoformat(r["after_at"]),
+        board=r["board"],
+        source=r["source"],
+    )
+
+
+def read_facts(db: sqlite3.Connection, start: datetime, end: datetime) -> list[FactChange]:
+    """Observed owner, block and condition changes seen in ``[start, end)``, plus each
+    fact's newest one before ``start`` (its value when the range began), oldest first."""
+    rows = db.execute(
+        "SELECT * FROM fact_changes WHERE (at >= ? AND at < ?) OR id IN"
+        " (SELECT MAX(id) FROM fact_changes WHERE at < ? GROUP BY kind, subject)"
+        " ORDER BY at, id",
+        (_ts(start), _ts(end), _ts(start)),
+    ).fetchall()
+    return [fact_change(r) for r in rows]
+
+
 def read_last_statuses(db: sqlite3.Connection) -> dict[str, StatusChange]:
     """The newest stored transition per task id (the farm view without a board)."""
     return {r["task_id"]: status_change(r) for r in db.execute(_LAST_TRANSITIONS).fetchall()}
@@ -1896,6 +1978,20 @@ _CAP_ANY = (
 )
 
 
+# The row cap of fact_changes, as task_transitions': history before a fact's newest row,
+# then any row, oldest first (both only before the ledger's own windows).
+_FACTS_CAP_OLDER = (
+    "DELETE FROM fact_changes WHERE id IN (SELECT f.id FROM fact_changes f"
+    " WHERE f.at < ? AND EXISTS (SELECT 1 FROM fact_changes n"
+    " WHERE n.kind = f.kind AND n.subject = f.subject AND n.id > f.id)"
+    " ORDER BY f.at, f.id LIMIT ?)"
+)
+_FACTS_CAP_ANY = (
+    "DELETE FROM fact_changes WHERE id IN (SELECT id FROM fact_changes"
+    " WHERE at < ? ORDER BY at, id LIMIT ?)"
+)
+
+
 class SqliteLedgerPruner:
     """Retention of the raw action ledger and of closed alert states (#318), on a
     connection of its own: the ledger store's lock is never taken, and every write is a
@@ -1987,6 +2083,52 @@ class SqliteLedgerPruner:
                     break
                 deleted, excess = deleted + n, excess - n
         return deleted
+
+    def prune_facts(
+        self, now: datetime, retention: timedelta, max_rows: int, keep: timedelta
+    ) -> int:
+        """Delete observed owner, block and condition changes seen more than ``retention``
+        before ``now``, except each fact's newest one before that cut (its value at the cut,
+        and what a restart compares with), whose block reason text is removed (its hash
+        stays); then, while more than ``max_rows`` are left, the
+        oldest seen at least ``keep`` before ``now`` (rows that are not a fact's newest
+        first). Returns the rows deleted."""
+        cut = _ts(now - retention)
+        deleted = self._delete(
+            "DELETE FROM fact_changes WHERE id IN (SELECT id FROM fact_changes"
+            " WHERE at < ? AND id NOT IN"
+            " (SELECT MAX(id) FROM fact_changes WHERE at < ? GROUP BY kind, subject)"
+            " ORDER BY at LIMIT ?)",
+            (cut, cut),
+        )
+        # what is kept from before the cut keeps no agent text: a block's reason goes
+        self._delete(
+            "UPDATE fact_changes SET value = json_remove(value, '$.reason') WHERE id IN"
+            " (SELECT id FROM fact_changes WHERE at < ? AND kind = 'block'"
+            " AND json_type(value, '$.reason') IS NOT NULL LIMIT ?)",
+            (cut,),
+        )
+        floor = _ts(now - keep)
+        excess = self._count_rows("fact_changes") - max(0, max_rows)
+        for older in (_FACTS_CAP_OLDER, _FACTS_CAP_ANY):
+            while excess > 0 and not self._closing.is_set():
+                with self._lock:
+                    if self._closing.is_set():
+                        break
+                    with self._db:
+                        n = self._db.execute(older, (floor, min(self._batch, excess))).rowcount
+                if self._on_batch is not None and n:
+                    self._on_batch()
+                if not n:
+                    break
+                deleted, excess = deleted + n, excess - n
+        return deleted
+
+    def _count_rows(self, table: str) -> int:
+        with self._lock:
+            if self._closing.is_set():
+                return 0
+            return int(self._db.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
 
     def _count_transitions(self) -> int:
         with self._lock:

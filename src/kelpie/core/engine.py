@@ -33,6 +33,7 @@ from kelpie.core.config import EngineConfig, Mode
 from kelpie.core.delegation import RULE as DELEGATION
 from kelpie.core.delegation import Policy, held_for_operator, resolved_by_operator
 from kelpie.core.executors import ConnectorExecutor, Executor, PlatformExecutor
+from kelpie.core.facts import FactRecorder
 from kelpie.core.host_sleep import SleepWatch, merge_sleeps
 from kelpie.core.incidents import FOLDED_UNDER, Outage, is_outage_state
 from kelpie.core.ledger import (
@@ -115,6 +116,9 @@ class Engine:
     # Records the task status transitions each snapshot shows (#157), before rules run; a
     # failing store is logged and never stops the tick. None: nothing recorded.
     transitions: TransitionRecorder | None = None
+    # Records the owner, block and condition changes each snapshot shows (kelpie.core.facts),
+    # beside the status transitions; rules do not read them.
+    facts: FactRecorder | None = None
     # Whether a task's board takes answers from the chat (#300): an item keeps the agent's
     # options only then, so no button is offered where a press could only be refused.
     # None: no item keeps them.
@@ -673,6 +677,8 @@ class Engine:
             if mine:
                 snapshot = replace(snapshot, host_sleeps=merge_sleeps(snapshot.host_sleeps, mine))
         self._log_sleeps(snapshot.host_sleeps)
+        if self.facts is not None:
+            self.facts.record(snapshot)
         if self.transitions is not None:
             self.transitions.record(snapshot)
             if not snapshot.status_history:  # a source's own history wins (fixtures)

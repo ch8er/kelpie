@@ -197,7 +197,7 @@ def test_sqlite_round_trip_and_range(tmp_path: Path) -> None:
 def test_fresh_database_has_the_table(tmp_path: Path) -> None:
     SqliteLedgerStore(_db(tmp_path)).close()
     db = sqlite3.connect(_db(tmp_path))
-    assert db.execute("PRAGMA user_version").fetchone()[0] == storage.SCHEMA_VERSION == 12
+    assert db.execute("PRAGMA user_version").fetchone()[0] == storage.SCHEMA_VERSION == 13
     cols = {r[1] for r in db.execute("PRAGMA table_info(task_transitions)")}
     assert {"at", "task_id", "status", "previous", "since", "after_at", "board"} <= cols
     db.close()
@@ -223,7 +223,7 @@ def test_migrate_from_11_keeps_the_ledger(tmp_path: Path) -> None:
     assert len(store.last_statuses()) == 1
     store.close()
     check = sqlite3.connect(path)
-    assert check.execute("PRAGMA user_version").fetchone()[0] == 12
+    assert check.execute("PRAGMA user_version").fetchone()[0] == storage.SCHEMA_VERSION
     check.close()
 
 

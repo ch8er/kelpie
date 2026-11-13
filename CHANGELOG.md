@@ -8,6 +8,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ## [Unreleased]
 
+### Changed
+
+- **The database schema is now 13**: `kelpie serve` migrates a schema 12 database at start
+  (a new table, `fact_changes`; nothing else changes), and an older Kelpie refuses it once
+  migrated, so back up `kelpie.db` first if you may go back. Until then `kelpie report`,
+  `kelpie status` and the farm view of this version ask you to run `kelpie serve` once.
+  `kelpie serve` now records the task owners, blocks and conditions it observes as they
+  change (a block's reason cut to 500 characters, as for other agent text), next to the
+  status history of #157, and `[storage] retention` and `max_rows` prune them the same
+  way (a block's reason text does not outlive `retention`). No rule reads them yet
+  ([privacy](docs/privacy.md)).
+
 ### Internal
 
 - Removed the unread `Dispatched.first_suppression` field (#248 X2, #445). The engine still
