@@ -238,5 +238,16 @@ def test_block_until_follows_rule_4s_max_block() -> None:
 
     assert asks({"stale_blocks": {"max_block": "12h"}}).block_until == timedelta(hours=12)
     assert asks({"stale_blocks": {"max_block": False}}).block_until is None
+    # rule 4 cannot take the wait over: the reminders go on
+    without = {k: v for k, v in REGISTRY.items() if k != "stale_blocks"}
+    loaded = load_rules(EngineConfig(), without)
+    assert next(r for r in loaded.rules if r.name == "unanswered_asks").block_until is None
+    quiet = EngineConfig(modes={"unanswered_asks": Mode.SUGGEST})  # rule 4 only logs
+    loaded = load_rules(quiet)
+    assert next(r for r in loaded.rules if r.name == "unanswered_asks").block_until is None
+    both = EngineConfig(modes={"unanswered_asks": Mode.SUGGEST, "stale_blocks": Mode.SUGGEST})
+    loaded = load_rules(both)
+    found = next(r for r in loaded.rules if r.name == "unanswered_asks")
+    assert found.block_until == timedelta(hours=8)
     with pytest.raises(ConfigError, match="block_until is set automatically"):
         asks({"unanswered_asks": {"block_until": "1h"}})

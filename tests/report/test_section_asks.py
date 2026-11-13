@@ -139,3 +139,18 @@ def test_a_block_that_asks_an_agent_counts_from_when_it_was_set() -> None:
     text = section(report(asking, answered, later))
     assert "| architect-1 | 1 | 6.0 | `T-9` |" in text
     assert "ops-1" not in text
+
+
+def test_a_block_repeating_an_open_comment_ask_counts_once() -> None:
+    six = START + timedelta(hours=18)
+    asked = Task(
+        "T-6",
+        "task T-6",
+        Status.BLOCKED,
+        six,
+        owner_id="dev-1",
+        block=Block("@architect-1 which schema?", six),
+        comments=(said("dev-1", "@architect-1 which schema?", six - timedelta(hours=2)),),
+    )
+    text = section(report(asked))
+    assert "| architect-1 | 1 | 8.0 | `T-6` |" in text  # the comment ask, from 16:00

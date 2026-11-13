@@ -394,8 +394,8 @@ neither rule announces it.
 **Blocks that ask another agent go to `unanswered_asks`** (#461). A block whose reason asks
 another agent a question (`@architect-1 which schema version?`, no condition, not one rule
 13 lists) is a wait on that agent: [`unanswered_asks`](#unanswered_asks) reminds the agent
-while it is idle, and this rule sends no no-condition alert for it and leaves it out of
-block storms. Like a wait on a condition, it gets this rule's overdue alert once it has
+while it is idle, and this rule sends no no-condition alert for it and, while the agent is
+reminded, leaves it out of block storms. Like a wait on a condition, it gets this rule's overdue alert once it has
 waited `max_block` ("waiting for an answer from architect-1"), also when the agent stayed
 busy all along and was never reminded (that rule stops reminding then), and at once when
 that rule's window ended
@@ -1026,13 +1026,14 @@ before the snooze is not reminded again).
 
 **Asks in block reasons** (#461). An agent that blocks its task on a question to another
 agent ("@architect-1 which schema version?", with no condition linked to the block) asks
-too: the task's owner is the asker, the first agent mentioned (by name) the recipient, and
+too: the task's owner is the asker, the alphabetically first agent mentioned the recipient, and
 the ask opens when the block was set. It is answered by a comment of the recipient or of a
 person on the task since then, by the recipient naming the asker on another task of the
 same machine, or by the block clearing. Reminders follow the same steps and say the task is
 blocked on the question (`source: block`), up to rule 4's `max_block` (8h by default; set
-automatically, never in this section): from then on rule 4's overdue alert announces the
-wait, so one rule announces it at a time. Rule 4 sends no "nothing Kelpie can check" alert
+automatically, never in this section, and only while rule 4 is loaded and not in `observe`
+while this rule is not; else the reminders go on): from then on rule 4's overdue alert
+announces the wait, so one rule announces it at a time. Rule 4 sends no "nothing Kelpie can check" alert
 for such a block (see [stale_blocks](#4-stale_blocks)).
 
 **No double alerts.** Questions to people are rule 13's (`needs_you`, which also reads

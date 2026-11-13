@@ -163,13 +163,13 @@ def block_ask(
     agents: dict[str, list[Owner]] | None = None,
     answered: Replies | None = None,
 ) -> Ask | None:
-    """The ask in a blocked agent task's block reason, while unanswered: the reason
-    mentions another agent of the farm that serves the task and holds a question mark, and
-    the block has no condition (linked, or named and missing: a wait Kelpie checks is that
-    condition's) and is not Kelpie's own stop. The asker is the task's owner, an agent. The
-    first agent mentioned, by name, is the recipient. Whether the block asks a *person*
-    instead (rule 13's) is the caller's test. ``agents`` and ``answered`` may be passed in
-    once per tick (:func:`owners_by_name`, :func:`replies`)."""
+    """The ask in a blocked agent task's block reason, while unanswered: the reason mentions
+    another agent of the farm that serves the task and holds a question mark, and the block
+    has no condition (linked, or named and missing: a wait Kelpie checks is that condition's)
+    and is not Kelpie's own stop. The asker is the task's owner, an agent. Of the agents
+    mentioned, the first in alphabetical order is the recipient. Whether the block asks a
+    *person* instead (rule 13's) is the caller's test. ``agents`` and ``answered`` may be
+    passed in once per tick (:func:`owners_by_name`, :func:`replies`)."""
     block: Block | None = task.block
     if task.status is not Status.BLOCKED or block is None or block.kelpie is KelpieMark.STOP:
         return None

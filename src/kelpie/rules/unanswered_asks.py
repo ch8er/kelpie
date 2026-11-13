@@ -11,7 +11,7 @@ task, written by an agent (not a person, not Kelpie: adapters leave Kelpie's own
 out), that mentions another agent of the farm as ``@<owner id>`` (case-insensitive) and
 contains a question mark. Or a block reason (#461): an agent blocked its task on a question
 to another agent ("@architect-1 which schema version?"), with no condition linked to the
-block; the task's owner is the asker, the first agent mentioned (by name) the recipient,
+block; the task's owner is the asker, the alphabetically first agent mentioned the recipient,
 and the ask opens when the block was set. The recipient must be
 an agent owner in the snapshot (:class:`~kelpie.core.model.OwnerKind.AGENT`) that serves
 the task's machine; a mention of anyone else is no ask. On a multi-host farm owner ids are

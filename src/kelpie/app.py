@@ -1047,7 +1047,7 @@ def _rule_config(
         found = REGISTRY if registry is None else registry
         section = _with_inbox(name, section, config, found)
         if name == "unanswered_asks":
-            return _with_block_until(section, config)
+            return _with_block_until(section, config, found)
         return _with_asks(section, config, found) if name == "stale_blocks" else section
     if name == "needs_you":
         return _needs_you_section(section, config)
@@ -1106,17 +1106,27 @@ def _needs_you_section(section: dict[str, Any], config: EngineConfig) -> dict[st
 _LEAVES_TO_INBOX = frozenset({"stale_blocks", "wait_condition", "unanswered_asks"})
 
 
-def _with_block_until(section: dict[str, Any], config: EngineConfig) -> dict[str, Any]:
+def _with_block_until(
+    section: dict[str, Any], config: EngineConfig, registry: Mapping[str, RuleFactory]
+) -> dict[str, Any]:
     """``unanswered_asks`` reminds about a block that asks an agent until rule 4's
     ``max_block``, when rule 4's overdue alert takes it over (#461): one announcer at a
-    time. Set from ``[engine.rules.stale_blocks]``, never in this section."""
+    time. Only while rule 4 reaches people at least as far as this rule: it is loaded, and
+    it is not in ``observe`` while this rule is not; else this rule keeps reminding (no
+    limit), so the wait is never silent. Set from ``[engine.rules.stale_blocks]``, never in
+    this section."""
     if "block_until" in section:
         raise ValueError(
             "block_until is set automatically from [engine.rules.stale_blocks] max_block, "
             "not in [engine.rules.unanswered_asks]"
         )
+    takes_over = "stale_blocks" in registry and (
+        config.mode_for("stale_blocks") is not Mode.OBSERVE
+        or config.mode_for("unanswered_asks") is Mode.OBSERVE
+    )
     blocks = config.rules.get("stale_blocks", {})
-    section["block_until"] = blocks.get("max_block", StaleBlocks().max_block or False)
+    default = StaleBlocks().max_block or False
+    section["block_until"] = blocks.get("max_block", default) if takes_over else False
     return section
 
 
@@ -1156,13 +1166,13 @@ def _with_inbox(
     config: EngineConfig,
     registry: Mapping[str, RuleFactory],
 ) -> dict[str, Any]:
-    """Rule ``name`` (rule 4 or 2) leaves the tasks rule 13 lists as waiting for a person to
-    rule 13, while rule 13 reaches people: it is loaded, and it is not in ``observe`` while
-    ``name`` is not (else ``name``'s alerts would be the only ones a person gets). It then
-    gets rule 13's whole config section as ``needs_you`` (its reasons, the
-    ``[[block_conditions]]`` patterns and planned labels included), so the rules read the
-    farm alike; else ``needs_you = false``. Rule 13's section is checked here, so a mistake
-    in it is reported as rule 13's."""
+    """Rule ``name`` (rule 4, rule 2 or ``unanswered_asks``) leaves the tasks rule 13 lists as
+    waiting for a person to rule 13, while rule 13 reaches people: it is loaded, and it is not
+    in ``observe`` while ``name`` is not (else ``name``'s alerts would be the only ones a
+    person gets). It then gets rule 13's whole config section as ``needs_you`` (its reasons,
+    the ``[[block_conditions]]`` patterns and planned labels included), so the rules read the
+    farm alike; else ``needs_you = false``. Rule 13's section is checked here, so a mistake in
+    it is reported as rule 13's."""
     if "needs_you" in section:
         raise ValueError(
             "needs_you is set automatically from the rules' modes (whether rule 13 reaches "

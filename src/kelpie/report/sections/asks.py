@@ -54,12 +54,16 @@ def asks(ctx: SectionContext) -> Section | None:
     # Asks in block reasons (#461): a task still blocked on a question to another agent.
     agents = owners_by_name(snapshot, OwnerKind.AGENT)
     answered = replies(snapshot)
+    # One obligation per task, asker and recipient: a block that repeats a comment ask
+    # still open adds nothing.
+    pairs = {(a.task.id, a.asker.casefold(), a.recipient.id) for a in found}
     found += [
         ask
         for t in snapshot.tasks
         if t.block is not None
         and t.block.since < ctx.end
         and (ask := block_ask(t, snapshot, agents, answered)) is not None
+        and (t.id, ask.asker.casefold(), ask.recipient.id) not in pairs
     ]
     hours: dict[str, float] = defaultdict(float)
     counts: dict[str, int] = defaultdict(int)
