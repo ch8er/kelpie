@@ -955,18 +955,18 @@ Publish the open core: first public pre-release on PyPI and a container image.
 
 ### project: 10 conversations with farm owners
 labels: P1, week-3, area:project
-Validate demand: talk to 10 people who run agent farms (engineering teams with fleets of
-coding agents; self-hosted farms on Hermes, OpenClaw, Paperclip).
+Talk to 10 people who run agent farms (engineering teams with fleets of coding agents;
+self-hosted farms on Hermes, OpenClaw, Paperclip), as a source of incidents and requirements,
+not as demand validation.
 
-**Acceptance criteria**
-- [ ] 10 conversations held; notes kept without personal data in the repo
-- [ ] Top incidents and requested features summarized and compared with the 13 farm incidents
-- [ ] Follow-up issues filed for confirmed needs
+**Owner-only, tracked outside the roadmap.** No session can hold these conversations, so the
+criteria (10 conversations with notes kept without personal data, a summary compared with the
+plan's incidents, follow-up issues) moved to #471 (#446, #474). The plan keeps its line.
 
 ## Backlog (P1, after weeks 2–3, on the subscription)
 
 P1 work that the plan does not schedule in a week. Week 3 holds only the P1 items the
-plan lists there (token optimization, throughput metrics, 10 conversations).
+plan lists there (token optimization, throughput metrics; the 10 conversations are tracked in #471).
 
 ### actions: delegate a problem to the operator agent, verify the fix, tell the person
 labels: P1, area:core
@@ -1026,8 +1026,10 @@ Before publishing, check that the name is usable. The PyPI package is `kelpie-sr
 
 **Acceptance criteria**
 - [x] Domain availability checked and the result recorded (kelpie.dev/.io/.sh/.app taken; no domain needed for the open-source release)
-- [ ] USPTO search for conflicting marks in software classes recorded (manual; before any commercial use)
 - [x] Decision: keep the name or pick an alternative before the release (keep Kelpie, package `kelpie-sre`, owner decision Nov 2)
+
+The USPTO search for conflicting marks in classes 9 and 42 (manual; before any commercial use)
+is owner-only and tracked in #472 (#446, #474). The plan keeps its line.
 
 ### report: optional LLM root-cause section
 labels: P1, area:report
@@ -1152,11 +1154,9 @@ The GitHub Issues / Linear adapter was built against mocked HTTP and recorded sc
 human with the accounts checks, once, what the code assumes; findings become fixtures or
 fixes.
 
-**Acceptance criteria**
-- [ ] Copilot coding agent: the assignee login, its pull requests' author, whether assigning or unassigning through the REST API starts or stops it
-- [ ] Codex cloud and OpenHands: the accounts their pull requests come from; whether a label put back within a second restarts a label-triggered agent; whether comments from a `GITHUB_TOKEN` trigger agents
-- [ ] GitHub: the `dependencies/blocked_by` and `sub_issues` answers, and `labels=` scoping, on a real repository
-- [ ] Linear: one `kelpie doctor` run on a workspace; `X-Complexity` of the issue page and history queries; history order; attachment metadata `status`/`draft`; how fenced notes render; whether delegating again or a mention restarts an agent; whether a parent team's labels show on a sub-team's issues
+**Owner-only, tracked outside the roadmap.** The checks need live accounts (Copilot coding
+agent, Codex cloud and OpenHands, GitHub `blocked_by`/`sub_issues` and `labels=` scoping on a
+real repository, one Linear workspace run), so the criteria moved to #473 (#446, #474).
 
 ### instructions: counted skill loads, a report section and before/after for a split (#241 follow-up)
 labels: P1, area:traces

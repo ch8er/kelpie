@@ -247,6 +247,6 @@ Week plans hold P0 work plus the P1 items listed in week 3 above. Every other P1
 - the rest of #248, the code-health leftovers on the engine's dispatch and stop path (#445)
 - delegation cards on Claude Code
 - asks in block reasons and agents' comment questions to people (#461)
-- owner-only items: 10 conversations with farm owners, the USPTO search, live issue-agent and Linear checks (#446)
+- owner-only items, tracked as issues outside the roadmap (#446): 10 conversations with farm owners (#471), the USPTO search (#472), live issue-agent and Linear checks (#473)
 
 **In progress:** #445, #446 and #461 were decided on the owner's behalf (2026-11-12) and are being built for 0.1.0a5; the other items above have no PR open.
