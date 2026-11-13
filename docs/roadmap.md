@@ -1198,7 +1198,7 @@ comment questions to people since #461).
 - [x] Delivery not confirmed is `unknown`, never assumed failed or resent
 - [x] Fixtures: answered (no alert), unanswered with the recipient busy (no reminder), idle (one reminder), snoozed (silent until the date)
 - [x] The daily report counts agent-hours spent on unanswered asks, by recipient (the "Unanswered asks" section; #423)
-- [x] Asks from block reasons and comment asks to people (#461, decisions 1a and 2a: a block that asks another agent is `unanswered_asks`', and rule 4 treats it as a wait on that agent; rule 13 lists agents' comment questions to a person with their cost of delay; boundary fixtures `field-09-ask-in-block*`, `13-agent-comment-asks-a-person` and `tests/rules/test_ask_boundaries.py`; #PRNUM)
+- [x] Asks from block reasons and comment asks to people (#461, decisions 1a and 2a: a block that asks another agent is `unanswered_asks`', and rule 4 treats it as a wait on that agent; rule 13 lists agents' comment questions to a person with their cost of delay; boundary fixtures `field-09-ask-in-block*`, `13-agent-comment-asks-a-person` and `tests/rules/test_ask_boundaries.py`; #476)
 
 ### docs: reconcile the roadmap with what is merged
 labels: P1, documentation
