@@ -372,7 +372,7 @@ class Engine:
             log.info("suppressed (%s): %s", why, action)
             if first and why is Suppression.RATE_LIMIT:
                 self._notice(why, action, snapshot)
-            dispatched = Dispatched(action, mode, Outcome.SUPPRESSED, why, first)
+            dispatched = Dispatched(action, mode, Outcome.SUPPRESSED, why)
         else:
             self._detail = None
             try:

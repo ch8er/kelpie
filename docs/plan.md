@@ -244,7 +244,7 @@ Week plans hold P0 work plus the P1 items listed in week 3 above. Every other P1
 - status history in storage for owners, blocks and conditions (task statuses are recorded, #157)
 - instruction files measured on `kelpie agent` hosts
 - the live-run record: 48 h of rules 1–4 in `act` on a real farm, through `docs/act-checklist.md`
-- the rest of #248, the code-health leftovers on the engine's dispatch and stop path (#445)
+- the rest of #248: profiling the daily report, the span store and a long ledger; the duplicate-code report
 - delegation cards on Claude Code
 - asks in block reasons and agents' comment questions to people (#461)
 - owner-only items: 10 conversations with farm owners, the USPTO search, live issue-agent and Linear checks (#446)

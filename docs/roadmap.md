@@ -899,7 +899,7 @@ change user-facing messages).
 - [x] Per-tick time budget as a test (fails if a tick on the large farm exceeds it) (`tests/perf/test_tick_budget.py` on a synthetic 2,000-task farm, SQLite and in-memory ledgers, plus a busy tick of ~19,000 actions, #457)
 - [ ] Duplicate-code report (e.g. pylint duplicate-code or jscpd) before and after; shared helpers consolidated in core/ or the owning package (survey by AST pass; one helper consolidated, #263)
 - [x] No behaviour change: unit and e2e suites pass unchanged; one refactor per PR, each small enough to review (#262, #263)
-- [ ] Dead code and unused config keys removed; CLAUDE.md layout updated if modules move (found in the survey, X1–X4; not removed)
+- [x] Dead code and unused config keys removed; CLAUDE.md layout updated if modules move (X1, X3, X4 and X6 of the survey removed in #412, X2 in #PRNUM; X5 are false positives; no module moved)
 
 ### project: whole-codebase security audit before the first public release
 labels: P0, week-3, area:project
