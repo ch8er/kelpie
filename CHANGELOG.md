@@ -61,8 +61,10 @@ These are the release notes for the tag, ahead of what changed.
 - **If `loop_breaker` (rule 10) runs in `act`**, this release changes its evidence path:
   the hook spool is read incrementally with new caps, a run's liveness ignores Hermes spool
   lines dated ahead, and hook spans pair with OTLP spans only within an ingest token's
-  scope. Per [docs/act-checklist.md](docs/act-checklist.md#rare-safety-rules-rule-10-on-hermes),
-  put it back in `observe` before upgrading. On Hermes run `kelpie selftest stop --adapter
+  scope. Its logic and thresholds are unchanged, but we recommend treating the upgrade as a
+  change to the rule under
+  [docs/act-checklist.md](docs/act-checklist.md#rare-safety-rules-rule-10-on-hermes): put it
+  back in `observe` before upgrading. On Hermes run `kelpie selftest stop --adapter
   hermes` after upgrading (every step `PASS`) and wait 72 h in `observe` with no false
   positive before `act` again; on Claude Code and OpenClaw (no self-test yet) the
   checklist's general gate applies again.
@@ -83,7 +85,8 @@ These are the release notes for the tag, ahead of what changed.
   - Linear: a task whose time Kelpie counts from when it first saw it now counts again
     from its last workflow state change.
   - New startup refusals only for new opt-in settings: a weak per-agent conditions token
-    or one equal to the shared token, `[conditions]` or `chat_answers` with `[hub]`, a
+    or one equal to the shared token, `[conditions]` with `[hub]` or `[agent]`,
+    `chat_answers` with `[hub]`, a
     `delegate_to` naming an agent the hub does not know or a bare adapter name, `[view]`
     off loopback without a strong token.
 
@@ -103,7 +106,7 @@ These are the release notes for the tag, ahead of what changed.
 - **M7, what is left:** one acting instance per board is enforced on one machine, not
   across machines or users for a GitHub repository or Linear team. Run one acting Kelpie
   per tracker.
-- Audit #336's L4, L13 and L14 are fixed in this release (below). Details of what is
+- Audit #275's L4, L13 and L14 (#336) are fixed in this release (below). Details of what is
   left: [docs/security.md](docs/security.md#known-residual-risks).
 
 **Think before exposing `kelpie serve` off loopback**, as before: `/metrics` and `/healthz`
@@ -144,8 +147,8 @@ notes below first.
   is deprecated: `kelpie doctor` warns ("conditions tokens per agent") while it is set, and
   it is no longer required when per-agent tokens are configured. New metric
   `kelpie_conditions_requests_total{code}`.
-- Every listener bound to loopback (the main port's `/metrics`, `/healthz` and
-  `/v1/traces`, a loopback hub, `[view]` and the `kelpie agent` OTLP relay) answers 421 to
+- Every listener bound to loopback (the main port's `/metrics`, `/healthz`, `/v1/traces`
+  and `/v1/metrics`, a loopback hub, `[view]` and the `kelpie agent` OTLP relay) answers 421 to
   a request addressed to a name other than `localhost`, a loopback IP, its bind address or
   a name in the new `[server] hosts`: a web page could rebind its own name to 127.0.0.1 and
   read `/metrics` or the farm view, or post forged spans to a tokenless ingest, through the
@@ -192,7 +195,8 @@ notes below first.
   GitHub Actions (`docker buildx imagetools inspect`, checked for linux/amd64 and
   linux/arm64) and opens a PR writing `image:tag@sha256:…` into the Dockerfile
   (`scripts/pin_base_images.py`); Dependabot's `docker` ecosystem keeps the digests
-  current, and a test fails on a base image that is not pinned (audit L14, #336).
+  current, and a test fails on a base image that is not pinned. The Dockerfile is now
+  pinned (audit L14, #336).
 - `unanswered_asks` reminders count toward `[engine] max_actions_per_task_per_hour` on a
   budget of their own per task (`Action.own_budget`), not the task's: one comment
   mentioning many agents (an honest broadcast, or an agent dodging a stop) gave one alert
@@ -372,7 +376,8 @@ notes below first.
   re-run (a human's decision) or a held run (an approval, a concurrency group). Right
   before the cancel it re-reads the run (still active and unheld, same attempt and commit)
   and the check's runs on that commit outside the cache (the last to finish ended in
-  `failure`, none running); otherwise it does nothing.
+  `failure`, none running); otherwise it does nothing. Until now it refused every
+  fail-fast cancel.
 - Rule `unanswered_asks` (P1, #297, observe by default): an agent's `@question` to another
   agent in a task comment is an obligation until the recipient (or a person) answers.
   Kelpie reminds only while the recipient is idle, at most once per step (`steps`, default

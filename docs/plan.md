@@ -208,7 +208,7 @@ Three weeks, three steps: the core with traces and the first adapter, the full r
 - [x] Repository, `CLAUDE.md`, cloud environment, fixtures from the farm incidents
 - [ ] Core: model of tasks, statuses, owners, conditions and resources — in use by every rule; shared conditions, block categories, status history and event-count windows are in; the model gaps item is open (sessions tied to a host, owner availability)
 - [x] Traces: OTLP intake following GenAI semantic conventions, storage, export to Langfuse
-- [ ] Checkpoints: commit reminders, WIP commit on exit, resume from the last commit — the resume note carries a short git log and reaches the next Hermes session's prompt through the comment thread; the Hermes adapter makes the WIP commit locally and never pushes it (#399)
+- [x] Checkpoints: commit reminders, WIP commit on exit, resume from the last commit — the resume note carries a short git log and reaches the next Hermes session's prompt through the comment thread; the Hermes adapter makes the WIP commit locally and never pushes it (#399)
 - [x] Hermes adapter: hooks and reading `kanban.db`
 - [x] Rules: exit contract, "wait for condition", orphan statuses, stale blocks
 
@@ -229,7 +229,7 @@ Three weeks, three steps: the core with traces and the first adapter, the full r
 - [x] Token optimization recommendations (cache breaks, model fit per role, diff-only review) and throughput metrics
 - [x] Multi-host: `kelpie agent` on each agent machine, central `kelpie serve` anywhere (blocks the release)
 - [ ] Code health after the live run is debugged: performance profile, duplicate code, refactoring — the survey and the release-safe part are done (#248); the rest is after the release
-- [ ] Whole-codebase security audit after the code-health pass (blocks the release) — the audit is done (#275) and no critical or high finding is open; every other finding is fixed except what is left of M1 (narrowed by per-agent tokens, #302) and M7 (enforced per machine), both documented in `docs/security.md`
+- [x] Whole-codebase security audit after the code-health pass (blocks the release) — the audit is done (#275) and no critical or high finding is open; every other finding is fixed except what is left of M1 (narrowed by per-agent tokens, #302) and M7 (enforced per machine), both documented in `docs/security.md`
 - [x] `kelpie demo`: the farm simulator replays real incidents so anyone can see Kelpie work in two minutes without a farm
 - [x] Documentation and publication of the open core — the guides, quickstarts, `docs/security.md`, the release workflow and the changelog are in place; published as 0.1.0a1–a4 on PyPI and GHCR
 - [ ] 10 conversations with farm owners
@@ -240,11 +240,13 @@ Week plans hold P0 work plus the P1 items listed in week 3 above. Every other P1
 
 **Open after 0.1.0a4:**
 
-- the rest of the model gaps: sessions tied to a host, owner availability
+- the rest of the model gaps: sessions tied to a host, owner availability, the fixtures migrated to the new fields
+- status history in storage for owners, blocks and conditions (task statuses are recorded, #157)
+- instruction files measured on `kelpie agent` hosts
 - the live-run records: 24 h in `observe` and 48 h in `act` on a real farm (#444)
 - the rest of #248, the code-health leftovers on the engine's dispatch and stop path (#445)
 - delegation cards on Claude Code
 - asks in block reasons and agents' comment questions to people (#461)
 - owner-only items: 10 conversations with farm owners, the USPTO search, live issue-agent and Linear checks (#446)
 
-**In progress:** nothing beyond the open decisions above (#444, #445, #446, #461).
+**In progress:** none of the items above has a PR open; #444, #445, #446 and #461 wait on the owner's decision.
