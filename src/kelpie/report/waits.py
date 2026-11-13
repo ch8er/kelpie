@@ -86,7 +86,7 @@ WAIT_CAUSES: Mapping[str, str] = {
     "ci_outage": "a shared CI failure (an outage of the CI or of the base branch)",
     "shared_blocker": "a shared blocker (many tasks blocked on the same reason)",
     "shared_tool_failure": "a shared tool failure (one tool failing the same way for many tasks)",
-    "people": "people (approvals, human tasks)",
+    "people": "people (approvals, questions, human tasks)",
     "snoozed": "snoozed (deliberate)",
     "hold": "holds",
     "quota": "LLM quotas",

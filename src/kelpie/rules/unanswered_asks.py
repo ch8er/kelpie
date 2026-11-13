@@ -58,19 +58,24 @@ already reminded before the snooze is not reminded again).
 
 - Questions to *people* are rule 13's (``needs_you``): a person is never a recipient here,
   and an asking task with a block that asks a person (:func:`asks_a_person` with rule 13's
-  default ``approval_reasons``, not a customised ``[engine.rules.needs_you]``) is left to
-  rule 13's digest.
+  settings while it reaches people, ``needs_you``, else its defaults) is left to rule 13's
+  digest. Rule 13 reads agents' comment questions to people itself (#461, decision 2a).
 - A *blocked* asking task is rule 4's (``stale_blocks``) or rule 13's: one of them already
   announces the block (no condition, overdue, a dead end, or the person's digest), so its
   comment asks are not reminded here. A *waiting* one is rule 2's (``wait_condition``,
   overdue). Comment asks are reminded only on tasks that are not blocked or waiting
   (backlog, ready, in progress, review, accepted), so a wait is announced by one rule.
 - A *block that asks another agent* is this rule's (#461, decision 1a): a wait on that
-  agent, reminded here, and rule 4 sends no "nothing Kelpie can check" alert for it while
-  this rule reminds about it (``kelpie.app`` gives rule 4 this rule's settings while this
-  rule reaches agents: it is loaded and not in ``observe`` while rule 4 is not), nor counts
-  it in a block storm. Once the ask is answered and the block stays, or once it is past
-  ``stop_after``, rule 4 alerts as on any block (saying the question went unanswered).
+  agent, reminded here while the agent is idle. Rule 4 treats it as a wait, like a block
+  waiting on a condition (``kelpie.app`` gives rule 4 this rule's settings while this rule
+  reaches agents: it is loaded and not in ``observe`` while rule 4 is not): no "nothing
+  Kelpie can check" alert and no block storm, but its overdue alert once the block has
+  waited its ``max_block`` (8h), also when the agent stayed busy and was never reminded,
+  or at once when the ask is past this rule's window (``stop_after`` or six days). This rule
+  stops reminding about a block ask at rule 4's ``max_block`` (``block_until``, set by
+  ``kelpie.app``), so one rule announces the wait at a time. Once the
+  ask is answered and the block stays, rule 4 alerts as on any block. Each reminder is per
+  task: five tasks blocked on the same question to one agent give five reminders per step.
   A block rule 13 lists (it asks a person, by rule 13's own settings while rule 13 reaches
   people, ``needs_you``; else by its defaults) is rule 13's, not an ask here.
 - Rule 6 (``bottlenecks``) counts idle agents; it never says that one of them owes an answer.
@@ -134,6 +139,10 @@ class UnansweredAsks:
     # Rule 13 as it reaches people (kelpie.app sets it from needs_you's config while it
     # does), or None: the blocks it lists are left to it, as rule 4 leaves them.
     inbox: needs_you.NeedsYou | None = None
+    # How long a block that asks an agent is this rule's to remind about: rule 4's
+    # ``max_block`` (kelpie.app sets it), after which rule 4's overdue alert takes it over
+    # (#461), so a wait is announced by one rule at a time. None: no such limit.
+    block_until: timedelta | None = None
     name: str = NAME
 
     def evaluate(self, snapshot: Snapshot) -> Sequence[Action]:
@@ -171,17 +180,22 @@ class UnansweredAsks:
         ]
         return found + list(self.block_asks(snapshot).values())
 
-    def block_asks(self, snapshot: Snapshot) -> dict[str, Ask]:
+    def block_asks(
+        self, snapshot: Snapshot, listed: frozenset[str] | None = None
+    ) -> dict[str, Ask]:
         """The unanswered asks in block reasons this rule announces, by task id
         (:func:`kelpie.rules._asks.block_ask`): every one, except a block rule 13 lists
         while it reaches people (:func:`~kelpie.rules.needs_you.inbox_task_ids`), else a
         block that asks a person by rule 13's default test. Rule 4 sends no "nothing Kelpie
-        can check" alert for these while :meth:`within` holds (#461)."""
+        can check" alert for these (#461). ``listed``: rule 13's
+        :func:`~kelpie.rules.needs_you.inbox_task_ids` with this rule's ``inbox``, when the
+        caller has it already (computed here otherwise)."""
         agents = _asks.owners_by_name(snapshot, OwnerKind.AGENT)
         if not agents:
             return {}
         answered = _asks.replies(snapshot)
-        listed = needs_you.inbox_task_ids(snapshot, self.inbox) if self.inbox is not None else None
+        if listed is None and self.inbox is not None:
+            listed = needs_you.inbox_task_ids(snapshot, self.inbox)
         found: dict[str, Ask] = {}
         for task in snapshot.tasks:
             ask = _asks.block_ask(task, snapshot, agents, answered)
@@ -195,12 +209,21 @@ class UnansweredAsks:
         return found
 
     def within(self, ask: Ask, snapshot: Snapshot) -> bool:
-        """Whether the ask is still this rule's to remind about: less than ``stop_after`` of
-        the task host's awake time and six days of wall-clock time old."""
-        if task_awake(ask.task, ask.comment.at, snapshot) >= self.stop_after:
+        """Whether the ask is still this rule's to remind about: not :meth:`expired`, and
+        for a block ask less than ``block_until`` (rule 4's ``max_block``) since the block
+        was set: rule 4's overdue alert has it after that."""
+        if self.expired(ask, snapshot):
             return False
-        # a host that slept a lot: the ledger's once-window is wall-clock
-        return snapshot.now - ask.comment.at < MAX_STOP_AFTER
+        late = self.block_until is not None and snapshot.now - ask.comment.at >= self.block_until
+        return not (ask.in_block and late)
+
+    def expired(self, ask: Ask, snapshot: Snapshot) -> bool:
+        """Whether the ask is old news: ``stop_after`` of the task host's awake time, or six
+        days of wall-clock time (a host that slept a lot: the ledger's once-window is
+        wall-clock)."""
+        if task_awake(ask.task, ask.comment.at, snapshot) >= self.stop_after:
+            return True
+        return snapshot.now - ask.comment.at >= MAX_STOP_AFTER
 
     def _live_owners(self, snapshot: Snapshot) -> set[str]:
         return {
@@ -325,6 +348,9 @@ def build(config: dict[str, Any]) -> UnansweredAsks:
         )
     if "needs_you" in config:
         kwargs["inbox"] = needs_you.hand_off(config.pop("needs_you"))
+    if "block_until" in config:
+        value = config.pop("block_until")
+        kwargs["block_until"] = None if value is False else _duration(value, "block_until")
     if config:
         raise ValueError(f"unknown parameters: {sorted(config)}")
     return UnansweredAsks(**kwargs)

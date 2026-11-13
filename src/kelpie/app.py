@@ -1038,13 +1038,16 @@ def _rule_config(
     inherits ``wait_condition``'s ``poll_patterns`` unless it sets its own; ``orphan_status``
     inherits ``bottlenecks``' hold labels, ``needs_you`` its planned and hold labels as
     ``planned_labels`` (one definition of a planned wait), and ``return_causes``
-    ``conflict_warning``'s ``expected_shared`` the same way. ``stale_blocks`` and
-    ``wait_condition`` always read ``needs_you``'s settings (see :func:`_with_inbox`);
+    ``conflict_warning``'s ``expected_shared`` the same way. ``stale_blocks``,
+    ``wait_condition`` and ``unanswered_asks`` always read ``needs_you``'s settings (see
+    :func:`_with_inbox`), and ``stale_blocks`` ``unanswered_asks``' (:func:`_with_asks`);
     ``registry`` holds the rules being loaded (default: every registered one)."""
     section = dict(config.rules.get(name, {}))
     if name in _LEAVES_TO_INBOX:
         found = REGISTRY if registry is None else registry
         section = _with_inbox(name, section, config, found)
+        if name == "unanswered_asks":
+            return _with_block_until(section, config)
         return _with_asks(section, config, found) if name == "stale_blocks" else section
     if name == "needs_you":
         return _needs_you_section(section, config)
@@ -1101,6 +1104,20 @@ def _needs_you_section(section: dict[str, Any], config: EngineConfig) -> dict[st
 # Rules that leave the tasks rule 13 lists to it, with its settings (``needs_you``): rule 4
 # for blocks (#169), rule 2 for waits (#213), unanswered_asks for blocks that ask (#461).
 _LEAVES_TO_INBOX = frozenset({"stale_blocks", "wait_condition", "unanswered_asks"})
+
+
+def _with_block_until(section: dict[str, Any], config: EngineConfig) -> dict[str, Any]:
+    """``unanswered_asks`` reminds about a block that asks an agent until rule 4's
+    ``max_block``, when rule 4's overdue alert takes it over (#461): one announcer at a
+    time. Set from ``[engine.rules.stale_blocks]``, never in this section."""
+    if "block_until" in section:
+        raise ValueError(
+            "block_until is set automatically from [engine.rules.stale_blocks] max_block, "
+            "not in [engine.rules.unanswered_asks]"
+        )
+    blocks = config.rules.get("stale_blocks", {})
+    section["block_until"] = blocks.get("max_block", StaleBlocks().max_block or False)
+    return section
 
 
 def _with_asks(

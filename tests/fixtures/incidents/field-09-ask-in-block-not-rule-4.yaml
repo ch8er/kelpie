@@ -4,12 +4,14 @@ title: "A block that asks another agent is a wait on that agent, not a block not
 description: >
   The other side of field-09-ask-in-block: while rule unanswered_asks reminds agents, rule 4
   sends no "nothing Kelpie can check" alert for a block that asks another agent a question:
-  it is a wait on that agent, and one rule announces it (#461). A plain block, a block whose
-  question was answered, and a question nobody answered within the reminder window (3 days
-  of awake time) still get rule 4's alert, the last saying it is no longer reminded.
+  it is a wait on that agent, which that rule reminds (#461). Like a wait on a condition, it
+  gets rule 4's overdue alert once it has waited max_block (8h), even if the agent stayed
+  busy, or at once past the reminder window (3 days of awake time). A plain block and a
+  block whose question was answered get rule 4's no-condition alert as before.
 rule: stale_blocks
 config:
   unlinked_alert_after: "4h"
+  max_block: "8h"
   needs_you: {}
   unanswered_asks: {steps: ["1h", "4h", "12h", "24h"], stop_after: "3d"}
 snapshot:
@@ -46,6 +48,14 @@ snapshot:
       block: {reason: "@architect-1 is a 5 minute TTL acceptable?", since: "2026-03-05T09:00:00+00:00"}
       comments:
         - {author: architect-1, text: "Yes, 5 minutes.", at: "2026-03-05T10:00:00+00:00"}
+    # Waiting 11h on the architect, past max_block: rule 4's overdue alert, naming it.
+    - id: T-925
+      title: "Pick the queue library"
+      status: blocked
+      status_since: "2026-03-05T04:00:00+00:00"
+      role: developer
+      owner_id: agent-dev-2
+      block: {reason: "@architect-1 kafka or nats?", since: "2026-03-05T04:00:00+00:00"}
     # Unanswered for 4 days: past the reminder window, rule 4 alerts and says so.
     - id: T-924
       title: "Split the billing module"
@@ -63,7 +73,11 @@ expected_actions:
     reason_contains: "has no condition Kelpie can check"
   - kind: alert
     task_id: T-924
-    reason_contains: "Its question to architect-1 has had no answer in 72h of awake time"
+    reason_contains: "past the reminder window and no longer reminded"
+    params: {asks: architect-1}
+  - kind: alert
+    task_id: T-925
+    reason_contains: "waiting for an answer from architect-1"
     params: {asks: architect-1}
 not_expected_actions:
   - kind: alert

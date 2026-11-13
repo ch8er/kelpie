@@ -234,7 +234,8 @@ def test_the_report_headlines_the_biggest_wait() -> None:
     titles = [a.title for a in report.recommendations]
     assert "Cut the reviewer wait for CI" in titles
     assert "**Waiting for conditions, by cause**" in markdown
-    assert "- developer: people (approvals, human tasks) 32.0 (2); holds 16.0 (1);" in markdown
+    people = "people (approvals, questions, human tasks) 32.0 (2)"
+    assert f"- developer: {people}; holds 16.0 (1);" in markdown
 
 
 def test_the_summary_items_lead_with_the_biggest_wait() -> None:

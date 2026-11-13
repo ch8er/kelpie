@@ -269,7 +269,7 @@ board the report is unchanged.
   not added" (the headline is the sum of the lines). Two causes are in agent-hours
   instead: forgotten holds (rule 6) count the idle agent-hours behind them, from the idle
   agents rule 6 reports while the hold stays open, and a person's inbox (rule 13) counts
-  the agent-hours of the agent tasks waiting on them (approvals, human tasks); a human
+  the agent-hours of the agent tasks waiting on them (approvals, questions, human tasks); a human
   gate rule 6 also reports counts in both lines. Cards stuck in a pre-work status such as
   triage or scheduled while other tasks wait on them (rule 3) are a line of their own; a
   card rule 3 finds stuck (past `prework_after`, not held, ignored or queued behind its

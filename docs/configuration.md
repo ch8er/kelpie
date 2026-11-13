@@ -395,10 +395,14 @@ neither rule announces it.
 another agent a question (`@architect-1 which schema version?`, no condition, not one rule
 13 lists) is a wait on that agent: [`unanswered_asks`](#unanswered_asks) reminds the agent
 while it is idle, and this rule sends no no-condition alert for it and leaves it out of
-block storms, as long as that rule reminds about it (until its `stop_after`, 3 days of
-awake time). Once the agent answered on the task (or a person did) and the block stays, or
-once the question is past `stop_after`, this rule alerts as on any block; the latter says
-the question went unanswered and carries `asks` (the agent asked). The hand-off applies
+block storms. Like a wait on a condition, it gets this rule's overdue alert once it has
+waited `max_block` ("waiting for an answer from architect-1"), also when the agent stayed
+busy all along and was never reminded (that rule stops reminding then), and at once when
+that rule's window ended
+(`stop_after`, 3 days of awake time, or six days of wall-clock time); both carry `asks` (the
+agent asked). Once the agent answered on the task (or a person did) and the block stays,
+this rule alerts as on any block. Five tasks blocked on the same question to one agent get
+five reminders per step, not one storm. The hand-off applies
 only while `unanswered_asks` reaches agents (loaded, and not in `observe` while this rule is
 not); Kelpie decides that from the modes, so `unanswered_asks` is not a key to set here.
 
@@ -803,7 +807,9 @@ Everything waiting for a person, one escalation per person, sorted by cost of de
   asked person's item (`kind: question`, `needed` the question, capped at 300 characters,
   `asker`), and the asking task counts as waiting on them, like an approval; `questions`
   lists these items' tasks. One item per task and person; a task already the person's item
-  gets no second line. `unanswered_asks` never reminds a person, so a person has one inbox.
+  gets no second line. A task that blocks or waits later drops its question from the digest:
+  its block or wait is announced instead. `unanswered_asks` never reminds a person, so a
+  person has one inbox.
 
 Only agent tasks that wait on the human task itself add to its cost; work deeper in the
 chain counts in the number held. The alert is a long-lived state per person: announced
@@ -1024,8 +1030,10 @@ too: the task's owner is the asker, the first agent mentioned (by name) the reci
 the ask opens when the block was set. It is answered by a comment of the recipient or of a
 person on the task since then, by the recipient naming the asker on another task of the
 same machine, or by the block clearing. Reminders follow the same steps and say the task is
-blocked on the question (`source: block`); rule 4 sends no "nothing Kelpie can check" alert
-for such a block while this rule reminds about it (see [stale_blocks](#4-stale_blocks)).
+blocked on the question (`source: block`), up to rule 4's `max_block` (8h by default; set
+automatically, never in this section): from then on rule 4's overdue alert announces the
+wait, so one rule announces it at a time. Rule 4 sends no "nothing Kelpie can check" alert
+for such a block (see [stale_blocks](#4-stale_blocks)).
 
 **No double alerts.** Questions to people are rule 13's (`needs_you`, which also reads
 agents' comment questions to people): a person is never a recipient, and a block that asks

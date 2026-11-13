@@ -15,13 +15,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
   schema version?", no condition) now opens an `unanswered_asks` obligation: the agent asked
   is reminded while it is idle (`source: block`), and rule 4 (`stale_blocks`) no longer
   alerts "nothing Kelpie can check" on that block, nor counts it in a block storm, while
-  the reminders run; once the question is answered and the block stays, or it is past
-  `stop_after`, rule 4 alerts as before (saying the question went unanswered, `asks`).
+  the agent is reminded. Like a wait on a condition, it gets rule 4's overdue alert after
+  `max_block` ("waiting for an answer from …", `asks`), also when the agent stayed busy, and
+  the reminders stop then; once answered with the block still set, rule 4 alerts as before.
   Rule 13 (`needs_you`) now also lists an agent's unanswered comment question to a person
   (`@<human owner>` with a question mark, on a task that is not blocked or waiting) as that
   person's item (`kind: question`, `asker`, `questions`), with its cost of delay. Each wait
   has one announcer: `kelpie.app` gives rule 4 the asks rule's settings, and the asks rule
-  rule 13's, from the rules' modes, as rule 4 already gets rule 13's.
+  rule 13's, from the rules' modes, as rule 4 already gets rule 13's. The daily report's
+  "Unanswered asks" counts block asks too. A farm that already runs `needs_you` in
+  `suggest` or `act` gets question items in its digests at once (there is no separate
+  switch); set `[engine.modes] needs_you = "observe"` first to watch them.
 
 ### Changed
 

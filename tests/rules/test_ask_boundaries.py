@@ -210,3 +210,33 @@ def test_the_asks_rule_leaves_rule_13s_blocks_with_customised_reasons() -> None:
     assert {t: sorted(r) for t, r in _announcers(snapshot_from_dict(farm), rules).items()} == {
         "T-8": ["needs_you"]
     }
+
+
+def test_past_max_block_rule_4_takes_the_block_ask_over() -> None:
+    """At rule 4's max_block (8h) the reminders stop and rule 4's overdue alert names the
+    agent: one announcer at a time, also when the agent stayed busy."""
+    ten = "2026-03-05T05:00:00+00:00"
+    farm = dict(FARM)
+    farm["tasks"] = [
+        _task("T-9", "blocked", "agent-dev-1", ten, block=_block("@architect-1 kafka?", ten))
+    ]
+    rules = _rules()
+    assert rules["unanswered_asks"].block_until == timedelta(hours=8)
+    snapshot = snapshot_from_dict(farm)
+    assert {t: sorted(r) for t, r in _announcers(snapshot, rules).items()} == {
+        "T-9": ["stale_blocks"]
+    }
+    [overdue] = rules["stale_blocks"].evaluate(snapshot)
+    assert "waiting for an answer from architect-1" in overdue.reason
+    assert "no longer reminded" not in overdue.reason
+
+
+def test_block_until_follows_rule_4s_max_block() -> None:
+    def asks(rules: dict[str, Any]) -> UnansweredAsks:
+        loaded = load_rules(EngineConfig(rules=rules))
+        return next(r for r in loaded.rules if r.name == "unanswered_asks")
+
+    assert asks({"stale_blocks": {"max_block": "12h"}}).block_until == timedelta(hours=12)
+    assert asks({"stale_blocks": {"max_block": False}}).block_until is None
+    with pytest.raises(ConfigError, match="block_until is set automatically"):
+        asks({"unanswered_asks": {"block_until": "1h"}})
