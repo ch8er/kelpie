@@ -7,7 +7,7 @@ maintained release branches.
 
 | Version | Supported |
 |---------|-----------|
-| the latest release (`0.1.0a3`) | Yes |
+| the latest release (`0.1.0a4`) | Yes |
 | `main`  | Yes       |
 | anything else | No  |
 
