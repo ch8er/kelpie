@@ -304,8 +304,9 @@ CREATE INDEX task_transitions_at ON task_transitions (at);
 # one changes (``value`` canonical JSON, NULL for none: no owner, no block), or is first
 # seen set. ``kind`` is owner | block | condition; ``subject`` the task id (a condition's
 # id). ``at`` is the tick that saw it, ``after_at`` the last time the old value was seen.
-# A block's reason (an agent's text) is stored cut to 500 characters. Pruned with the
-# ledger's ``[storage] retention`` and ``max_rows``, keeping each fact's value at the cut.
+# A block's reason (an agent's text) is stored cut to 500 characters, with its hash. Pruned
+# with the ledger's ``[storage] retention`` and ``max_rows``, keeping each fact's value at
+# the cut without the reason text (its hash stays).
 _V13 = """
 CREATE TABLE fact_changes (
     id       INTEGER PRIMARY KEY,
@@ -313,7 +314,6 @@ CREATE TABLE fact_changes (
     kind     TEXT NOT NULL,
     subject  TEXT NOT NULL,
     value    TEXT,
-    previous TEXT,
     after_at TEXT,
     board    TEXT,
     source   TEXT
@@ -1812,8 +1812,8 @@ def read_transitions(db: sqlite3.Connection, start: datetime, end: datetime) -> 
     return [status_change(r) for r in rows]
 
 
-_FACT_COLUMNS = "at, kind, subject, value, previous, after_at, board, source"
-_INSERT_FACT = f"INSERT INTO fact_changes ({_FACT_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+_FACT_COLUMNS = "at, kind, subject, value, after_at, board, source"
+_INSERT_FACT = f"INSERT INTO fact_changes ({_FACT_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?)"
 _LAST_FACTS = (
     "SELECT * FROM fact_changes WHERE id IN (SELECT MAX(id) FROM fact_changes"
     " GROUP BY kind, subject)"
@@ -1826,7 +1826,6 @@ def _fact_row(c: FactChange) -> tuple[object, ...]:
         str(c.kind),
         c.subject,
         c.value,
-        c.previous,
         _opt_ts(c.after),
         c.board,
         c.source,
@@ -1839,7 +1838,6 @@ def fact_change(r: sqlite3.Row) -> FactChange:
         kind=FactKind(r["kind"]),
         subject=r["subject"],
         value=r["value"],
-        previous=r["previous"],
         after=None if r["after_at"] is None else datetime.fromisoformat(r["after_at"]),
         board=r["board"],
         source=r["source"],
@@ -2091,7 +2089,8 @@ class SqliteLedgerPruner:
     ) -> int:
         """Delete observed owner, block and condition changes seen more than ``retention``
         before ``now``, except each fact's newest one before that cut (its value at the cut,
-        and what a restart compares with); then, while more than ``max_rows`` are left, the
+        and what a restart compares with), whose block reason text is removed (its hash
+        stays); then, while more than ``max_rows`` are left, the
         oldest seen at least ``keep`` before ``now`` (rows that are not a fact's newest
         first). Returns the rows deleted."""
         cut = _ts(now - retention)
@@ -2101,6 +2100,13 @@ class SqliteLedgerPruner:
             " (SELECT MAX(id) FROM fact_changes WHERE at < ? GROUP BY kind, subject)"
             " ORDER BY at LIMIT ?)",
             (cut, cut),
+        )
+        # what is kept from before the cut keeps no agent text: a block's reason goes
+        self._delete(
+            "UPDATE fact_changes SET value = json_remove(value, '$.reason') WHERE id IN"
+            " (SELECT id FROM fact_changes WHERE at < ? AND kind = 'block'"
+            " AND json_type(value, '$.reason') IS NOT NULL LIMIT ?)",
+            (cut,),
         )
         floor = _ts(now - keep)
         excess = self._count_rows("fact_changes") - max(0, max_rows)

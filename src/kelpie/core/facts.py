@@ -11,7 +11,7 @@ changed. This records the other facts a board reports only as they are now:
 On every tick the control loop compares each fact with the last one recorded for it and
 stores a :class:`FactChange` only when it differs. A fact that was never recorded counts
 as none (no owner, no block): a task first seen without an owner or a block records
-nothing, one first seen with them records a row (``previous`` None). Something missing from
+nothing, one first seen with them records a row. Something missing from
 a snapshot (a board not read this tick, a task archived, a condition no connector reports
 any more) records nothing: absence is not a value. Kelpie never writes to the board.
 
@@ -23,21 +23,30 @@ rule that needs it reads the store (or gets a snapshot field) when it does.
 **Restarts and gaps.** The last record per fact is read back from the store when the
 recorder starts, so a restart records no change for a fact that did not change. Each row
 carries ``after``, the last time Kelpie saw the previous value (the previous tick in this
-process, else the previous record), and ``at``, the tick that saw the new one: the change
-happened in ``(after, at]``.
+process, else the previous record; for a first value, the last tick that saw the fact
+unset, None after a restart or on a first sighting), and ``at``, the tick that saw the new
+one: the change happened in ``(after, at]``. The previous value is the fact's row before.
 
 **What is stored.** Values are canonical JSON. A block's reason is an agent's text: it is
-stored cut to :data:`MAX_REASON` characters, like the ledger cuts agent text in params.
-Retention follows the ledger's (``[storage] retention`` and ``max_rows``), keeping each
-fact's value at the cut.
+stored cut to :data:`MAX_REASON` characters, like the ledger cuts agent text in params,
+with its SHA-256 (``reason_sha256``), and changes are compared on everything but the text
+itself, so the text can go. Retention follows the ledger's (``[storage] retention`` and
+``max_rows``), keeping each fact's value at the cut, with a block's reason text removed
+from it (:func:`without_reason`): no agent text outlives retention.
+
+Subjects are cut to :data:`MAX_NAME` characters, and task ids are assumed unique across
+adapters, as everywhere in Kelpie (and in :mod:`kelpie.core.transitions`). Like the status
+recorder, the recorder keeps the last value and the last sighting of every fact it has
+seen in memory for the life of the process.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from enum import StrEnum
 from typing import Any
@@ -61,16 +70,15 @@ class FactKind(StrEnum):
 class FactChange:
     """A fact as Kelpie observed it change (or first saw it set).
 
-    ``value`` and ``previous`` are canonical JSON, or None for none (no owner, no block).
-    ``at`` is the snapshot time of the tick that saw it; ``after`` the last time the
-    previous value was seen (None for a first record). ``board`` and ``source`` are the
-    task's (for a condition, of its first waiting task the snapshot holds)."""
+    ``value`` is canonical JSON, or None for none (no owner, no block). ``at`` is the
+    snapshot time of the tick that saw it; ``after`` the last time the previous value was
+    seen (None when unknown). ``board`` and ``source`` are the task's (for a condition, of
+    its first waiting task the snapshot holds)."""
 
     at: datetime
     kind: FactKind
     subject: str
     value: str | None
-    previous: str | None = None
     after: datetime | None = None
     board: str | None = None
     source: str | None = None
@@ -102,9 +110,11 @@ def owner_value(task: Task) -> str | None:
 def block_value(block: Block | None) -> str | None:
     if block is None:
         return None
+    reason = block.reason[:MAX_REASON]
     return _json(
         {
-            "reason": block.reason[:MAX_REASON],
+            "reason": reason,
+            "reason_sha256": hashlib.sha256(reason.encode()).hexdigest(),
             "category": _name(block.category),
             "condition_id": _name(block.condition_id),
             "since": block.since.isoformat(),
@@ -121,6 +131,16 @@ def condition_value(condition: Condition) -> str:
             "waiters": sorted(_name(t) or "" for t in condition.waiters),
         }
     )
+
+
+def without_reason(value: str | None) -> str | None:
+    """A value without a block's reason text (its hash stays): what changes are compared
+    on, and what retention keeps of a row older than the cut."""
+    if value is None or '"reason":' not in value:
+        return value
+    data = json.loads(value)
+    data.pop("reason", None)
+    return _json(data)
 
 
 def current(snapshot: Snapshot) -> list[tuple[FactKind, str, str | None, Task | None]]:
@@ -160,7 +180,7 @@ def observe(
     for kind, subject, value, task in current(snapshot):
         prev = last.get((kind, subject))
         before = None if prev is None else prev.value
-        if value == before:
+        if without_reason(value) == without_reason(before):
             continue
         out.append(
             FactChange(
@@ -168,8 +188,10 @@ def observe(
                 kind=kind,
                 subject=subject,
                 value=value,
-                previous=before,
-                after=None if prev is None else max(seen.get(prev.key, prev.at), prev.at),
+                # the last tick that saw the old value (unset: only while this process ran)
+                after=seen.get((kind, subject))
+                if prev is None
+                else max(seen.get(prev.key, prev.at), prev.at),
                 board=None if task is None else _name(task.board),
                 source=None if task is None else _name(task.source),
             )
@@ -215,7 +237,9 @@ class MemoryFactStore:
             drop = set(order[: len(kept) - max_rows])
             kept = [r for i, r in enumerate(kept) if i not in drop]
         gone = len(self.rows) - len(kept)
-        self.rows = kept
+        self.rows = [
+            replace(r, value=without_reason(r.value)) if r.at < before else r for r in kept
+        ]
         return gone
 
 

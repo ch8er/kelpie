@@ -78,10 +78,10 @@ def test_nothing_set_records_nothing() -> None:
 
 def test_first_sighting_records_what_is_set() -> None:
     found = observe({}, snap(T0, task(owner="dev-1", block=blk()), conditions=(cond(),)))
-    assert [(c.kind, c.subject, c.previous, c.after) for c in found] == [
-        (OWNER, "t-1", None, None),
-        (BLOCK, "t-1", None, None),
-        (COND, "pr:1", None, None),
+    assert [(c.kind, c.subject, c.after) for c in found] == [
+        (OWNER, "t-1", None),
+        (BLOCK, "t-1", None),
+        (COND, "pr:1", None),
     ]
     owner, block, condition = (c.decoded() for c in found)
     assert owner == {"owner": "dev-1"}
@@ -101,7 +101,7 @@ def test_changes_and_clearing() -> None:
         (OWNER, False, T0 + TICK),
         (BLOCK, True, T0 + TICK),  # cleared: a row with no value
     ]
-    assert json.loads(moved[0].previous or "") == {"owner": "dev-1"}
+    assert moved[0].decoded() == {"owner": "dev-2"}
 
 
 def test_a_condition_change_is_its_outcome_or_waiters_not_its_polling() -> None:
@@ -222,7 +222,6 @@ def test_fresh_database_has_the_table(tmp_path: Path) -> None:
         "kind",
         "subject",
         "value",
-        "previous",
         "after_at",
         "board",
         "source",
@@ -388,3 +387,39 @@ def test_serve_retention_prunes_the_facts(tmp_path: Path) -> None:
     on_disk.stop()
     assert len(_rows(path)) == 1
     store.close()
+
+
+def test_a_first_value_is_placed_after_the_last_tick_that_saw_it_unset() -> None:
+    rec = FactRecorder(MemoryFactStore())
+    rec.record(snap(T0, task()))
+    rec.record(snap(T0 + TICK, task()))
+    [owner] = rec.record(snap(T0 + 2 * TICK, task(owner="dev-1")))
+    assert owner.after == T0 + TICK
+
+
+def test_the_reason_text_is_compared_by_its_hash_and_retention_drops_it(tmp_path: Path) -> None:
+    path = _db(tmp_path)
+    store = SqliteLedgerStore(path)
+    rec = FactRecorder(store)
+    rec.record(snap(T0, task(block=blk("@arch-1 v3 or v4?"))))
+    [changed] = rec.record(snap(T0 + TICK, task(block=blk("@arch-1 v4 then?"))))
+    assert changed.decoded()["reason"] == "@arch-1 v4 then?"
+    store.close()
+    pruner = SqliteLedgerPruner(path, batch=1)
+    assert pruner.prune_facts(T0 + 40 * DAY, 30 * DAY, 1_000_000, DAY) == 1
+    pruner.close()
+    [(_, _, kept)] = _rows(path)
+    assert "reason" not in json.loads(kept or "") and "reason_sha256" in json.loads(kept or "")
+    # a restart compares without the text: the same block is no change
+    again = SqliteLedgerStore(path)
+    assert (
+        FactRecorder(again).record(snap(T0 + 41 * DAY, task(block=blk("@arch-1 v4 then?")))) == []
+    )
+    again.close()
+
+
+def test_memory_retention_drops_the_reason_text() -> None:
+    store = MemoryFactStore()
+    FactRecorder(store).record(snap(T0, task(block=blk("secret-ish words"))))
+    store.prune(T0 + 40 * DAY)
+    assert "reason" not in store.rows[0].decoded()
