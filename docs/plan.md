@@ -243,8 +243,8 @@ Week plans hold P0 work plus the P1 items listed in week 3 above. Every other P1
 - the rest of the model gaps: sessions tied to a host, owner availability, the fixtures migrated to the new fields
 - instruction files measured on `kelpie agent` hosts
 - the live-run record: 48 h of rules 1–4 in `act` on a real farm, through `docs/act-checklist.md`
-- the rest of #248: the duplicate-code report
+- the rest of #248: the duplicate-code report, and the survey rows that wait for a decision (listed on #248)
 - delegation cards on Claude Code
 - owner-only items, tracked as issues outside the roadmap (#446): 10 conversations with farm owners (#471), the USPTO search (#472), live issue-agent and Linear checks (#473)
 
-**In progress:** #445, #446 and #461 were decided on the owner's behalf (2026-11-12) and are being built for 0.1.0a5; the other items above have no PR open.
+**In Unreleased (for 0.1.0a5):** asks in block reasons and agents' comment questions to people (#461), owners, blocks and conditions recorded in storage (schema 13, #477), faster span reads, profiled on 1M spans (#478), the last dead code of #248 (#445, #475); #444 and #446 were settled in the roadmap (#470, #474). **In progress:** #479 (#248's last twin helper, ready); none of the items above has a PR open.
