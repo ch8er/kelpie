@@ -109,8 +109,7 @@ class ReportStore:
 
     def spans(self, start: datetime, end: datetime) -> list[Span]:
         """Stored spans whose last time falls in ``[start, end)``."""
-        store = self._span_store()
-        return [s for s in store.spans_since(start) if _last(s) < end]
+        return list(self._span_store().spans_between(start, end))
 
     def metered(self, start: datetime, end: datetime) -> tuple[tuple[str | None, int, float], ...]:
         """Per model, tokens and USD from Claude Code's metrics in ``[start, end)``, for
@@ -148,10 +147,6 @@ class ReportStore:
         if self._spans is None:
             self._spans = SqliteSpanStore(self._path, readonly=True)
         return self._spans
-
-
-def _last(span: Span) -> datetime:
-    return span.end if span.end is not None and span.end > span.start else span.start
 
 
 def _time(value: str | None) -> datetime | None:

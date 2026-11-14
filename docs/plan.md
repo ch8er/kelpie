@@ -243,7 +243,7 @@ Week plans hold P0 work plus the P1 items listed in week 3 above. Every other P1
 - the rest of the model gaps: sessions tied to a host, owner availability, the fixtures migrated to the new fields
 - instruction files measured on `kelpie agent` hosts
 - the live-run record: 48 h of rules 1–4 in `act` on a real farm, through `docs/act-checklist.md`
-- the rest of #248: profiling the daily report, the span store and a long ledger; the duplicate-code report
+- the rest of #248: the duplicate-code report
 - delegation cards on Claude Code
 - asks in block reasons and agents' comment questions to people (#461)
 - owner-only items, tracked as issues outside the roadmap (#446): 10 conversations with farm owners (#471), the USPTO search (#472), live issue-agent and Linear checks (#473)

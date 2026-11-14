@@ -973,27 +973,45 @@ def _span_row(span: Span, received: str, version: int) -> tuple[object, ...]:
     )
 
 
+_SPAN_KINDS = {k.value: k for k in SpanKind}
+# Positions in a row selected as _SPAN_COLUMNS, by column name: reading a row by index is
+# faster than by name, and the report and the output offenders decode hundreds of
+# thousands (#248).
+_SPAN_AT = {c.strip(): i for i, c in enumerate(_SPAN_COLUMNS.split(","))}
+_TRACE, _SPAN_ID, _PARENT, _NAME = (
+    _SPAN_AT[c] for c in ("trace_id", "span_id", "parent_id", "name")
+)
+_KIND, _START, _END = (_SPAN_AT[c] for c in ("kind", "start", "end_at"))
+_TASK, _SESSION, _MODEL, _TOOL = (_SPAN_AT[c] for c in ("task_id", "session_id", "model", "tool"))
+_ARGS, _IN, _OUT = (_SPAN_AT[c] for c in ("args_hash", "input_tokens", "output_tokens"))
+_CACHED, _OUTCOME, _ATTRS = (_SPAN_AT[c] for c in ("cached_tokens", "outcome", "attributes"))
+_CACHE_WRITE = _SPAN_AT["cache_write_tokens"]
+
+
 def _span(r: sqlite3.Row) -> Span:
-    attributes = json.loads(r["attributes"])
+    """A span from a row selected as :data:`_SPAN_COLUMNS` (by position)."""
+    raw = r[_ATTRS]
+    attributes = {} if raw == "{}" else json.loads(raw)  # most spans carry none
+    end = r[_END]
     return Span(
-        trace_id=r["trace_id"],
-        span_id=r["span_id"],
-        parent_id=r["parent_id"],
-        name=r["name"],
-        kind=SpanKind(r["kind"]),
-        start=datetime.fromisoformat(r["start"]),
-        end=None if r["end_at"] is None else datetime.fromisoformat(r["end_at"]),
-        task_id=r["task_id"],
-        session_id=r["session_id"],
-        model=r["model"],
-        tool=r["tool"],
-        args_hash=r["args_hash"],
-        input_tokens=r["input_tokens"],
-        output_tokens=r["output_tokens"],
-        cached_tokens=r["cached_tokens"],
-        outcome=r["outcome"],
+        trace_id=r[_TRACE],
+        span_id=r[_SPAN_ID],
+        parent_id=r[_PARENT],
+        name=r[_NAME],
+        kind=_SPAN_KINDS.get(r[_KIND]) or SpanKind(r[_KIND]),
+        start=datetime.fromisoformat(r[_START]),
+        end=None if end is None else datetime.fromisoformat(end),
+        task_id=r[_TASK],
+        session_id=r[_SESSION],
+        model=r[_MODEL],
+        tool=r[_TOOL],
+        args_hash=r[_ARGS],
+        input_tokens=r[_IN],
+        output_tokens=r[_OUT],
+        cached_tokens=r[_CACHED],
+        outcome=r[_OUTCOME],
         attributes=attributes if isinstance(attributes, dict) else {},
-        cache_write_tokens=r["cache_write_tokens"],
+        cache_write_tokens=r[_CACHE_WRITE],
     )
 
 
@@ -1140,6 +1158,16 @@ class SqliteSpanStore:
     def spans_since(self, after: datetime) -> Sequence[Span]:
         sql = f"SELECT {_SPAN_COLUMNS} FROM spans WHERE last_at >= ? ORDER BY start, rowid_"
         return [_span(r) for r in self._read(sql, (_ts(after),))]
+
+    def spans_between(self, start: datetime, end: datetime) -> Sequence[Span]:
+        """Spans whose last time falls in ``[start, end)``, in start order: a report of an
+        earlier day reads its range, not everything since. A SQLite read of the report
+        (:class:`kelpie.report.store.ReportStore`), not part of :class:`SpanStore`."""
+        sql = (
+            f"SELECT {_SPAN_COLUMNS} FROM spans WHERE last_at >= ? AND last_at < ?"
+            " ORDER BY start, rowid_"
+        )
+        return [_span(r) for r in self._read(sql, (_ts(start), _ts(end)))]
 
     def tool_spans_since(self, after: datetime) -> Sequence[Span]:
         sql = (
