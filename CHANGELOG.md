@@ -27,6 +27,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
   since its range began. On 1M synthetic spans and 6 months of ledger the report went from
   3.9 s to 3.1 s, the output-offender read of 7 days of tool spans from 2.3 s to 1.9 s.
   `python -m tests.perf.profile_report` profiles it; a report time-budget test guards it.
+- One copy of the Telegram id check (`kelpie.alerts.buttons.int_id`, was `_int` there and
+  `_int_id` in `telegram.py`; #248 D13). No behaviour change.
 - Removed the unread `Dispatched.first_suppression` field (#248 X2, #445). The engine still
   raises its one rate-limit notice per subject and hour; nothing else read the field.
 

@@ -897,7 +897,7 @@ change user-facing messages).
 **Acceptance criteria**
 - [x] Profile a tick and the daily report on a large synthetic farm (e.g. 2,000 tasks, 1M spans, 6 months of ledger); publish the numbers in the PR; fix the top hotspots (rules on boards of 1k and 4k tasks profiled and the top hotspot fixed, #262; a whole tick with dispatch profiled on 2,000 tasks and the in-memory ledger's scans per action indexed, #457; the daily report and serve's span and ledger reads on 1M spans and 6 months of ledger profiled, `python -m tests.perf.profile_report`: span decoding was the hot spot, the report's span read is bounded by its range, a report budget test, #478)
 - [x] Per-tick time budget as a test (fails if a tick on the large farm exceeds it) (`tests/perf/test_tick_budget.py` on a synthetic 2,000-task farm, SQLite and in-memory ledgers, plus a busy tick of ~19,000 actions, #457)
-- [ ] Duplicate-code report (e.g. pylint duplicate-code or jscpd) before and after; shared helpers consolidated in core/ or the owning package (survey by AST pass; one helper consolidated, #263)
+- [ ] Duplicate-code report (e.g. pylint duplicate-code or jscpd) before and after; shared helpers consolidated in core/ or the owning package (survey by AST pass; one helper consolidated, #263; the identical config validators, #411; the loopback check, #463; the adapter twins, #464; the Telegram id check `int_id`, #PRNUM; no before/after duplicate-code report yet)
 - [x] No behaviour change: unit and e2e suites pass unchanged; one refactor per PR, each small enough to review (#262, #263)
 - [x] Dead code and unused config keys removed; CLAUDE.md layout updated if modules move (X1, X3, X4 and X6 of the survey removed in #412, X2 in #475; X5 are false positives; no module moved)
 

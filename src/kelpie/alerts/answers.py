@@ -49,10 +49,10 @@ from kelpie.alerts.buttons import (
     AnswerRef,
     ButtonStore,
     Claim,
-    _int,
     _name,
     _remaining,
     answer_data,
+    int_id,
     looks_like_answer,
     parse_answer,
 )
@@ -163,7 +163,7 @@ class AnswerDesk:
             return
         kind, index, ref_id = parsed
         ref = self.store.answer_ref(ref_id)
-        message_id = _int(message.get("message_id"))
+        message_id = int_id(message.get("message_id"))
         if (
             ref is None
             or ref.kind != kind
@@ -242,7 +242,7 @@ class AnswerDesk:
             "link_preview_options": {"is_disabled": True},
         }
         sent = self.poller._call("sendMessage", body)
-        sent_id = _int(sent.get("message_id")) if isinstance(sent, Mapping) else None
+        sent_id = int_id(sent.get("message_id")) if isinstance(sent, Mapping) else None
         if sent_id is None:
             self._answer(query_id, i18n.text(lang, "chat.failed"))
             self._notify("chat_action", self.channel, "failed")
