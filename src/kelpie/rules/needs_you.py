@@ -24,6 +24,16 @@ delay, so the human sees one list instead of scattered blocks:
   whose condition can never be met (the human task it waited on was cancelled) or that
   names a condition Kelpie cannot see: rule 4 alerts on those, with what is stuck behind
   them. The test is :func:`~kelpie.rules._tasks.asks_a_person`.
+- **Agents' questions in comments** (#461, decision 2a). An agent's comment on an open task
+  that mentions a person of the farm (``@<human owner id>``) with a question mark, and that
+  no person has answered on the task since (nor the person, naming the asker, on another
+  task of the same machine; :func:`kelpie.rules._asks.open_asks`), once it has waited
+  ``approval_wait_after``. It is the asked person's item (``kind`` ``question``, ``needed``
+  the question, ``asker``), with the asking task as what waits on them, like an approval.
+  One item per task and person; none on a blocked or waiting task (its block or wait is
+  announced as such, by rule 4, rule 2 or as an approval here) or on a task already the
+  person's item. Rule ``unanswered_asks`` never takes a person as a recipient, so a person
+  has one inbox.
 
 **Rule 4 leaves what this rule lists to it.** While this rule reaches people, rule 4 gets
 its settings and leaves it every task :func:`inbox_task_ids` returns (what this rule lists,
@@ -77,8 +87,9 @@ in both escalations: sum across people by id.
 ``items`` lists the person's items in order (all of them, at most 200; ``items_total``
 counts them), for the alert's digest ("Waiting for you: 2 tasks (oldest 46 h)", which shows
 10 and counts the rest) and the daily report: ``task_id``, ``title``, ``kind``
-(``human_task`` or ``approval``), ``needed`` (what the person is asked, in the agent's
-words: an approval's block reason, or why a human task is blocked or waiting; for a
+(``human_task``, ``approval`` or ``question``), ``needed`` (what the person is asked, in
+the agent's words: an approval's block reason, a question's comment, or why a human task is
+blocked or waiting; a question also has ``asker``; for a
 person's blocked task that can never clear on its own, why, in rule 4's words, since rule 4
 sends nothing on it: "the PR was closed without merging (pr:x): the block will never clear
 on its own", "the block names condition pr:gone, which Kelpie cannot see"; none for a
@@ -145,12 +156,13 @@ from typing import Any
 from kelpie.core.actions import Action, ActionKind, Severity
 from kelpie.core.conditions import linked_conditions
 from kelpie.core.incidents import Outage
-from kelpie.core.model import Answer, Condition, KelpieMark, Snapshot, Status, Task
+from kelpie.core.model import Answer, Condition, KelpieMark, OwnerKind, Snapshot, Status, Task
 from kelpie.core.offers import find_offer, offer_params
 from kelpie.core.serde import parse_duration
 from kelpie.rules import register
 from kelpie.rules._alerts import alert_params
 from kelpie.rules._alerts import count as counted
+from kelpie.rules._asks import open_asks
 from kelpie.rules._block_storm import storms
 from kelpie.rules._chains import behind_lookup
 from kelpie.rules._snoozes import SnoozeCheck, checker, describe
@@ -181,11 +193,13 @@ UNASSIGNED = "unassigned"
 _SHOWN = 5
 MAX_ITEMS = 200  # items sent per person (the alert shows 10 and counts the rest)
 _FROZEN = frozenset({Status.BLOCKED, Status.WAITING})
+_OWN_WAIT = frozenset({"approval", "question"})  # items whose task itself waits on the person
+MAX_QUESTION = 300  # characters of an agent's question quoted in the digest
 
 
 @dataclass(frozen=True, slots=True)
 class Item:
-    kind: str  # "human_task" | "approval"
+    kind: str  # "human_task" | "approval" | "question"
     task: Task
     behind: tuple[str, ...]  # agent tasks waiting on it (the task itself for an approval)
     waiting: timedelta  # how long the longest of them has waited
@@ -198,13 +212,16 @@ class Item:
     broken: str | None = None
     # Its task's snooze: holding it (listed in the footer), or why it is back (#176).
     snooze: SnoozeCheck | None = None
+    # A question's: the agent that asked it and its words, capped (#461).
+    asker: str | None = None
+    question: str | None = None
 
     @property
     def blocking(self) -> int:
         """How many tasks wait behind it, all of them (``behind`` is cut in params): the
         agent tasks behind a human task; for an approval, the tasks that wait on the
         blocked task, through dependencies and task waits."""
-        return len(self.held) if self.kind == "approval" else len(self.behind)
+        return len(self.held) if self.kind in _OWN_WAIT else len(self.behind)
 
     @property
     def needed(self) -> str | None:
@@ -214,6 +231,8 @@ class Item:
         it to this digest). None for a human task that is just to do: its title says it."""
         if self.broken:
             return self.broken
+        if self.kind == "question":
+            return self.question
         if self.kind == "approval" or self.task.status in _FROZEN:
             reason = self.task.block.reason.strip() if self.task.block is not None else ""
             return reason or None
@@ -221,6 +240,9 @@ class Item:
 
     def describe(self) -> str:
         hours = f"{self.cost_hours:.1f} agent-hours"
+        if self.kind == "question":
+            asked = f'{self.asker} asked you "{self.question}"'
+            return f"{self.task.id} ('{self.task.title}'): {asked}: {hours}"
         if self.kind == "approval":
             what = (
                 "was stopped by Kelpie and needs unblocking"
@@ -338,7 +360,49 @@ class NeedsYou:
             inbox.setdefault(item.task.owner_id or UNASSIGNED, []).append(item)
         for item in self._approvals(snapshot, parked, waited):
             inbox.setdefault(self._approver(item.task, roles) or UNASSIGNED, []).append(item)
+        for person, item in self._questions(snapshot, inbox, waited):
+            inbox.setdefault(person, []).append(item)
         return inbox
+
+    def _questions(
+        self, snapshot: Snapshot, inbox: Mapping[str, list[Item]], waited: bool = True
+    ) -> list[tuple[str, Item]]:
+        """Agents' unanswered comment questions to people (#461,
+        :func:`kelpie.rules._asks.open_asks` with human recipients), as items of the person
+        asked, once they have waited ``approval_wait_after``: one per task and person (the
+        first ask since the last answer), on a task that is not blocked or waiting (rules 4,
+        2 and this rule's approvals announce those) and not already the person's item.
+        Rule ``unanswered_asks`` never takes a person as a recipient: one inbox."""
+        behind = behind_lookup(snapshot)
+        found: list[tuple[str, Item]] = []
+        for ask in open_asks(snapshot, OwnerKind.HUMAN):
+            task, person = ask.task, ask.recipient.id
+            if task.status in _FROZEN:
+                continue  # the block or wait is announced as such
+            if any(i.task.id == task.id for i in inbox.get(person, ())):
+                continue  # already the person's item: one line per task
+            if any(p == person and i.task.id == task.id for p, i in found):
+                continue  # another agent asked the person on the task too: one item
+            age = max(snapshot.now - ask.comment.at, timedelta(0))
+            if waited and age < self.approval_wait_after:
+                continue
+            text = " ".join(ask.comment.text.split())
+            if len(text) > MAX_QUESTION:
+                text = text[: MAX_QUESTION - 1] + "…"
+            hours = age.total_seconds() / 3600
+            item = Item(
+                "question",
+                task,
+                (task.id,),
+                age,
+                hours,
+                {task.id: age},
+                held=tuple(behind(task.id)),
+                asker=ask.asker,
+                question=text,
+            )
+            found.append((person, item))
+        return found
 
     def _human_tasks(
         self, snapshot: Snapshot, gates: list[HumanGate], waited: bool = True
@@ -495,6 +559,7 @@ class NeedsYou:
                 "escalate_to": None if person == UNASSIGNED else person,
                 "human_tasks": [i.task.id for i in items if i.kind == "human_task"],
                 "approvals": [i.task.id for i in items if i.kind == "approval"],
+                "questions": [i.task.id for i in items if i.kind == "question"],
                 "blocked_agent_tasks": len(blocked),
                 # agent tasks waiting on the person right now: the report integrates their
                 # count over the day as agent-hours lost waiting on people
@@ -622,6 +687,7 @@ def _item_params(i: Item, now: datetime) -> dict[str, Any]:
         "waiting_minutes": int(i.waiting.total_seconds() // 60),
         "cost_hours": round(i.cost_hours, 1),
         **({"snooze": i.snooze.params()} if i.snooze is not None else {}),
+        **({"asker": i.asker} if i.kind == "question" else {}),
         # what a chat snooze button would hold (#176): not a broken block
         **({} if i.broken else {"snooze_task": i.task.id}),
     }

@@ -236,16 +236,15 @@ Three weeks, three steps: the core with traces and the first adapter, the full r
 
 Week plans hold P0 work plus the P1 items listed in week 3 above. Every other P1 item (the rules backlog, `kelpie why`, the Claude Code adapter, return causes, the LLM root-cause section, the naming check) follows weeks 2–3, in the order of the backlog in `docs/roadmap.md`.
 
-**Where the project is.** Every P0 rule (1–7, 9–12, the dispatch gate) and the daily report (rule 8) are merged, and so is the P1 rules backlog (one open box of `unanswered_asks`, #461; P2 rules follow on signal). So are `kelpie why`, `kelpie status` as a farm view, `kelpie run-once --dry-run`, four adapters (Hermes, Claude Code, OpenClaw, GitHub Issues / Linear), multi-host, budgets with spend modes, real-time alerts to Telegram and Slack with snoozes and answers, delegation to an operator agent (Hermes and GitHub Issues), `kelpie demo` and `kelpie selftest`. The release-safe part of the code-health pass and the security audit are done. Published as 0.1.0a1–a4 on PyPI and GHCR.
+**Where the project is.** Every P0 rule (1–7, 9–12, the dispatch gate) and the daily report (rule 8) are merged, and so is the P1 rules backlog (asks in block reasons and comment questions to people, #461, are in Unreleased; P2 rules follow on signal). So are `kelpie why`, `kelpie status` as a farm view, `kelpie run-once --dry-run`, four adapters (Hermes, Claude Code, OpenClaw, GitHub Issues / Linear), multi-host, budgets with spend modes, real-time alerts to Telegram and Slack with snoozes and answers, delegation to an operator agent (Hermes and GitHub Issues), `kelpie demo` and `kelpie selftest`. The release-safe part of the code-health pass and the security audit are done. Published as 0.1.0a1–a4 on PyPI and GHCR.
 
 **Open after 0.1.0a4:**
 
 - the rest of the model gaps: sessions tied to a host, owner availability, the fixtures migrated to the new fields
 - instruction files measured on `kelpie agent` hosts
 - the live-run record: 48 h of rules 1–4 in `act` on a real farm, through `docs/act-checklist.md`
-- the rest of #248: the duplicate-code report
+- the rest of #248: the duplicate-code report, and the survey rows that wait for a decision (listed on #248)
 - delegation cards on Claude Code
-- asks in block reasons and agents' comment questions to people (#461)
 - owner-only items, tracked as issues outside the roadmap (#446): 10 conversations with farm owners (#471), the USPTO search (#472), live issue-agent and Linear checks (#473)
 
-**In progress:** #445, #446 and #461 were decided on the owner's behalf (2026-11-12) and are being built for 0.1.0a5; the other items above have no PR open.
+**In Unreleased (for 0.1.0a5):** asks in block reasons and agents' comment questions to people (#461), owners, blocks and conditions recorded in storage (schema 13, #477), faster span reads, profiled on 1M spans (#478), the last dead code of #248 (#445, #475); #444 and #446 were settled in the roadmap (#470, #474). **In progress:** #479 (#248's last twin helper, ready); none of the items above has a PR open.

@@ -4,7 +4,10 @@ agents stayed unanswered within the day, by the agent asked.
 An ask is what :func:`kelpie.rules.unanswered_asks.open_asks` finds: an agent's comment on
 an open task that mentions another agent of the farm with a question mark, unanswered. That
 includes asks on blocked or waiting tasks, which the rule leaves to rules 2, 4 and 13 for its
-reminders: they are unanswered all the same. Only comments written before the day ended
+reminders: they are unanswered all the same. A task still blocked on a question to another
+agent (its block reason, :func:`kelpie.rules._asks.block_ask`, #461) counts from when the
+block was set; the report does not see conditions, so a block it cannot tell is linked to
+one may count too. Only comments written before the day ended
 count, so an answer given after the day leaves the ask open within it. A task finished now
 counts as open until it finished (its status since), as far as the board tells: a task
 finished after the day was open all of it, one finished within the day until then. An ask
@@ -20,9 +23,10 @@ from collections import defaultdict
 from dataclasses import replace
 from datetime import datetime
 
-from kelpie.core.model import Snapshot, Status
+from kelpie.core.model import OwnerKind, Snapshot, Status
 from kelpie.report import md
 from kelpie.report.sections import Section, SectionContext, register_section
+from kelpie.rules._asks import block_ask, owners_by_name, replies
 from kelpie.rules.unanswered_asks import open_asks
 
 TITLE = "Unanswered asks"
@@ -36,7 +40,7 @@ def asks(ctx: SectionContext) -> Section | None:
     until: dict[str, datetime] = {}  # a task finished within the day: open until then
     tasks = []
     for t in inputs.tasks:
-        if not t.comments:
+        if not t.comments and t.block is None:
             continue
         if t.status.is_terminal:
             if t.status_since <= ctx.start:
@@ -45,7 +49,22 @@ def asks(ctx: SectionContext) -> Section | None:
                 until[t.id] = t.status_since
             t = replace(t, status=Status.IN_PROGRESS)  # open within the day
         tasks.append(replace(t, comments=tuple(c for c in t.comments if c.at < ctx.end)))
-    found = open_asks(Snapshot(ctx.end, tasks=tuple(tasks), owners=tuple(inputs.owners)))
+    snapshot = Snapshot(ctx.end, tasks=tuple(tasks), owners=tuple(inputs.owners))
+    found = open_asks(snapshot)
+    # Asks in block reasons (#461): a task still blocked on a question to another agent.
+    agents = owners_by_name(snapshot, OwnerKind.AGENT)
+    answered = replies(snapshot)
+    # One obligation per task, asker and recipient: a block that repeats a comment ask
+    # still open adds nothing.
+    pairs = {(a.task.id, a.asker.casefold(), a.recipient.id) for a in found}
+    found += [
+        ask
+        for t in snapshot.tasks
+        if t.block is not None
+        and t.block.since < ctx.end
+        and (ask := block_ask(t, snapshot, agents, answered)) is not None
+        and (t.id, ask.asker.casefold(), ask.recipient.id) not in pairs
+    ]
     hours: dict[str, float] = defaultdict(float)
     counts: dict[str, int] = defaultdict(int)
     tasks_of: dict[str, set[str]] = defaultdict(set)

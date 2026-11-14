@@ -391,6 +391,21 @@ waits longer than this rule before it lists a block (`approval_wait_after` longe
 `unlinked_alert_after`, or `human_wait_alert_after` longer than `max_block`): in between,
 neither rule announces it.
 
+**Blocks that ask another agent go to `unanswered_asks`** (#461). A block whose reason asks
+another agent a question (`@architect-1 which schema version?`, no condition, not one rule
+13 lists) is a wait on that agent: [`unanswered_asks`](#unanswered_asks) reminds the agent
+while it is idle, and this rule sends no no-condition alert for it and, while the agent is
+reminded, leaves it out of block storms. Like a wait on a condition, it gets this rule's overdue alert once it has
+waited `max_block` ("waiting for an answer from architect-1"), also when the agent stayed
+busy all along and was never reminded (that rule stops reminding then), and at once when
+that rule's window ended
+(`stop_after`, 3 days of awake time, or six days of wall-clock time); both carry `asks` (the
+agent asked). Once the agent answered on the task (or a person did) and the block stays,
+this rule alerts as on any block. Five tasks blocked on the same question to one agent get
+five reminders per step, not one storm. The hand-off applies
+only while `unanswered_asks` reaches agents (loaded, and not in `observe` while this rule is
+not); Kelpie decides that from the modes, so `unanswered_asks` is not a key to set here.
+
 ### 5. ping_pong
 
 After a number of review rounds, escalates the task with the history of return reasons.
@@ -784,7 +799,17 @@ Everything waiting for a person, one escalation per person, sorted by cost of de
   dependencies or `human_task` conditions, that the person can move now;
 - agent tasks blocked with a reason that asks a person (`approval_reasons`) and no human
   task linked to the block, routed to `approvers[role]`, else `default_approver`, else
-  listed as unassigned.
+  listed as unassigned;
+- agents' questions to a person in task comments (#461): an agent's comment that mentions a
+  human owner (`@<id>`) with a question mark, on a task that is not blocked or waiting, and
+  that no person has answered on the task since (nor the person, naming the asker, on
+  another task of the same machine), once it has waited `approval_wait_after`. It is the
+  asked person's item (`kind: question`, `needed` the question, capped at 300 characters,
+  `asker`), and the asking task counts as waiting on them, like an approval; `questions`
+  lists these items' tasks. One item per task and person; a task already the person's item
+  gets no second line. A task that blocks or waits later drops its question from the digest:
+  its block or wait is announced instead. `unanswered_asks` never reminds a person, so a
+  person has one inbox.
 
 Only agent tasks that wait on the human task itself add to its cost; work deeper in the
 chain counts in the number held. The alert is a long-lived state per person: announced
@@ -817,7 +842,7 @@ tasks ready) and escalates single human gates only with `escalate_human_gates = 
 | Key | Default | Unit | Meaning |
 | --- | --- | --- | --- |
 | `human_wait_alert_after` | `"1h"` | duration, > 0 | A human task enters the inbox once agent work waiting on it has waited this long. |
-| `approval_wait_after` | `"30m"` | duration, > 0 | An agent waiting for a person's input or approval enters it after this long. |
+| `approval_wait_after` | `"30m"` | duration, > 0 | An agent waiting for a person's input or approval (a block, or a question in a comment) enters it after this long. |
 | `planned_labels` | `bottlenecks`' `planned_labels` and hold labels | list of labels | A task not started yet (backlog, ready) labelled with one of these (or whose linked PR is), or in a pre-work status (Hermes triage, scheduled), is not ready for work for its own reasons: it waits on no human task (no cost, not held), and a planned human task is in the inbox only for the tasks a condition parks on it. A blocked or waiting task was started: it waits on what it names (an approval, a human task), labels or not. The daily report's agent-hours waiting on people follow, since they come from this rule. Set it only to differ from rule 6: it replaces both inherited lists, hold labels included. |
 | `approval_reasons` | `["waiting_human", "needs_input", "approval"]` | list of prefixes | Block reasons that ask a person, matched as whole words at the start, case-insensitive. `waiting_human: transient` blocks are left out. `stale_blocks` reads this section, to leave the blocks this rule lists to it. |
 | `condition_reasons` | the `[[block_conditions]]` block patterns | list of regular expressions | A block whose reason matches one (searched, case-insensitive), or that has a linked condition other than a human task, waits on a condition, not on a person, whatever its kind: agents block with `needs_input` to get past Hermes' block loop guard while a PR merges. Tie the patterns to waiting wording (`\b(?:automerge\|merge of\|waiting for)\b[^\n]{0,80}?PR\s*#(?P<pr>\d+)`) rather than any PR mention: a real question that names a PR ("may I force-push PR #12?") would leave the inbox and reach only rule 4 (after `max_block`). Keep them simple (no nested quantifiers, no leading `.*`): they run on the first 2000 characters of every blocked task's reason each tick. |
@@ -999,14 +1024,27 @@ snooze`, a chat reply, an `until:` marker) holds the reminders until it ends; af
 the next reminder due goes out and says the snooze expired (a step already reminded
 before the snooze is not reminded again).
 
-**No double alerts.** Questions to people are rule 13's (`needs_you`): a person is never a
-recipient, and a task with a block that asks a person (rule 13's default
-`approval_reasons`, not a customised `[engine.rules.needs_you]`) is left to the digest. Blocked
-tasks are rule 4's or rule 13's and waiting tasks rule 2's: this rule reminds only about
-asks on tasks that are not blocked or waiting (backlog, ready, in progress, review,
-accepted). It only alerts (`asker`, `recipient`, `asked_at`, `question`, `delivery`,
-`recipient_state`, `step`, `open_hours`; `snooze` when one ended). Kelpie never writes into
-agents' sessions or edits their instructions.
+**Asks in block reasons** (#461). An agent that blocks its task on a question to another
+agent ("@architect-1 which schema version?", with no condition linked to the block) asks
+too: the task's owner is the asker, the alphabetically first agent mentioned the recipient, and
+the ask opens when the block was set. It is answered by a comment of the recipient or of a
+person on the task since then, by the recipient naming the asker on another task of the
+same machine, or by the block clearing. Reminders follow the same steps and say the task is
+blocked on the question (`source: block`), up to rule 4's `max_block` (8h by default; set
+automatically, never in this section, and only while rule 4 is loaded and not in `observe`
+while this rule is not; else the reminders go on): from then on rule 4's overdue alert
+announces the wait, so one rule announces it at a time. Rule 4 sends no "nothing Kelpie can check" alert
+for such a block (see [stale_blocks](#4-stale_blocks)).
+
+**No double alerts.** Questions to people are rule 13's (`needs_you`, which also reads
+agents' comment questions to people): a person is never a recipient, and a block that asks
+a person is left to the digest, by rule 13's own settings while it reaches people (else its
+defaults). Comment asks on blocked tasks are rule 4's or rule 13's and on waiting tasks rule
+2's: this rule reminds about comment asks only on tasks that are not blocked or waiting
+(backlog, ready, in progress, review, accepted), and about a blocked task only for its
+block's own question. It only alerts (`asker`, `recipient`, `asked_at`, `question`,
+`delivery`, `recipient_state`, `step`, `open_hours`, `source`; `snooze` when one ended).
+Kelpie never writes into agents' sessions or edits their instructions.
 
 | Key | Default | Unit | Meaning |
 | --- | --- | --- | --- |

@@ -6,7 +6,7 @@ from __future__ import annotations
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
-from kelpie.core.model import Comment, Owner, OwnerKind, Status, Task
+from kelpie.core.model import Block, Comment, Owner, OwnerKind, Status, Task
 from kelpie.report.daily import ReportInputs, build_report, render_markdown
 
 DAY = date(2026, 3, 8)
@@ -106,3 +106,51 @@ def test_ties_go_by_name_and_task_ids_are_escaped() -> None:
     assert tie.index("architect-1") < tie.index("ops-1")
     odd = section(report(task("T|3", said("dev-1", "@ops-1 and?", START))))
     assert "| ops-1 | 1 | 24.0 | `T\\|3` |" in odd
+
+
+def test_a_block_that_asks_an_agent_counts_from_when_it_was_set() -> None:
+    """#461: a task still blocked on a question to another agent is an open ask."""
+    six = START + timedelta(hours=18)
+    asking = Task(
+        "T-9",
+        "task T-9",
+        Status.BLOCKED,
+        six,
+        owner_id="dev-1",
+        block=Block("@architect-1 which schema, v3 or v4?", six),
+    )
+    answered = Task(
+        "T-8",
+        "task T-8",
+        Status.BLOCKED,
+        six,
+        owner_id="dev-1",
+        block=Block("@ops-1 restart staging?", six),
+        comments=(said("ops-1", "done", six + timedelta(hours=1)),),
+    )
+    later = Task(
+        "T-7",
+        "task T-7",
+        Status.BLOCKED,
+        END + timedelta(hours=1),
+        owner_id="dev-1",
+        block=Block("@ops-1 restart prod?", END + timedelta(hours=1)),
+    )
+    text = section(report(asking, answered, later))
+    assert "| architect-1 | 1 | 6.0 | `T-9` |" in text
+    assert "ops-1" not in text
+
+
+def test_a_block_repeating_an_open_comment_ask_counts_once() -> None:
+    six = START + timedelta(hours=18)
+    asked = Task(
+        "T-6",
+        "task T-6",
+        Status.BLOCKED,
+        six,
+        owner_id="dev-1",
+        block=Block("@architect-1 which schema?", six),
+        comments=(said("dev-1", "@architect-1 which schema?", six - timedelta(hours=2)),),
+    )
+    text = section(report(asked))
+    assert "| architect-1 | 1 | 8.0 | `T-6` |" in text  # the comment ask, from 16:00
