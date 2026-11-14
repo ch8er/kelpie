@@ -109,7 +109,7 @@ _BIDI = frozenset("\u061c\u200e\u200f\u202a\u202b\u202c\u202d\u202e\u2066\u2067\
 NOT_CHECKED = "not checked (offline; --refresh checks {})"  # {}: "it" or "them"
 # Rules whose verdict on a block rests on it having no condition: offline they judge the
 # bare block, while serve attaches the condition the reason would give.
-CONDITION_RULES = frozenset({"exit_contract", "stale_blocks"})
+CONDITION_RULES = frozenset({"exit_contract", "stale_blocks", "unanswered_asks"})
 # Verdicts that rest on the code host's PR lists being known in full
 # (``Snapshot.pull_requests_complete``), which the connector grants only after two full scans
 # in a row. ``why`` reads them once at most, so these may differ from what serve says.

@@ -776,7 +776,7 @@ def test_agents_waiting_on_people_count_agent_hours() -> None:
     [line] = report.chaos
     assert line.rule == "needs_you" and line.hours == pytest.approx(3 * 6 + 1 * 2)
     assert line.tasks == ("A-1", "A-2", "A-3")
-    assert line.cause == "agents waiting on people (approvals, human tasks)"
+    assert line.cause == "agents waiting on people (approvals, questions, human tasks)"
     markdown = render_markdown(report)
     assert "agents waiting on people" in markdown
     assert "Reduce agents waiting on people" in markdown

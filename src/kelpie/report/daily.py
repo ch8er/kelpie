@@ -252,7 +252,7 @@ CHAOS_CAUSES: Mapping[str, str] = {
     "ping_pong": "review ping-pong",
     "bottlenecks": "idle capacity (bottlenecks, human gates)",
     HOLDS: "idle agents behind forgotten holds",
-    PEOPLE: "agents waiting on people (approvals, human tasks)",
+    PEOPLE: "agents waiting on people (approvals, questions, human tasks)",
     PREWORK: "cards stuck before work (triage, scheduled)",
     "loop_breaker": "runaway loops",
     "no_progress": "activity without progress",

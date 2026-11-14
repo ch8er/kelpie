@@ -269,7 +269,7 @@ The rules:
 | `return_causes` | why tasks come back from review |
 | `output_offenders` | commands whose output floods a role's context day after day |
 | `instruction_bloat` | skills and role instructions that only grow, and the facts copied between them |
-| `unanswered_asks` | an agent's question to another agent, unanswered while the other is idle |
+| `unanswered_asks` | an agent's question to another agent (in a comment or a block reason), unanswered while the other is idle |
 | `delegation` | hands a problem to the operator agent as a card, off by default (in progress, #347) |
 
 The incidents behind each rule, the design and the daily report in full:

@@ -1038,12 +1038,17 @@ def _rule_config(
     inherits ``wait_condition``'s ``poll_patterns`` unless it sets its own; ``orphan_status``
     inherits ``bottlenecks``' hold labels, ``needs_you`` its planned and hold labels as
     ``planned_labels`` (one definition of a planned wait), and ``return_causes``
-    ``conflict_warning``'s ``expected_shared`` the same way. ``stale_blocks`` and
-    ``wait_condition`` always read ``needs_you``'s settings (see :func:`_with_inbox`);
+    ``conflict_warning``'s ``expected_shared`` the same way. ``stale_blocks``,
+    ``wait_condition`` and ``unanswered_asks`` always read ``needs_you``'s settings (see
+    :func:`_with_inbox`), and ``stale_blocks`` ``unanswered_asks``' (:func:`_with_asks`);
     ``registry`` holds the rules being loaded (default: every registered one)."""
     section = dict(config.rules.get(name, {}))
     if name in _LEAVES_TO_INBOX:
-        return _with_inbox(name, section, config, REGISTRY if registry is None else registry)
+        found = REGISTRY if registry is None else registry
+        section = _with_inbox(name, section, config, found)
+        if name == "unanswered_asks":
+            return _with_block_until(section, config, found)
+        return _with_asks(section, config, found) if name == "stale_blocks" else section
     if name == "needs_you":
         return _needs_you_section(section, config)
     if name == "return_causes" and "expected_shared" not in section:
@@ -1097,8 +1102,62 @@ def _needs_you_section(section: dict[str, Any], config: EngineConfig) -> dict[st
 
 
 # Rules that leave the tasks rule 13 lists to it, with its settings (``needs_you``): rule 4
-# for blocks (#169), rule 2 for waits (#213).
-_LEAVES_TO_INBOX = frozenset({"stale_blocks", "wait_condition"})
+# for blocks (#169), rule 2 for waits (#213), unanswered_asks for blocks that ask (#461).
+_LEAVES_TO_INBOX = frozenset({"stale_blocks", "wait_condition", "unanswered_asks"})
+
+
+def _with_block_until(
+    section: dict[str, Any], config: EngineConfig, registry: Mapping[str, RuleFactory]
+) -> dict[str, Any]:
+    """``unanswered_asks`` reminds about a block that asks an agent until rule 4's
+    ``max_block``, when rule 4's overdue alert takes it over (#461): one announcer at a
+    time. Only while rule 4 reaches people at least as far as this rule: it is loaded, and
+    it is not in ``observe`` while this rule is not; else this rule keeps reminding (no
+    limit), so the wait is never silent. Set from ``[engine.rules.stale_blocks]``, never in
+    this section."""
+    if "block_until" in section:
+        raise ValueError(
+            "block_until is set automatically from [engine.rules.stale_blocks] max_block, "
+            "not in [engine.rules.unanswered_asks]"
+        )
+    takes_over = "stale_blocks" in registry and (
+        config.mode_for("stale_blocks") is not Mode.OBSERVE
+        or config.mode_for("unanswered_asks") is Mode.OBSERVE
+    )
+    blocks = config.rules.get("stale_blocks", {})
+    default = StaleBlocks().max_block or False
+    section["block_until"] = blocks.get("max_block", default) if takes_over else False
+    return section
+
+
+def _with_asks(
+    section: dict[str, Any], config: EngineConfig, registry: Mapping[str, RuleFactory]
+) -> dict[str, Any]:
+    """Rule 4 leaves a block that asks another agent to rule ``unanswered_asks`` (#461), as
+    a wait on that agent, while that rule reaches agents: it is loaded, and it is not in
+    ``observe`` while rule 4 is not. Rule 4 then gets that rule's whole config section
+    (with its ``needs_you`` hand-off, so both read the same blocks as rule 13's) as
+    ``unanswered_asks``; else ``unanswered_asks = false`` and rule 4 alerts on such a block
+    as on any block with nothing Kelpie can check."""
+    if "unanswered_asks" in section:
+        raise ValueError(
+            "unanswered_asks is set automatically from the rules' modes (whether that rule "
+            "reaches agents), not in [engine.rules.stale_blocks]"
+        )
+    active = "unanswered_asks" in registry and (
+        config.mode_for("unanswered_asks") is not Mode.OBSERVE
+        or config.mode_for("stale_blocks") is Mode.OBSERVE
+    )
+    if not active:
+        section["unanswered_asks"] = False
+        return section
+    asks = _rule_config("unanswered_asks", config, registry)
+    try:
+        registry["unanswered_asks"](dict(asks))
+    except Exception as exc:
+        raise ConfigError(f"bad config for rule 'unanswered_asks': {exc}") from exc
+    section["unanswered_asks"] = asks
+    return section
 
 
 def _with_inbox(
@@ -1107,13 +1166,13 @@ def _with_inbox(
     config: EngineConfig,
     registry: Mapping[str, RuleFactory],
 ) -> dict[str, Any]:
-    """Rule ``name`` (rule 4 or 2) leaves the tasks rule 13 lists as waiting for a person to
-    rule 13, while rule 13 reaches people: it is loaded, and it is not in ``observe`` while
-    ``name`` is not (else ``name``'s alerts would be the only ones a person gets). It then
-    gets rule 13's whole config section as ``needs_you`` (its reasons, the
-    ``[[block_conditions]]`` patterns and planned labels included), so the rules read the
-    farm alike; else ``needs_you = false``. Rule 13's section is checked here, so a mistake
-    in it is reported as rule 13's."""
+    """Rule ``name`` (rule 4, rule 2 or ``unanswered_asks``) leaves the tasks rule 13 lists as
+    waiting for a person to rule 13, while rule 13 reaches people: it is loaded, and it is not
+    in ``observe`` while ``name`` is not (else ``name``'s alerts would be the only ones a
+    person gets). It then gets rule 13's whole config section as ``needs_you`` (its reasons,
+    the ``[[block_conditions]]`` patterns and planned labels included), so the rules read the
+    farm alike; else ``needs_you = false``. Rule 13's section is checked here, so a mistake in
+    it is reported as rule 13's."""
     if "needs_you" in section:
         raise ValueError(
             "needs_you is set automatically from the rules' modes (whether rule 13 reaches "

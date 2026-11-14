@@ -841,8 +841,9 @@ Settled while building it:
   `kelpie_chat_rejected_total` and logged, not written to the ledger.
 - **`answer_buttons` turned off since**: no desk takes answer presses any more, so an old
   button is `bad_ref`, not `not_enabled`.
-- **`unanswered_asks`** does not read answers: it never reminds about a blocked task (rule
-  13's), which is where answers apply.
+- **`unanswered_asks`** does not read answers: it never reminds about a block that asks a
+  person (rule 13's), which is where answers apply; the blocks it reminds about ask another
+  agent.
 - **Shutdown**: answers queued but not carried out when Kelpie stops are recorded
   `not_executed` and their questions given back; a confirm after that is refused. A crash
   between the claim and the ledger entry leaves a claim without an entry (milliseconds):

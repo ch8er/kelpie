@@ -158,13 +158,16 @@ def storms(
     observe: bool = True,
     snoozed: Callable[[str], SnoozeCheck | None] | None = None,
     toolchain_window: timedelta = TOOLCHAIN_WINDOW,
+    skip: frozenset[str] = frozenset(),
 ) -> list[Action]:
     """One alert per block storm (see the module docs); none with ``min_tasks`` = 0. With
     ``observe`` (the default for a new check) the alerts are only logged, whatever the
-    rule's mode. ``snoozed`` tells a task's snooze (none: no task is snoozed)."""
+    rule's mode. ``snoozed`` tells a task's snooze (none: no task is snoozed). Tasks in
+    ``skip`` never storm: their block is a wait another rule announces (rule 4 passes the
+    blocks that ask an agent rule ``unanswered_asks`` reminds, #461)."""
     if min_tasks <= 0:
         return []
-    groups = _groups(snapshot, snoozed)
+    groups = _groups(snapshot, snoozed, skip)
     open_states = set(snapshot.open_states)
     actions = []
     for (text, refs), blocked in sorted(groups.items()):
@@ -185,13 +188,17 @@ def storms(
 
 
 def _groups(
-    snapshot: Snapshot, snoozed: Callable[[str], SnoozeCheck | None] | None
+    snapshot: Snapshot,
+    snoozed: Callable[[str], SnoozeCheck | None] | None,
+    skip: frozenset[str] = frozenset(),
 ) -> dict[tuple[str, tuple[str, ...]], list[_Blocked]]:
     """The blocks that may storm, by shared reason (normalised text and references)."""
     groups: dict[tuple[str, tuple[str, ...]], list[_Blocked]] = {}
     for task in snapshot.tasks:
         block = task.block
         if task.status is not Status.BLOCKED or block is None or block.kelpie is KelpieMark.STOP:
+            continue
+        if task.id in skip:
             continue
         conditions, missing = linked_conditions(task, snapshot)
         if conditions or missing is not None:
