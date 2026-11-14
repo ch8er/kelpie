@@ -890,9 +890,9 @@ Five tracks wrote code in parallel, so helpers are likely duplicated (git calls,
 windows, block-reason parsing, condition binding, alert text). Do this after the live farm
 run is debugged and before the security audit, so the audit covers the final code.
 
-Tracked as #248. Its survey (comment on #248) lists every finding; #262 and #263 landed, and
-the rest was left until after the release on purpose (modules in active PRs, rows D6/D7 that
-change user-facing messages).
+Tracked as #248. Its survey (comment on #248) lists every finding; #262 and #263 landed before
+the release, and the rest is landing in small PRs after it (see the criteria below); rows that
+change user-facing messages (the D6/D7 variants) wait for a decision.
 
 **Acceptance criteria**
 - [x] Profile a tick and the daily report on a large synthetic farm (e.g. 2,000 tasks, 1M spans, 6 months of ledger); publish the numbers in the PR; fix the top hotspots (rules on boards of 1k and 4k tasks profiled and the top hotspot fixed, #262; a whole tick with dispatch profiled on 2,000 tasks and the in-memory ledger's scans per action indexed, #457; the daily report and serve's span and ledger reads on 1M spans and 6 months of ledger profiled, `python -m tests.perf.profile_report`: span decoding was the hot spot, the report's span read is bounded by its range, a report budget test, #478)
