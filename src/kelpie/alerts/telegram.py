@@ -41,7 +41,7 @@ from urllib.parse import urlsplit
 from kelpie import net
 from kelpie.alerts import render, summary
 from kelpie.alerts.answers import AnswerDesk
-from kelpie.alerts.buttons import ApiError, ButtonPoller, Buttons, ChatControl
+from kelpie.alerts.buttons import ApiError, ButtonPoller, Buttons, ChatControl, int_id
 from kelpie.alerts.delivery import PermanentError, TransientError
 from kelpie.alerts.render import (
     AT_SIGN,
@@ -568,7 +568,7 @@ class TelegramChannel:
         assert self._buttons is not None
         try:
             sent = None if response is None else _sent(response)
-            message_id = None if sent is None else _int_id(sent.get("message_id"))
+            message_id = None if sent is None else int_id(sent.get("message_id"))
             previous = self._buttons.delivered(
                 message, ids, message_id, sent, markup, answer_ids or ()
             )
@@ -657,10 +657,6 @@ def _sent(response: net.Response) -> dict[str, Any] | None:
     except (ValueError, AttributeError):
         return None
     return result if isinstance(result, dict) else None
-
-
-def _int_id(value: object) -> int | None:
-    return value if isinstance(value, int) and not isinstance(value, bool) else None
 
 
 def _seconds(value: Any) -> float | None:

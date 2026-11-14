@@ -1106,7 +1106,9 @@ class _Rejected(Exception):
         self.ref = ref
 
 
-def _int(value: object) -> int | None:
+def int_id(value: object) -> int | None:
+    """A Telegram id or count from a decoded JSON value: an int, never a bool, else None
+    (shared with :mod:`kelpie.alerts.telegram`, #248 D13)."""
     return value if isinstance(value, int) and not isinstance(value, bool) else None
 
 
@@ -1251,9 +1253,9 @@ class ButtonPoller:
         ids = [
             i
             for u in result
-            if isinstance(u, Mapping) and (i := _int(u.get("update_id"))) is not None
+            if isinstance(u, Mapping) and (i := int_id(u.get("update_id"))) is not None
         ]
-        found = [u for u in result if isinstance(u, Mapping) and _int(u.get("update_id"))]
+        found = [u for u in result if isinstance(u, Mapping) and int_id(u.get("update_id"))]
         found.sort(key=lambda u: u["update_id"])
         return found, len(result) - len(found), max(ids, default=None)
 
@@ -1324,7 +1326,7 @@ class ButtonPoller:
         the checks every press passes (well-formed, not rate limited, an allowed person, in
         the configured chat), else :class:`_Rejected`."""
         sender = query.get("from")
-        user_id = _int(sender.get("id")) if isinstance(sender, Mapping) else None
+        user_id = int_id(sender.get("id")) if isinstance(sender, Mapping) else None
         if user_id is None or not isinstance(query.get("id"), str):
             raise _Rejected("malformed", answer=False)
         if not self.limiter.allow(user_id):
@@ -1351,7 +1353,7 @@ class ButtonPoller:
         ref = self.store.get(ref_id)
         if ref is None or ref.channel != self.channel or ref.chat_id != self.chat_id:
             raise _Rejected("bad_ref")
-        message_id = _int(message.get("message_id"))
+        message_id = int_id(message.get("message_id"))
         if ref.message_id is None or ref.message_id != message_id:
             raise _Rejected("bad_ref")  # not the message it went out in (or none known)
         now = self.control.clock()
@@ -1365,7 +1367,7 @@ class ButtonPoller:
         return Press(self.channel, ref.task_id, days, user_id, name), ref
 
     def _our_chat(self, chat: Mapping[str, Any]) -> bool:
-        chat_id = _int(chat.get("id"))
+        chat_id = int_id(chat.get("id"))
         if chat_id is not None and str(chat_id) == self.chat_id:
             return True
         username = chat.get("username")
@@ -1567,7 +1569,7 @@ def _entities(raw: object) -> list[dict[str, Any]]:
     for e in raw if isinstance(raw, list) else ():
         if not isinstance(e, Mapping) or e.get("type") not in _ENTITY_TYPES:
             continue
-        offset, length = _int(e.get("offset")), _int(e.get("length"))
+        offset, length = int_id(e.get("offset")), int_id(e.get("length"))
         if offset is None or length is None or offset < 0 or length <= 0:
             continue
         entity: dict[str, Any] = {"type": e["type"], "offset": offset, "length": length}
