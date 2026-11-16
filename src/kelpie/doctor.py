@@ -930,8 +930,9 @@ def check_pr_blocks(settings: Settings, adapter: HermesAdapter, now: datetime) -
             "set enabled = true in [connectors.github]",
         )
     patterns = [p for p in settings.block_conditions if "block" in p.applies_to]
-    if adapter.board is not None:  # patterns scoped to other boards do not read this one
-        patterns = [p for p in patterns if not p.boards or adapter.board in p.boards]
+    # As serve reads them: a pattern scoped to boards reads only those boards' tasks (none
+    # of an unnamed board's).
+    patterns = [p for p in patterns if not p.boards or adapter.board in p.boards]
     if not patterns:
         return _warn(
             name,
@@ -1866,9 +1867,9 @@ def run_checks(
     if adapter is None:
         checks.append(_skip("PR blocks have conditions", why))
     checks += [check_pr_blocks(settings, b, at) for b in boards]
-    checks.append(check_snooze_markers(settings, at))
     if (scoped := check_block_condition_boards(settings)) is not None:
         checks.append(scoped)
+    checks.append(check_snooze_markers(settings, at))
     checks += cc_checks
     checks += oc_checks
     checks += gi_checks

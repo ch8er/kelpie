@@ -2206,7 +2206,12 @@ kind = "pr_merged"
 
 A board is `Task.board`: the name of a board in `[[adapters.hermes.boards]]`, on this
 server or in an agent's config. A `kelpie agent` that reads one board has no board name;
-its tasks are read only by patterns without `boards`.
+its tasks are read only by patterns without `boards`. Names are not per host: on a farm of
+several `kelpie agent` hosts, boards of the same name share their patterns, so give boards
+that work in different repositories different names. Rule 13's `condition_reasons`, which
+default to these patterns, are read on every board whatever `boards` says: a block whose
+reason matches waits on a condition, not on a person; without a pattern for its own board
+it gets no condition, so rule 4 announces it.
 
 ## [connectors.human_tasks]
 

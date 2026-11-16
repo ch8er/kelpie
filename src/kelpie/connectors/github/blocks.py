@@ -76,7 +76,9 @@ DEFAULT_TICK_BUDGET = timedelta(seconds=10)
 # (bad ref, repo not allowed, 404); GitHub could not confirm it yet; the step failed on it.
 OUTCOMES = ("attached", "unresolved", "unconfirmed", "error")
 _KEYS = {"pattern", "kind", "repo", "applies_to", "boards"}
-# A board name as [[adapters.hermes.boards]] takes it (the prefix of the board's task ids).
+# A board name as [[adapters.hermes.boards]] takes it (the prefix of the board's task ids):
+# the same expression as ``kelpie.app._BOARD_NAME``, which this package cannot import;
+# tests/test_app_hermes_boards.py checks that the two agree.
 BOARD_NAME = re.compile(r"[a-z0-9][a-z0-9_-]{0,31}")
 # What a pattern reads: a block reason, or the title of a ready task (the gate).
 TARGETS = ("block", "ready_task")

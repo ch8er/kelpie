@@ -367,7 +367,7 @@ def expected_conditions(
     if target is None:
         return [], 0
     host, repos = web_host(github.api_url), {r.lower() for r in github.repos}
-    applying = sum(target in p.applies_to for p in patterns)
+    applying = sum(target in p.applies_to and p.reads(task) for p in patterns)
     known = {c.id for c in snapshot.conditions}
     source = "block_reason" if target == "block" else "task_text"
     out: list[Expected] = []

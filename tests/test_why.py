@@ -537,6 +537,23 @@ def test_expected_none_when_nothing_applies() -> None:
     assert expected_conditions(_bc_settings(MERGE), held, task, False) == ([], 0)
 
 
+def test_expected_reads_only_the_patterns_for_the_tasks_board() -> None:
+    from dataclasses import replace
+
+    on_a = {**MERGE, "boards": ["a"]}
+    on_b = {**MERGE, "pattern": r"landing of (?P<pr>\S+)", "boards": ["b"]}
+    settings = _bc_settings(on_a, on_b, MERGE)
+    snap = _blocked("waiting for merge of #57")
+    task = replace(snap.tasks[0], id="a:T-1", board="a")
+    snap = replace(snap, tasks=(task,))
+    found, n = expected_conditions(settings, snap, task, False)
+    assert n == 2 and len(found) == 1  # the board-b pattern does not read board a
+    other = replace(task, id="c:T-1", board="c")
+    snap = replace(snap, tasks=(other,))
+    found, n = expected_conditions(settings, snap, other, False)
+    assert n == 1 and len(found) == 1  # only the unscoped one
+
+
 def test_expected_reads_a_ready_task_title_for_the_gate() -> None:
     gate = {**MERGE, "applies_to": ["ready_task"]}
     snap = _blocked("", Status.READY, title="Redo it after merge of #7")

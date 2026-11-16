@@ -845,6 +845,28 @@ def test_pr_blocks_all_resolved_pass_and_warnings_do_not_fail(
     assert "WARN  PR blocks have conditions" in out and "FAIL" not in out.replace("FAIL ", "")
 
 
+def test_pr_blocks_read_with_the_patterns_boards(farm: Farm) -> None:
+    from dataclasses import replace
+
+    from kelpie.adapters.hermes import HermesAdapter
+    from kelpie.app import build_adapters
+    from kelpie.doctor import check_pr_blocks
+
+    farm.make_healthy()
+    blocked(farm, "t_2", "automerge PR #412")
+    farm.extra = GITHUB + PATTERN
+    settings = load_settings(farm.config())
+    (scoped,) = (replace(p, boards=frozenset({"qr"})) for p in settings.block_conditions)
+    settings = replace(settings, block_conditions=(scoped,))
+    adapter = next(a for a in build_adapters(settings, {}) if isinstance(a, HermesAdapter))
+    on_qr = check_pr_blocks(settings, replace(adapter, board="qr"), NOW)
+    assert on_qr.status == "PASS"
+    # Another board, or an unnamed one: serve's scoped pattern does not read its blocks.
+    for board in ("web", None):
+        check = check_pr_blocks(settings, replace(adapter, board=board), NOW)
+        assert check.status == "WARN" and "no [[block_conditions]] pattern" in check.detail
+
+
 def test_many_pr_blocks_are_cut_short(farm: Farm) -> None:
     farm.make_healthy()
     for n in range(2, 12):
@@ -1203,7 +1225,7 @@ db_path = "/data/boards/web/kanban.db"
 [connectors.github]
 repos = ["example/app", "example/web"]
 """
-PATTERN = """
+BOARD_PATTERN = """
 [[block_conditions]]
 pattern = 'automerge PR #(?P<pr>\\d+)'
 kind = "pr_merged"
@@ -1219,16 +1241,16 @@ def test_block_patterns_per_board(tmp_path: Path) -> None:
         path.write_text(text)
         return check_block_condition_boards(load_settings(path))
 
-    bare = PATTERN.format(extra='repo = "example/app"')
+    bare = BOARD_PATTERN.format(extra='repo = "example/app"')
     warned = check(BOARDS_FARM + bare)
     assert warned is not None and warned.status == "WARN" and "#1 (example/app)" in warned.detail
-    scoped = PATTERN.format(extra='repo = "example/app"\nboards = ["qr"]')
+    scoped = BOARD_PATTERN.format(extra='repo = "example/app"\nboards = ["qr"]')
     passed = check(
-        BOARDS_FARM + scoped + PATTERN.format(extra='repo = "example/web"\nboards = ["web"]')
+        BOARDS_FARM + scoped + BOARD_PATTERN.format(extra='repo = "example/web"\nboards = ["web"]')
     )
     assert passed is not None and passed.status == "PASS"
     # A pattern without a repo resolves only qualified references: nothing to scope.
-    assert check(BOARDS_FARM + PATTERN.format(extra="")).status == "PASS"  # type: ignore[union-attr]
+    assert check(BOARDS_FARM + BOARD_PATTERN.format(extra="")).status == "PASS"  # type: ignore[union-attr]
     # One board: nothing to warn about, no line printed.
     one = '[adapters.hermes]\ndb_path = "/d/k.db"\n[connectors.github]\nrepos = ["example/app"]\n'
     assert check(one + bare) is None

@@ -229,3 +229,10 @@ def test_block_condition_boards_on_a_hub_are_the_agents(tmp_path: Path) -> None:
     )
     settings = load_settings(write(tmp_path, hub + SCOPED.format(board="web")))
     assert settings.block_conditions[0].boards == frozenset({"web"})
+
+
+def test_block_condition_board_names_are_the_adapters() -> None:
+    from kelpie.app import _BOARD_NAME
+    from kelpie.connectors.github.blocks import BOARD_NAME
+
+    assert BOARD_NAME.pattern == _BOARD_NAME.pattern
