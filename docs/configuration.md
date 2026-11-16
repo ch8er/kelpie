@@ -2184,6 +2184,14 @@ Patterns without `repo` resolve only qualified references (`owner/repo#63`, PR l
 need no scope.
 
 ```toml
+[[adapters.hermes.boards]]
+name = "app"
+db_path = "~/.hermes/kanban/boards/app/kanban.db"
+
+[[adapters.hermes.boards]]
+name = "site"
+db_path = "~/.hermes/kanban/boards/site/kanban.db"
+
 [connectors.github]
 repos = ["example/app", "example/site"]
 
