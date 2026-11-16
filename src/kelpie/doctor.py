@@ -930,6 +930,8 @@ def check_pr_blocks(settings: Settings, adapter: HermesAdapter, now: datetime) -
             "set enabled = true in [connectors.github]",
         )
     patterns = [p for p in settings.block_conditions if "block" in p.applies_to]
+    if adapter.board is not None:  # patterns scoped to other boards do not read this one
+        patterns = [p for p in patterns if not p.boards or adapter.board in p.boards]
     if not patterns:
         return _warn(
             name,
@@ -970,6 +972,31 @@ def check_pr_blocks(settings: Settings, adapter: HermesAdapter, now: datetime) -
             "for bare #N, and list every repository agents push to",
         )
     return _pass(name, f"{found}; every one names a PR [[block_conditions]] can check")
+
+
+BOARD_PATTERNS = "block patterns per board"
+
+
+def check_block_condition_boards(settings: Settings) -> Check | None:
+    """On a farm of several boards, a ``[[block_conditions]]`` pattern with a ``repo`` for
+    bare references (``#63``) and no ``boards`` reads every board's tasks, so it attaches
+    PR #63 of its ``repo`` to blocks on boards that work in another repository. None (no
+    check printed) unless the server reads several boards and has such patterns to judge."""
+    hermes = settings.hermes
+    boards = hermes.boards if hermes is not None else ()
+    patterns = settings.block_conditions
+    if len(boards) < 2 or not patterns:
+        return None
+    unscoped = [f"#{i + 1} ({p.repo})" for i, p in enumerate(patterns) if p.repo and not p.boards]
+    if not unscoped:
+        return _pass(BOARD_PATTERNS, f"{len(boards)} boards; bare references are scoped")
+    return _warn(
+        BOARD_PATTERNS,
+        f"{len(boards)} boards, but [[block_conditions]] {', '.join(unscoped)} resolve "
+        "bare references (#N) on every board: a block on a board that works in another "
+        "repository gets that repository's PR",
+        "add boards = [...] to each pattern with a repo (one pattern table per repository)",
+    )
 
 
 def check_snooze_markers(settings: Settings, now: datetime) -> Check:
@@ -1840,6 +1867,8 @@ def run_checks(
         checks.append(_skip("PR blocks have conditions", why))
     checks += [check_pr_blocks(settings, b, at) for b in boards]
     checks.append(check_snooze_markers(settings, at))
+    if (scoped := check_block_condition_boards(settings)) is not None:
+        checks.append(scoped)
     checks += cc_checks
     checks += oc_checks
     checks += gi_checks

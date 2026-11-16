@@ -2168,8 +2168,45 @@ the block and rule 1 treats it as a declared wait. Needs `[connectors.github]`.
 | `kind` | *required* | `pr_merged` or `ci_green` (a `ci_status` condition). |
 | `repo` | unset | `owner/name` for bare references such as `#123`; must be in `[connectors.github] repos`. |
 | `applies_to` | `["block"]` | `block` (a blocked task's reason) and/or `ready_task` (a ready task's title, for `dispatch_gate`). |
+| `boards` | unset (every board) | Read only the tasks of these boards: names from [`[[adapters.hermes.boards]]`](#adaptershermesboards), checked at startup. On a `kelpie serve` with `[hub]`, boards are named in the agents' configs, so any board name is accepted. |
 
-A condition is attached only after GitHub confirms that the PR exists.
+A condition is attached only after GitHub confirms that the PR exists. A block reason that
+names several PRs ("Waiting for exact-head CI and ordered merges #380 → #381 → #382") gets
+the first PR a pattern matches (here #380): write the pattern so its `pr` group lands on the
+PR the block waits for. A ready task's title gets every PR it names (up to 5).
+
+**Several boards, several repositories.** `repo` resolves bare references such as `#63`,
+and the same number usually exists in every repository of the farm. When boards work in
+different repositories, write one pattern table per repository and scope each with
+`boards`; a pattern without `boards` reads every board, as on a one-board farm, and
+`kelpie doctor` warns about each one that has a `repo` ("block patterns per board").
+Patterns without `repo` resolve only qualified references (`owner/repo#63`, PR links) and
+need no scope.
+
+```toml
+[connectors.github]
+repos = ["example/app", "example/site"]
+
+[[block_conditions]]           # board "app" works in example/app
+pattern = '\bautomerge PR #(?P<pr>\d+)'
+kind = "pr_merged"
+repo = "example/app"
+boards = ["app"]
+
+[[block_conditions]]           # board "site" works in example/site
+pattern = '\bautomerge PR #(?P<pr>\d+)'
+kind = "pr_merged"
+repo = "example/site"
+boards = ["site"]
+
+[[block_conditions]]           # qualified references, on every board
+pattern = 'waiting for (?:ci|merge) of (?P<pr>[\w.-]+/[\w.-]+#\d+)'
+kind = "pr_merged"
+```
+
+A board is `Task.board`: the name of a board in `[[adapters.hermes.boards]]`, on this
+server or in an agent's config. A `kelpie agent` that reads one board has no board name;
+its tasks are read only by patterns without `boards`.
 
 ## [connectors.human_tasks]
 

@@ -12,6 +12,7 @@ from kelpie.connectors.github.blocks import (
     MAX_READY_REFS,
     MAX_TASK_TEXT,
     ConditionSync,
+    check_boards,
     load_block_conditions,
 )
 from kelpie.connectors.github.client import GitHubClient
@@ -615,3 +616,92 @@ def test_platform_ci_condition_with_a_sha_stays_bound_to_it_across_a_park() -> N
         checked = connector.check(registered)
     assert checked.satisfied is False and checked.params["sha"] == old
     assert checked.params["head_sha"] == new
+
+
+# --- boards: one pattern per repository on a farm of several boards --------------------
+
+OTHER = "example/other"
+BOARDS = [
+    {"pattern": r"automerge PR #(?P<pr>\d+)", "kind": "pr_merged", "repo": REPO, "boards": ["a"]},
+    {"pattern": r"automerge PR #(?P<pr>\d+)", "kind": "pr_merged", "repo": OTHER, "boards": ["b"]},
+]
+
+
+def on_board(board: str, task: Task) -> Task:
+    return replace(task, id=f"{board}:{task.id}", board=board)
+
+
+def board_sync(gh: FakeGitHub, raw: list[dict[str, object]]) -> ConditionSync:
+    connector = GitHubConnector(GitHubClient(gh.url, TOKEN, clock=Clock(NOW)), [REPO, OTHER])
+    return ConditionSync(connector, load_block_conditions(raw, [REPO, OTHER]))
+
+
+def test_same_pr_number_on_two_boards_resolves_to_each_boards_repo() -> None:
+    reason = "automerge PR #63 — review accepted, waiting for CI"
+    a = on_board("a", blocked("t_1", reason, NOW))
+    b = on_board("b", blocked("t_1", reason, NOW))
+    with serve() as gh:
+        gh.pull(REPO, 63)
+        gh.pull(OTHER, 63)
+        out = board_sync(gh, BOARDS)(Snapshot(now=NOW, tasks=(a, b)))
+    by_task = {c.task_id: c for c in out.conditions}
+    assert by_task["a:t_1"].params["repo"] == REPO
+    assert by_task["b:t_1"].params["repo"] == OTHER
+    assert {t.block.condition_id for t in out.tasks if t.block} == {
+        "block:a:t_1:pr_merged:example/repo#63",
+        "block:b:t_1:pr_merged:example/other#63",
+    }
+
+
+def test_a_scoped_pattern_leaves_other_boards_alone() -> None:
+    # Negative: board c has no pattern of its own; neither repo's #63 is attached to it.
+    c = on_board("c", blocked("t_1", "automerge PR #63 — waiting for CI", NOW))
+    single = blocked("T-9", "automerge PR #63 — waiting for CI", NOW)  # no board at all
+    with serve() as gh:
+        gh.pull(REPO, 63)
+        gh.pull(OTHER, 63)
+        out = board_sync(gh, BOARDS)(Snapshot(now=NOW, tasks=(c, single)))
+    assert out.conditions == ()
+    assert all(t.block is not None and t.block.condition_id is None for t in out.tasks)
+
+
+def test_a_pattern_without_boards_reads_every_board_as_before() -> None:
+    raw = [{"pattern": r"automerge PR #(?P<pr>\d+)", "kind": "pr_merged", "repo": REPO}]
+    a = on_board("a", blocked("t_1", "automerge PR #63", NOW))
+    with serve() as gh:
+        gh.pull(REPO, 63)
+        out = board_sync(gh, raw)(
+            Snapshot(now=NOW, tasks=(a, blocked("T-2", "automerge PR #63", NOW)))
+        )
+    assert {c.task_id for c in out.conditions} == {"a:t_1", "T-2"}
+
+
+def test_ordered_merges_attach_the_first_pr() -> None:
+    reason = (
+        "PR #382 source review accepted at abc123. Waiting for exact-head CI and ordered "
+        "merges #380 → #381 → #382"
+    )
+    raw = [{"pattern": r"ordered merges #(?P<pr>\d+)", "kind": "pr_merged", "repo": REPO}]
+    with serve() as gh:
+        for n in (380, 381, 382):
+            gh.pull(REPO, n)
+        out = board_sync(gh, raw)(Snapshot(now=NOW, tasks=(blocked("T-1", reason, NOW),)))
+    (c,) = out.conditions
+    assert c.params["pr"] == 380
+
+
+@pytest.mark.parametrize("boards", [[], "a", ["A"], [""], ["a b"], [1]])
+def test_boards_validation(boards: object) -> None:
+    raw = [{"pattern": "(?P<pr>.+)", "kind": "pr_merged", "repo": REPO, "boards": boards}]
+    with pytest.raises(ValueError, match="boards must be"):
+        load_block_conditions(raw, [REPO])
+
+
+def test_boards_are_checked_against_the_farm() -> None:
+    patterns = load_block_conditions(BOARDS, [REPO, OTHER])
+    check_boards(patterns, ["a", "b", "c"])
+    check_boards(patterns, None)  # agents report boards ([hub]): any name goes
+    with pytest.raises(ValueError, match=r"#2: boards b are not boards of the farm \(a\)"):
+        check_boards(patterns, ["a"])
+    with pytest.raises(ValueError, match="not set"):
+        check_boards(patterns, [])

@@ -1186,3 +1186,49 @@ def test_hooks_fire_skips_a_spool_line_dated_ahead(tmp_path: Path) -> None:
     check = check_hooks(adapter, NOW, 1)
     assert check.status != "PASS" and "2d" in check.detail
     assert adapter.status_detail(NOW)[0].startswith("spool: last line 2d")
+
+
+BOARDS_FARM = """
+[adapters.hermes]
+spool = "/data/s.jsonl"
+
+[[adapters.hermes.boards]]
+name = "qr"
+db_path = "/data/boards/qr/kanban.db"
+
+[[adapters.hermes.boards]]
+name = "web"
+db_path = "/data/boards/web/kanban.db"
+
+[connectors.github]
+repos = ["example/app", "example/web"]
+"""
+PATTERN = """
+[[block_conditions]]
+pattern = 'automerge PR #(?P<pr>\\d+)'
+kind = "pr_merged"
+{extra}
+"""
+
+
+def test_block_patterns_per_board(tmp_path: Path) -> None:
+    from kelpie.doctor import check_block_condition_boards
+
+    def check(text: str) -> Check | None:
+        path = tmp_path / "kelpie.toml"
+        path.write_text(text)
+        return check_block_condition_boards(load_settings(path))
+
+    bare = PATTERN.format(extra='repo = "example/app"')
+    warned = check(BOARDS_FARM + bare)
+    assert warned is not None and warned.status == "WARN" and "#1 (example/app)" in warned.detail
+    scoped = PATTERN.format(extra='repo = "example/app"\nboards = ["qr"]')
+    passed = check(
+        BOARDS_FARM + scoped + PATTERN.format(extra='repo = "example/web"\nboards = ["web"]')
+    )
+    assert passed is not None and passed.status == "PASS"
+    # A pattern without a repo resolves only qualified references: nothing to scope.
+    assert check(BOARDS_FARM + PATTERN.format(extra="")).status == "PASS"  # type: ignore[union-attr]
+    # One board: nothing to warn about, no line printed.
+    one = '[adapters.hermes]\ndb_path = "/d/k.db"\n[connectors.github]\nrepos = ["example/app"]\n'
+    assert check(one + bare) is None

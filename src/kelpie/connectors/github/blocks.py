@@ -40,6 +40,13 @@ counted for blocks only: a ready task whose PR cannot be resolved simply has no
 prerequisite. A condition id the snapshot already holds (the adapter registered it when the
 task was parked) is not attached again.
 
+Several boards (``boards``). On a farm whose boards work in different repositories, a bare
+``#63`` names a different PR on each board, so a pattern's ``repo`` is right for some boards
+only. ``boards`` scopes a pattern to the tasks of those boards (``Task.board``); a farm
+writes one pattern table per repository. A pattern without ``boards`` reads every task, as
+before. A block reason that names several PRs ("ordered merges #380 → #381 → #382") gets
+the first one a pattern matches (``search``); a ready task's title gets each.
+
 The same step evaluates conditions the platform already registered (``pr_merged`` and
 ``ci_status`` with ``repo``/``pr`` params for a configured repository).
 """
@@ -68,7 +75,9 @@ DEFAULT_TICK_BUDGET = timedelta(seconds=10)
 # Blocks whose reason matched a pattern: got a condition; the PR could not be resolved
 # (bad ref, repo not allowed, 404); GitHub could not confirm it yet; the step failed on it.
 OUTCOMES = ("attached", "unresolved", "unconfirmed", "error")
-_KEYS = {"pattern", "kind", "repo", "applies_to"}
+_KEYS = {"pattern", "kind", "repo", "applies_to", "boards"}
+# A board name as [[adapters.hermes.boards]] takes it (the prefix of the board's task ids).
+BOARD_NAME = re.compile(r"[a-z0-9][a-z0-9_-]{0,31}")
 # What a pattern reads: a block reason, or the title of a ready task (the gate).
 TARGETS = ("block", "ready_task")
 
@@ -79,17 +88,26 @@ class BlockConditionPattern:
     kind: str  # pr_merged | ci_green
     repo: str | None = None  # owner/name for bare refs such as "#123"
     applies_to: frozenset[str] = frozenset({"block"})  # TARGETS
+    # The boards whose tasks the pattern reads (``Task.board``); empty: every task.
+    boards: frozenset[str] = frozenset()
 
     @property
     def condition_kind(self) -> ConditionKind:
         return KINDS[self.kind]
+
+    def reads(self, task: Task) -> bool:
+        """Whether the pattern reads this task's text: it is on one of ``boards``, or the
+        pattern is not scoped to boards."""
+        return not self.boards or task.board in self.boards
 
 
 def load_block_conditions(
     raw: Any, repos: Collection[str] | None
 ) -> tuple[BlockConditionPattern, ...]:
     """Parse ``[[block_conditions]]``. ``repos`` is the GitHub allow-list, None when the
-    connector is not configured (then patterns are refused: nothing could resolve them)."""
+    connector is not configured (then patterns are refused: nothing could resolve them).
+    ``boards`` names are checked for their form here; :func:`check_boards` checks them
+    against the farm's boards once the adapters are known."""
     if raw is None:
         return ()
     if not isinstance(raw, list) or not all(isinstance(t, dict) for t in raw):
@@ -128,8 +146,35 @@ def load_block_conditions(
             or not all(isinstance(t, str) and t in TARGETS for t in targets)
         ):
             raise ValueError(f"{where}: applies_to must be a non-empty list of {list(TARGETS)}")
-        patterns.append(BlockConditionPattern(pattern, kind, repo, frozenset(targets)))
+        boards = table.get("boards", [])
+        if (
+            not isinstance(boards, list)
+            or ("boards" in table and not boards)
+            or not all(isinstance(b, str) and BOARD_NAME.fullmatch(b) for b in boards)
+        ):
+            raise ValueError(
+                f"{where}: boards must be a non-empty list of board names "
+                "(as in [[adapters.hermes.boards]])"
+            )
+        patterns.append(
+            BlockConditionPattern(pattern, kind, repo, frozenset(targets), frozenset(boards))
+        )
     return tuple(patterns)
+
+
+def check_boards(patterns: Sequence[BlockConditionPattern], known: Collection[str] | None) -> None:
+    """Every ``boards`` name is a board of the farm. ``known`` is the boards the server
+    reads itself; None when agents report boards too (``[hub]``): their names are in the
+    agents' configs, so any name is accepted."""
+    if known is None:
+        return
+    for i, p in enumerate(patterns):
+        if unknown := sorted(p.boards - set(known)):
+            where = f"[[block_conditions]] #{i + 1}"
+            have = ", ".join(sorted(known)) or "none: [[adapters.hermes.boards]] is not set"
+            raise ValueError(
+                f"{where}: boards {', '.join(unknown)} are not boards of the farm ({have})"
+            )
 
 
 class Match(NamedTuple):
@@ -146,6 +191,7 @@ def target_of(
 ) -> str | None:
     """Which text of the task the patterns read: a bare block's reason, or a ready task's
     title (for the dispatch gate). None: neither applies."""
+    patterns = [p for p in patterns if p.reads(task)]
     if not patterns:
         return None
     if _bare_block(task, snapshot):
@@ -174,7 +220,7 @@ def text_matches(
     found: list[Match] = []
     seen: set[tuple[str, str]] = set()
     for p in patterns:
-        if target not in p.applies_to:
+        if target not in p.applies_to or not p.reads(task):
             continue
         matches = [p.pattern.search(text)] if target == "block" else p.pattern.finditer(text)
         for m in matches:

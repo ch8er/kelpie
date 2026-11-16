@@ -60,7 +60,7 @@ def sources(settings: Settings) -> ReportSources:
         modes=modes,
         hold_labels=tuple(hold_labels(engine.rules.get("bottlenecks", {}))),
         block_kinds=tuple(
-            BlockKind(b.pattern, b.condition_kind, b.repo)
+            BlockKind(b.pattern, b.condition_kind, b.repo, b.boards)
             for b in settings.block_conditions
             if "block" in b.applies_to
         ),

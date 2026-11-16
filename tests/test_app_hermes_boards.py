@@ -192,3 +192,40 @@ def test_a_broken_board_is_unobserved_in_the_merged_snapshot(tmp_path: Path) -> 
     snap = merged_snapshot([HermesBoards(kids)], Metrics(), clock=lambda: now)()
     board.close()
     assert [t.id for t in snap.tasks] == ["qr:t_1"] and snap.unobserved == ("sign",)
+
+
+# --- [[block_conditions]] boards: names of these boards ---------------------------------
+
+SCOPED = """
+[connectors.github]
+repos = ["example/repo", "example/other"]
+
+[[block_conditions]]
+pattern = 'automerge PR #(?P<pr>\\d+)'
+kind = "pr_merged"
+repo = "example/repo"
+boards = ["{board}"]
+"""
+
+
+def test_block_condition_boards_name_the_farms_boards(tmp_path: Path) -> None:
+    settings = load_settings(write(tmp_path, TWO + SCOPED.format(board="qr")))
+    (pattern,) = settings.block_conditions
+    assert pattern.boards == frozenset({"qr"})
+    with pytest.raises(ConfigError, match=r"boards web are not boards of the farm \(qr, sign\)"):
+        load_settings(write(tmp_path, TWO + SCOPED.format(board="web")))
+
+
+def test_block_condition_boards_need_named_boards(tmp_path: Path) -> None:
+    one = '[adapters.hermes]\ndb_path = "/d/k.db"\n'
+    with pytest.raises(ConfigError, match="not set"):
+        load_settings(write(tmp_path, one + SCOPED.format(board="qr")))
+
+
+def test_block_condition_boards_on_a_hub_are_the_agents(tmp_path: Path) -> None:
+    hub = (
+        '[hub]\nlisten = "127.0.0.1:1"\nallow_plain_http = true\n'
+        '[[hub.agents]]\nname = "laptop"\ntoken_env = "T"\n'
+    )
+    settings = load_settings(write(tmp_path, hub + SCOPED.format(board="web")))
+    assert settings.block_conditions[0].boards == frozenset({"web"})

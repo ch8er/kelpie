@@ -315,6 +315,26 @@ def test_a_wait_a_block_reason_declares_counts_by_its_pattern_kind() -> None:
     assert known(ci_wait) == "quota"  # a registered unmet condition comes first
 
 
+def test_a_declared_wait_follows_the_patterns_boards() -> None:
+    import re
+    from dataclasses import replace
+
+    from kelpie.report.waits import BlockKind
+
+    pattern = re.compile(r"automerge PR #(?P<pr>\d+)", re.I)
+    kinds = (
+        BlockKind(pattern, ConditionKind.PR_MERGED, "example/app", frozenset({"qr"})),
+        BlockKind(pattern, ConditionKind.PR_MERGED, "example/web", frozenset({"web"})),
+    )
+    of = WaitCauses((), (), (), kinds)
+    task = Task("t", "t", Status.BLOCKED, at(8), block=Block("automerge PR #63", at(8)))
+    on_qr = of.condition(replace(task, id="qr:t", board="qr"))
+    on_web = of.condition(replace(task, id="web:t", board="web"))
+    assert on_qr is not None and on_qr.params == {"repo": "example/app", "pr": 63}
+    assert on_web is not None and on_web.params == {"repo": "example/web", "pr": 63}
+    assert of.condition(replace(task, board="other")) is None  # no pattern for this board
+
+
 def test_a_declared_ci_wait_heads_the_report() -> None:
     import re
 

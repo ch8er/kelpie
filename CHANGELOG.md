@@ -10,6 +10,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 
 ### Added
 
+- **`[[block_conditions]]` per board** (`boards = [...]`). On a farm whose boards work in
+  different repositories, a bare `#63` names a different PR on each board; a pattern
+  scoped with `boards` reads only those boards' tasks, so one pattern table per repository
+  resolves each board's references in its own repository. Board names are checked against
+  `[[adapters.hermes.boards]]` at startup (any name on a server with `[hub]`). A pattern
+  without `boards` reads every board, as before. `kelpie doctor` warns ("block patterns
+  per board") when a server reads several boards and a pattern with a `repo` has no
+  `boards`. The daily report's declared waits and doctor's "PR blocks have conditions"
+  follow the scope. Documented: a reason naming several PRs gets the first one matched.
+
 - **Asks in block reasons and questions to people** (#461), observe by default like every
   rule. An agent that blocks its task on a question to another agent ("@architect-1 which
   schema version?", no condition) now opens an `unanswered_asks` obligation: the agent asked
