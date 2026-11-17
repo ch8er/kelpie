@@ -51,12 +51,18 @@ _DIGITS = re.compile(_NUMBER, re.ASCII)
 _REF = re.compile(rf"(?:(?P<repo>{_NAME}/{_NAME}))?#(?P<n>{_NUMBER})|(?P<bare>{_NUMBER})", re.ASCII)
 _URL_PATH = re.compile(rf"/(?P<repo>{_NAME}/{_NAME})/pull/(?P<n>{_NUMBER})(?:/.*)?", re.ASCII)
 
+# The head CI a condition carries (head_ci_params); kept, like ``satisfied``, on an error.
+_HEAD_KEYS = frozenset({"head_ci", "head_ci_failed", "head_ci_red_since"})
+# Keys a check writes from scratch: never carried over from an earlier answer.
+_RESULTS = frozenset({"error", "terminal"}) | _HEAD_KEYS
 GREEN = frozenset({"success"}) | ci_runs.NEUTRAL
 RED = ci_runs.RED
 MAX_PAGE = 100  # statuses and check runs: one page; beyond it the CI state is not known
 MAX_CONFIRMED = 10_000  # PRs remembered as existing
 REPROBE = timedelta(hours=1)  # how long "this token may not read X" is believed
 MAX_RUN_PAGES = 3  # pages of workflow runs of one commit (of MAX_PAGE) before it is unknown
+MAX_FAILED = 5  # red checks named in a condition's ``head_ci_failed``
+MAX_CHECK_NAME = 80  # characters of each name (checks are named by the repository's CI)
 
 # CI sources, as named in ``CiState.sources`` and ``params.ci_source``.
 STATUSES = "statuses"
@@ -135,6 +141,10 @@ class CiState:
     sources: tuple[str, ...] = ()  # what it was read from: STATUSES, CHECK_RUNS, ACTIONS
     refused: tuple[str, ...] = ()  # sources the token may not read (HTTP 403)
     missing: tuple[str, ...] = ()  # ``ci_workflows`` entries without a result on the commit
+    failed: tuple[str, ...] = ()  # of a failure: the red checks' names (statuses, runs)
+    # Of a failure with nothing still running: when the last check completed (the commit's
+    # CI finished red then); None while a check runs, or when no time was reported.
+    red_since: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -187,6 +197,9 @@ class _Evidence:
         self.fetched: list[datetime] = []
         self.incomplete = False  # more results than one page: the rest may be red or running
         self.missing: tuple[str, ...] = ()  # listed workflows without a result
+        self.failed: list[str] = []  # names of the red statuses, check runs and workflows
+        self.ended: list[datetime] = []  # completion times of every finished result
+        self.running = False  # a result is still pending (also behind a failure)
 
     def add_statuses(self, response: Response) -> None:
         self.fetched.append(response.fetched_at)
@@ -196,9 +209,11 @@ class _Evidence:
         if statuses and combined.get("state") in {"failure", "error"}:
             self.states.append("failure")  # GitHub's own verdict over all statuses
         for s in statuses:
-            self.states.append(_verdict(s.get("state"), {"success"}, {"failure", "error"}))
+            verdict = _verdict(s.get("state"), {"success"}, {"failure", "error"})
+            self.states.append(verdict)
             if s.get("state") == "success" and (t := _time(s.get("updated_at"))):
                 self.times.append(t)
+            self._note(verdict, s.get("context"), _time(s.get("updated_at")))
 
     def add_check_runs(self, response: Response) -> None:
         self.fetched.append(response.fetched_at)
@@ -208,10 +223,13 @@ class _Evidence:
         for run in check_runs:
             if run.get("status") != "completed":
                 self.states.append("pending")
+                self.running = True
                 continue
-            self.states.append(_verdict(run.get("conclusion"), GREEN, RED))
+            verdict = _verdict(run.get("conclusion"), GREEN, RED)
+            self.states.append(verdict)
             if t := _time(run.get("completed_at")):
                 self.times.append(t)
+            self._note(verdict, run.get("name"), _time(run.get("completed_at")))
 
     def add_runs(
         self, runs: _Runs, workflows: Collection[str], pr: int | None
@@ -227,13 +245,32 @@ class _Evidence:
             self.states.append(verdict.state)
         if verdict.completed_at is not None:
             self.times.append(verdict.completed_at)
+        self.failed.extend(verdict.failed)
+        self.running = self.running or verdict.running
+        if verdict.done_at is not None:
+            self.ended.append(verdict.done_at)
         return verdict
+
+    def _note(self, verdict: str, name: Any, at: datetime | None) -> None:
+        """One status or check run, for a failure's names and completion time."""
+        if verdict == "pending":
+            self.running = True
+            return
+        if at is not None:
+            self.ended.append(at)
+        if verdict == "failure":
+            self.failed.append(name if isinstance(name, str) and name else "check")
+
+    def _red(self, at: datetime, *rest: Any) -> CiState:
+        names = tuple(dict.fromkeys(" ".join(n.split())[:MAX_CHECK_NAME] for n in self.failed))
+        done = None if self.running or self.incomplete else max(self.ended, default=None)
+        return CiState("failure", None, at, *rest, failed=names[:MAX_FAILED], red_since=done)
 
     def state(self, sources: tuple[str, ...], refused: tuple[str, ...]) -> CiState:
         at = min(self.fetched)
         m = self.missing if "failure" not in self.states and not self.incomplete else ()
         if "failure" in self.states:
-            return CiState("failure", None, at, sources, refused, m)
+            return self._red(at, sources, refused, m)
         if self.incomplete:
             return CiState("incomplete", None, at, sources, refused, m)
         if not self.states:
@@ -306,7 +343,7 @@ class GitHubConnector:
         ref = self.ref_from_params(condition.params)
         if condition.kind not in self.kinds or ref is None:
             return condition
-        params = {k: v for k, v in condition.params.items() if k not in {"error", "terminal"}}
+        params = {k: v for k, v in condition.params.items() if k not in _RESULTS}
         try:
             pull = self.pull(ref)
             params["pr_state"] = pull.state
@@ -333,6 +370,9 @@ class GitHubConnector:
             # that had none follows the PR's head (``head_sha``, a result key) wherever it
             # is parked and registered again.
             params.update(ci_state=ci.state, ci_source="+".join(ci.sources))
+            head = (pull.head_sha or "").lower()
+            if head and head.startswith(sha.lower()):  # the head, maybe as a short sha
+                params.update(head_ci_params(ci))
             expect = condition.params.get("expect", "success")
             satisfied: bool | None = ci.state == expect
             if ci.state == "incomplete":
@@ -348,7 +388,33 @@ class GitHubConnector:
             # Unknown now: the condition keeps what it last knew (``satisfied`` and
             # ``checked_at``), and rules judge how old that is.
             params["error"] = exc.kind
+            # As ``satisfied``: the head CI it last knew stays (rules judge ``checked_at``).
+            params.update({k: v for k, v in condition.params.items() if k in _HEAD_KEYS})
             return replace(condition, params=params)
+
+    def head_ci(self, condition: Condition) -> Condition:
+        """A ``pr_merged`` condition of an open PR with the CI state of the PR's head added
+        (``head_ci``, ``head_ci_failed``, ``head_ci_red_since``: :func:`head_ci_params`), so
+        a rule can see a block that waits for a merge while its PR's own CI is red. Read
+        after :meth:`check`, from its ``head_sha``; never raises, and changes nothing about
+        whether the condition holds. Anything else comes back unchanged."""
+        params = condition.params
+        sha, ref = params.get("head_sha"), self.ref_from_params(params)
+        if (
+            condition.kind is not ConditionKind.PR_MERGED
+            or ref is None
+            or params.get("pr_state") != "open"
+            or "error" in params
+            or not isinstance(sha, str)
+            or not _SHA.fullmatch(sha)
+        ):
+            return condition
+        try:
+            ci = self.ci(ref.repo, sha, ref.number)
+        except GitHubError as exc:
+            log.debug("head CI of %s not read: %s", ref, exc)
+            return condition
+        return replace(condition, params={**params, **head_ci_params(ci)})
 
     def confirmed(self, ref: PrRef) -> bool:
         """Whether GitHub has shown this PR to exist (since start-up, until a 404)."""
@@ -575,6 +641,20 @@ def _str(value: Any) -> str:
 
 def _pull_path(ref: PrRef) -> str:
     return f"/repos/{ref.repo}/pulls/{ref.number}"
+
+
+def head_ci_params(ci: CiState) -> dict[str, Any]:
+    """The CI state of a PR's head, as condition params: ``head_ci`` (the state), and for a
+    failure ``head_ci_failed`` (the red checks' names, at most :data:`MAX_FAILED`) and,
+    once nothing is still running, ``head_ci_red_since`` (ISO 8601: when the last check
+    completed). A check that stays pending (a status no bot ever completes) keeps
+    ``head_ci_red_since`` unset: the commit's CI has not finished."""
+    out: dict[str, Any] = {"head_ci": ci.state}
+    if ci.state == "failure":
+        out["head_ci_failed"] = list(ci.failed)
+        if ci.red_since is not None:
+            out["head_ci_red_since"] = ci.red_since.isoformat()
+    return out
 
 
 def _verdict(value: Any, green: Collection[str], red: Collection[str]) -> str:

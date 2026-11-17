@@ -357,6 +357,26 @@ that came due during the outage is sent when it ends.
 A condition that can never be met (a PR closed without merging, a human task cancelled)
 alerts at once.
 
+**CI red under a block that waits for CI.** An agent blocks "waiting for CI" on a PR (a
+`pr_merged` or `ci_green` condition from [[[block_conditions]]](#block_conditions), or one
+the platform registered), and the PR's own CI finishes red: the block now waits for a fix,
+though its reason still says CI. The GitHub step puts the CI outcome of the PR's head into
+the condition (`head_ci`, the red checks in `head_ci_failed`, and `head_ci_red_since`, when
+the last check completed, once nothing is still running). Once the head has been red for
+`ci_red_after` (counted from the block when the block is younger), on evidence checked since
+the block was set, this rule alerts the task's owner: "PR #63 CI failed on its head (test
+(linux), pr-rules); the block still says it waits for CI" (`ci-red`, params `pr`, `repo`,
+`head_sha`, `failed_checks`, `red_since`, `owner`). It is a state of its own per block, so
+the overdue alert after `max_block` is unchanged. While [`unanswered_asks`](#unanswered_asks)
+reaches agents, the task's assignee (an agent, while it has no live session) also gets a
+reminder once per head commit (`source: ci_red`, `recipient`). Kelpie never unblocks or
+changes the board for this; a push that turns the head green, or the merge, ends it.
+
+| Key | Default | Unit | Meaning |
+| --- | --- | --- | --- |
+| `ci_red_after` | `"30m"` | duration or `false` | How long the head's CI must have been red. `false`: off, and the GitHub step no longer reads the head CI of PRs that blocks wait to merge. On (in `observe` too), each such open PR costs the CI lookups a `ci_green` condition makes: statuses and check runs, plus the Actions runs (up to 3 pages) and the workflow list where the token may not read those or `ci_workflows` is set. They are cached like the rest and read after every other lookup of the tick, with what `max_requests_per_tick` left, so they never delay a merge being seen. A check that stays pending (a status no bot completes) means the CI has not finished: no alert. |
+| `ci_red_mode` | `"observe"` | `"observe"` or `"rule"` | A new check: the alert and the reminder are only logged until set to `"rule"`, which follows the rule's mode. |
+
 **Blocks rule 13 lists go to rule 13.** A blocked task that rule 13 lists in a person's
 "needs you" digest gets no no-condition, overdue or dead-end alert from this rule: the
 person gets one message instead of two. Rule 13 lists an agent's block whose reason asks a

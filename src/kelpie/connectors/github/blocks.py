@@ -49,6 +49,15 @@ the first one a pattern matches (``search``); a ready task's title gets each.
 
 The same step evaluates conditions the platform already registered (``pr_merged`` and
 ``ci_status`` with ``repo``/``pr`` params for a configured repository).
+
+The PR's head CI (``head_ci``). With ``head_ci`` on (``kelpie.app`` turns it on unless rule
+4's ``ci_red_after`` is ``false``), a blocked task's ``pr_merged`` condition of an open PR
+also gets the CI state of the PR's head
+(``head_ci``, ``head_ci_failed``, ``head_ci_red_since``: :func:`~kelpie.connectors.github.
+connector.head_ci_params`), as a ``ci_status`` condition on the head always does, so rule 4
+can tell a block that "waits for CI" while that CI already finished red. It costs the CI
+lookups of each such PR (cached like the rest), read in a second pass with what the tick's
+budget left, and never changes whether a condition holds.
 """
 
 from __future__ import annotations
@@ -262,6 +271,7 @@ class ConditionSync:
     observer: BlockConditionObserver | None = None
     max_requests: int = DEFAULT_MAX_REQUESTS  # per tick
     tick_budget: timedelta = DEFAULT_TICK_BUDGET  # wall-clock time per tick
+    head_ci: bool = False  # also read the head CI of open PRs that pr_merged waits on
     _exhausted: bool = field(default=False, init=False, repr=False)
 
     def __call__(self, snapshot: Snapshot) -> Snapshot:
@@ -319,6 +329,7 @@ class ConditionSync:
                 outcomes[outcome] += 1
             if fresh := [c for c in found if c.id not in known]:
                 added[k] = fresh
+        self._heads(tasks, conditions, added)
         self._note_budget()
         if self.observer is not None:
             self.observer.block_conditions(outcomes)
@@ -364,6 +375,25 @@ class ConditionSync:
         except Exception as exc:  # check() never raises by contract; belt and braces
             log.warning("condition %s could not be checked: %s", condition.id, exc)
             return condition
+
+    def _heads(
+        self, tasks: Sequence[Task], conditions: list[Condition], added: dict[int, list[Condition]]
+    ) -> None:
+        """With ``head_ci``: the head CI of open PRs that blocked tasks' ``pr_merged``
+        conditions wait on, in place. A second pass, after every condition and text had its
+        own lookup: it only spends what the tick's budget left (once the budget is out,
+        answers come from the cache or not at all), so it never delays a merge seen."""
+        if not self.head_ci:
+            return
+        blocked = {t.id for t in tasks if t.status is Status.BLOCKED}
+        lists = [conditions, *added.values()]
+        for found in lists:
+            for i, c in enumerate(found):
+                if c.kind is ConditionKind.PR_MERGED and c.task_id in blocked:
+                    try:
+                        found[i] = self.connector.head_ci(c)
+                    except Exception as exc:  # head_ci() never raises; belt and braces
+                        log.warning("head CI for %s could not be read: %s", c.id, exc)
 
     def _target(self, task: Task, snapshot: Snapshot) -> str | None:
         return target_of(task, snapshot, self.patterns)

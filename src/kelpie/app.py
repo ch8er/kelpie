@@ -3174,6 +3174,8 @@ def _github_steps(
         metrics,
         max_requests=github.max_requests_per_tick,
         tick_budget=github.tick_budget,
+        # Rule 4's CI-red check reads the head CI of the PRs blocks wait to merge.
+        head_ci=settings.engine.rules.get("stale_blocks", {}).get("ci_red_after") is not False,
     )
     issues = settings.github_issues
     others = (issues.token_env,) if issues is not None and issues.enabled else ()

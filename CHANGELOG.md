@@ -37,6 +37,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
   `suggest` or `act` gets question items in its digests at once (there is no separate
   switch); set `[engine.modes] needs_you = "observe"` first to watch them.
 
+- **Rule 4 says when a block's PR went red** (`ci_red_after`, 30m; `ci_red_mode`, observe by
+  default). A block that waits for CI or a merge of a PR (`pr_merged` or `ci_green`) keeps
+  saying "waiting for CI" after the PR's own CI failed on its head, and nobody heard of it
+  until `max_block`. The GitHub step now records the head's CI outcome in the condition
+  (`head_ci`, `head_ci_failed`, `head_ci_red_since`; for `pr_merged` it reads the head CI
+  of open PRs while `ci_red_after` is on), and rule 4 alerts the task's owner once the head
+  has been red past the grace period: "PR #N CI failed on its head (<checks>); the block
+  still says it waits for CI". While `unanswered_asks` reaches agents, the idle assignee is
+  reminded once per head commit. Kelpie never unblocks or changes the board for it. Set
+  `[engine.rules.stale_blocks] ci_red_mode = "rule"` to send them.
+
 ### Changed
 
 - **The database schema is now 13**: `kelpie serve` migrates a schema 12 database at start
