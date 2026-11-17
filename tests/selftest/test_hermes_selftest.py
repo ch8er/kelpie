@@ -52,6 +52,9 @@ def fake(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
     monkeypatch.setattr(selftest, "STOP_TIMEOUT", 60.0)
     monkeypatch.setattr(selftest, "WORKER_TIMEOUT", 20.0)
     monkeypatch.setattr(selftest.tempfile, "tempdir", str(tmp_path))  # mkdtemp lands here
+    # A calm host whatever the runner's real load: a busy CI runner would skip every run
+    # (the tests of the overload check pass their own readings).
+    monkeypatch.setattr(selftest, "read_host_load", lambda: HostLoad(1.0, 8, 0.1))
     yield exe
     (bin_dir / "mode").unlink(missing_ok=True)
 
