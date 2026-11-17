@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import math
 import os
 import re
 import sys
@@ -36,6 +37,41 @@ log = logging.getLogger("kelpie.cli")
 
 _RELATIVE = re.compile(r"-\d+[dhms]\w*", re.IGNORECASE)
 _GLOBAL_VALUES = frozenset({"--config", "--log-level"})  # global options that take a value
+
+
+def _number(value: str) -> float:
+    try:
+        number = float(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"not a number: {value!r}") from None
+    if not math.isfinite(number):
+        raise argparse.ArgumentTypeError(f"not a finite number: {value!r}")
+    return number
+
+
+def _max_load(value: str) -> float:
+    """``--max-load``: load per CPU core, more than 0."""
+    if (number := _number(value)) <= 0:
+        raise argparse.ArgumentTypeError("must be more than 0 (load per CPU core)")
+    return number
+
+
+def _max_swap(value: str) -> float:
+    """``--max-swap``: a share of swap, more than 0 and at most 1 (0.9, not 90)."""
+    if not 0 < (number := _number(value)) <= 1:
+        raise argparse.ArgumentTypeError("must be a share from 0 to 1, e.g. 0.9 for 90%")
+    return number
+
+
+def _positive_seconds(value: str) -> float:
+    """``--timeout``: seconds, more than 0 and at most a day."""
+    try:
+        seconds = float(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"not a number of seconds: {value!r}") from None
+    if not 0 < seconds <= 86400:
+        raise argparse.ArgumentTypeError("must be more than 0 and at most 86400 seconds")
+    return seconds
 
 
 def _relative_at(argv: list[str]) -> list[str]:
@@ -264,6 +300,27 @@ def main(argv: Sequence[str] | None = None) -> int:
     selftest_stop.add_argument(
         "--keep", action="store_true", help="keep the throwaway directory (Hermes home, logs)"
     )
+    selftest_stop.add_argument(
+        "--timeout",
+        type=_positive_seconds,
+        default=None,
+        metavar="SECONDS",
+        help="time for each Hermes command and for the agent to start (default 120)",
+    )
+    selftest_stop.add_argument(
+        "--max-load",
+        type=_max_load,
+        default=None,
+        metavar="N",
+        help="skip (exit 3) when the 1-minute load per CPU core is above this (default 4)",
+    )
+    selftest_stop.add_argument(
+        "--max-swap",
+        type=_max_swap,
+        default=None,
+        metavar="SHARE",
+        help="skip (exit 3) when more than this share of swap is used, 0 to 1 (default 0.9)",
+    )
 
     spool = sub.add_parser("spool", help="maintain the hooks spools on this host")
     spool_sub = spool.add_subparsers(dest="spool_command", required=True)
@@ -383,8 +440,16 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _rotate_token(settings, args.grace, args.token)
         if args.command == "selftest":
             from kelpie.selftest.hermes import run as run_selftest
+            from kelpie.selftest.load import DEFAULT_MAX_LOAD, DEFAULT_MAX_SWAP
 
-            return run_selftest(settings, lambda line: print(line, flush=True), keep=args.keep)
+            return run_selftest(
+                settings,
+                lambda line: print(line, flush=True),
+                keep=args.keep,
+                timeout=args.timeout,
+                max_load=DEFAULT_MAX_LOAD if args.max_load is None else args.max_load,
+                max_swap=DEFAULT_MAX_SWAP if args.max_swap is None else args.max_swap,
+            )
         if args.command == "agent":
             return _agent(settings)
         if args.command == "status" and (args.json or args.server is not None):

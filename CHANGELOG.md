@@ -60,6 +60,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
   way (a block's reason text does not outlive `retention`). No rule reads them yet
   ([privacy](docs/privacy.md)).
 
+- **`kelpie selftest stop` now tells an overloaded host from a failure** (#483). It reads the
+  host's load and swap before the first step; above `--max-load` (4 per CPU core) or
+  `--max-swap` (0.9 of swap used) it prints `SKIP  host overloaded (load N, swap M% used); rerun
+  when the farm is quieter` and exits 3 instead of starting. `--timeout` (default 120 s)
+  bounds each Hermes command and the wait for the agent; a step that times out is a
+  `FAIL  timeout:` line with the host's load at that moment.
+
 ### Internal
 
 - Faster span reads (#248): a stored span is decoded by position, without parsing empty

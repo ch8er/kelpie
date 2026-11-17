@@ -17,7 +17,8 @@ takes it), ``author`` (blocks are signed ``default``, as a Hermes that ignores
 ``HERMES_PROFILE_NAME``), ``deaf`` (the worker and its tool command ignore SIGTERM),
 ``silent`` (no tool call reaches the spool: rule 10 never fires), ``rollback`` (the board is
 in rollback-journal mode, not WAL), ``noenv`` (the submitter
-and the tool command show no ``HERMES_HOME``). Several words combine. ``kanban block`` writes
+and the tool command show no ``HERMES_HOME``), ``slow-profile`` (``profile create`` takes
+5 seconds, for the self-test's per-step timeout). Several words combine. ``kanban block`` writes
 the ``HERMES_HOME``, ``HOME``, ``HERMES_PROFILE_NAME`` and ``HERMES_KANBAN_DB`` it got to
 ``block-env.json``.
 """
@@ -212,6 +213,8 @@ def main(argv: list[str]) -> int:
         print("Hermes Agent fake (selftest)")
         return 0
     if argv[:2] == ["profile", "create"]:
+        if "slow-profile" in mode():
+            time.sleep(5)
         (HOME / "profiles" / argv[-1]).mkdir(parents=True)
         return 0
     if argv[:3] == ["kanban", "boards", "create"]:

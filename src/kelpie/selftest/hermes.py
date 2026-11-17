@@ -26,6 +26,15 @@ Hermes home, boards, profiles and gateway are never read or written. In it:
    directory is removed (unless ``keep``).
 
 Each step prints one line, ``PASS|FAIL  <step>: <detail>``. Alerts are printed, not sent.
+
+A busy host is not a failure (issue #483). Before the first step the self-test reads this
+host's load and swap (:mod:`kelpie.selftest.load`); above ``max_load`` per core or
+``max_swap`` used it prints ``SKIP  host overloaded (...)`` and exits :data:`SKIPPED` (3),
+so a cron rerun tells "not run" from "failed" (1). Each Hermes command and the wait for the
+agent get ``timeout`` (``--timeout``, 120 s); a step that runs out of it is a ``FAIL  timeout``
+line with the host's load at that moment, apart from a failed check. The wait for rule 10's
+stop keeps its own limit (``STOP_TIMEOUT``, 300 s: the rule needs its calls); a run not
+stopped within it prints the host's load too.
 """
 
 from __future__ import annotations
@@ -71,6 +80,7 @@ from kelpie.core.ledger import Outcome
 from kelpie.core.model import Snapshot
 from kelpie.core.rule import Rule
 from kelpie.rules import REGISTRY
+from kelpie.selftest.load import DEFAULT_MAX_LOAD, DEFAULT_MAX_SWAP, HostLoad, read_host_load
 from kelpie.selftest.mock_llm import MODEL, MockLLM
 
 PROFILE = "kelpie-selftest"
@@ -85,16 +95,22 @@ QUIET = 5.0  # seconds without a model call after the stop
 DRAIN = 1.0  # time for the one call in flight when the worker ended to be answered
 CLEANUP_GRACE = 5.0  # SIGTERM to SIGKILL for leftovers
 TICK = 1.0
+SKIPPED = 3  # exit code: the self-test did not run (an overloaded host); 1 is a failure
 
 
 class Failed(Exception):
     """A step failed; the message says what and, after a newline, what to do."""
 
 
+class TimedOut(Failed):
+    """A step ran out of its time: told apart from a failed check, with the host's load."""
+
+
 @dataclass
 class Report:
     out: Callable[[str], None]
     failed: bool = False
+    timed_out: bool = False
     lines: list[str] = field(default_factory=list)
 
     def ok(self, step: str, detail: str) -> None:
@@ -104,6 +120,13 @@ class Report:
         self.failed = True
         what, _, fix = detail.partition("\n")
         self._line(f"FAIL  {step}: {what}")
+        if fix:
+            self._line(f"      fix: {fix}")
+
+    def timeout(self, detail: str) -> None:
+        self.failed = self.timed_out = True
+        what, _, fix = detail.partition("\n")
+        self._line(f"FAIL  timeout: {what}")
         if fix:
             self._line(f"      fix: {fix}")
 
@@ -194,8 +217,12 @@ class Hermes:
     exe: str
     env: dict[str, str]
     cwd: Path
+    timeout: float = CLI_TIMEOUT  # per command (--timeout)
+    wait: float | None = None  # for the agent to start (--timeout); None: WORKER_TIMEOUT
+    load: Callable[[], HostLoad] = read_host_load
 
-    def run(self, *args: str, timeout: float = CLI_TIMEOUT) -> str:
+    def run(self, *args: str, timeout: float | None = None) -> str:
+        timeout = self.timeout if timeout is None else timeout
         try:
             proc = subprocess.run(
                 [self.exe, *args],
@@ -209,7 +236,11 @@ class Hermes:
                 check=False,
             )
         except subprocess.TimeoutExpired as exc:
-            raise Failed(f"hermes {' '.join(args[:3])} timed out after {timeout:g}s") from exc
+            raise TimedOut(
+                f"hermes {' '.join(args[:3])} timed out after {timeout:g}s; host at that "
+                f"moment: {self.load().describe()}\nif the host was busy, rerun when the farm "
+                "is quieter, or give the steps more time with --timeout"
+            ) from exc
         except OSError as exc:
             raise Failed(f"cannot run {self.exe}: {exc}") from exc
         if proc.returncode != 0:
@@ -270,9 +301,21 @@ def _signals_ignored() -> Iterator[None]:
             signal.signal(sig, handler if handler is not None else signal.SIG_DFL)
 
 
-def run(settings: Settings, out: Callable[[str], None], *, keep: bool = False) -> int:
-    """Run the self-test; 0 when every step passed."""
+def run(
+    settings: Settings,
+    out: Callable[[str], None],
+    *,
+    keep: bool = False,
+    timeout: float | None = None,
+    max_load: float = DEFAULT_MAX_LOAD,
+    max_swap: float = DEFAULT_MAX_SWAP,
+    load: Callable[[], HostLoad] | None = None,
+) -> int:
+    """Run the self-test; 0 when every step passed, :data:`SKIPPED` on an overloaded host,
+    1 otherwise. ``timeout``: per Hermes command and for the agent to start (default 120 s
+    each)."""
     report = Report(out)
+
     hermes = settings.hermes or HermesSettings()
     exe = shutil.which(hermes.cli)
     if exe is None:
@@ -296,6 +339,16 @@ def run(settings: Settings, out: Callable[[str], None], *, keep: bool = False) -
     except (ConfigError, ValueError, TypeError) as exc:
         report.fail("rule 10", f"its configuration does not load: {exc}")
         return 1
+    load = load or read_host_load
+    before = load()
+    if before.overloaded(max_load, max_swap):
+        out(f"SKIP  host overloaded ({before.describe()}); rerun when the farm is quieter")
+        out("")
+        out(
+            f"selftest stop: skipped (above {max_load:g} load per core or {max_swap:.0%} swap "
+            "used; --max-load and --max-swap set the limits)"
+        )
+        return SKIPPED
     previous: Any = _UNSET
     tmp: Path | None = None
     try:
@@ -305,10 +358,14 @@ def run(settings: Settings, out: Callable[[str], None], *, keep: bool = False) -
         home, spool = tmp / "home", tmp / "spool.jsonl"
         home.mkdir(mode=0o700)
         (tmp / "user").mkdir(mode=0o700)
-        cli = Hermes(exe, hermes_env(os.environ, home, spool, tmp / "user"), tmp)
+        cli = Hermes(exe, hermes_env(os.environ, home, spool, tmp / "user"), tmp, load=load)
+        if timeout is not None:
+            cli.timeout = cli.wait = timeout
         with MockLLM(COMMAND) as llm:
             try:
                 _steps(report, cli, hermes, rule, llm, home, spool, tmp)
+            except TimedOut as exc:
+                report.timeout(str(exc))
             except Failed as exc:
                 what, _, fix = str(exc).partition("\n")
                 report.fail("selftest", f"{what}\n{fix}" if fix else what)
@@ -330,7 +387,8 @@ def run(settings: Settings, out: Callable[[str], None], *, keep: bool = False) -
             shutil.rmtree(tmp, ignore_errors=True)
     out("")
     if report.failed:
-        out("selftest stop: FAILED (see above); rule 10 is not ready for act on this host")
+        why = "a step timed out" if report.timed_out else "see above"
+        out(f"selftest stop: FAILED ({why}); rule 10 is not ready for act on this host")
         return 1
     out("selftest stop: passed")
     return 0
@@ -397,7 +455,7 @@ def _steps(
         raise Failed(f"Hermes did not spawn {task}: {json.dumps(dispatched)[:300]}")
     report.ok("task dispatched", f"{task} on board {BOARD}, assigned to {PROFILE}")
 
-    rid, recorded = _wait_bound(db, task)
+    rid, recorded = _wait_bound(db, task, cli)
     report.ok(
         "worker running",
         f"run {rid}: submitter pid {recorded.submitter}, agent pid {recorded.agent}",
@@ -428,7 +486,9 @@ def _steps(
     stop = None
     while stop is None:
         if time.monotonic() - started > STOP_TIMEOUT:
-            raise Failed(_not_stopped(spool, rid, recorded, thresholds))
+            what, _, fix = _not_stopped(spool, rid, recorded, thresholds).partition("\n")
+            busy = f"; host at that moment: {cli.load().describe()}"
+            raise Failed(f"{what}{busy}\n{fix}" if fix else what + busy)
         results = engine.tick(lambda: _snapshot(adapter))
         stop = next((r for r in results if r.action.kind is ActionKind.STOP), None)
         if stop is None:
@@ -499,8 +559,9 @@ def _read(db: Path, sql: str, params: Sequence[object] = ()) -> list[sqlite3.Row
         return conn.execute(sql, tuple(params)).fetchall()
 
 
-def _wait_bound(db: Path, task: str) -> tuple[int, Any]:
-    deadline = time.monotonic() + WORKER_TIMEOUT
+def _wait_bound(db: Path, task: str, cli: Hermes) -> tuple[int, Any]:
+    wait = WORKER_TIMEOUT if cli.wait is None else cli.wait
+    deadline = time.monotonic() + wait
     while time.monotonic() < deadline:
         rows = _read(
             db,
@@ -520,9 +581,11 @@ def _wait_bound(db: Path, task: str) -> tuple[int, Any]:
             if recorded is not None and recorded.agent is not None:
                 return int(rows[0]["id"]), recorded
         time.sleep(0.5)
-    raise Failed(
-        f"no agent started for {task} within {WORKER_TIMEOUT:g}s\n"
-        "run with --keep and read home/logs (the gateway) and the profile's logs"
+    raise TimedOut(
+        f"no agent started for {task} within {wait:g}s; host at that moment: "
+        f"{cli.load().describe()}\n"
+        "run with --keep and read home/logs (the gateway) and the profile's logs; if the "
+        "host was busy, rerun when the farm is quieter or raise --timeout"
     )
 
 

@@ -67,7 +67,8 @@ farm unprotected. On Hermes, for this rule, **two things replace "at least 10 tr
 
 - [ ] **A passed self-test** on the host Kelpie acts from, as the user it runs as:
   `kelpie selftest stop --adapter hermes` exits 0 (every step line `PASS`, ending
-  `selftest stop: passed`). It runs on Linux (`/proc`) and macOS (libproc), and refuses to
+  `selftest stop: passed`); exit 3 (`SKIP  host overloaded`) means it did not run: rerun
+  when the farm is quieter. It runs on Linux (`/proc`) and macOS (libproc), and refuses to
   run inside Hermes' own Docker image; where it cannot run, rule 10 keeps the gate above. It
   runs rule 10 in `act` against a throwaway Hermes home and board with a local mock model (no
   real tokens; see
