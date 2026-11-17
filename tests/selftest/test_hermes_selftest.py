@@ -26,6 +26,7 @@ from kelpie.cli import main
 from kelpie.core.config import EngineConfig
 from kelpie.selftest import hermes as selftest
 from kelpie.selftest.hermes import hermes_env
+from kelpie.selftest.load import HostLoad, read_host_load
 from kelpie.sim.board import KANBAN_SCHEMA
 
 pytestmark = pytest.mark.skipif(
@@ -561,3 +562,83 @@ def test_a_board_not_in_wal_mode_fails_the_gate(fake: Path) -> None:
         "      fix: rule 10 stays out of act on this Hermes; tell the Kelpie maintainers" in lines
     )
     assert lines[-1].startswith("selftest stop: FAILED")
+
+
+# --- an overloaded host, and per-step timeouts (issue #483) -----------------------------
+
+
+CALM = HostLoad(1.0, 8, 0.1)
+BUSY = HostLoad(450.0, 10, 0.98)
+
+
+def test_an_overloaded_host_skips_before_the_first_step(fake: Path, tmp_path: Path) -> None:
+    lines: list[str] = []
+    code = selftest.run(settings(fake), lines.append, load=lambda: BUSY)
+    assert code == selftest.SKIPPED == 3
+    assert lines[0] == (
+        "SKIP  host overloaded (load 450 (45.0 per core), swap 98% used); "
+        "rerun when the farm is quieter"
+    )
+    assert lines[-1].startswith("selftest stop: skipped")
+    assert not (fake.parent / "block-env.json").exists()  # Hermes never ran
+    assert [p for p in tmp_path.iterdir() if p.name.startswith("kelpie-selftest-")] == []
+    # Swap alone, or load alone, is enough; limits are the caller's.
+    assert selftest.run(settings(fake), lines.append, load=lambda: HostLoad(1, 8, 0.95)) == 3
+    assert HostLoad(450.0, 10, None).overloaded(max_load=50) is False
+
+
+def test_a_timeout_under_normal_load_is_a_failure_that_says_so(fake: Path) -> None:
+    (fake.parent / "mode").write_text("slow-profile")
+    lines: list[str] = []
+    code = selftest.run(settings(fake), lines.append, load=lambda: CALM, timeout=1)
+    assert code == 1
+    line = next(x for x in lines if x.startswith("FAIL  timeout: "))
+    assert "hermes profile create --no-alias timed out after 1s" in line
+    assert "host at that moment: load 1 (0.1 per core), swap 10% used" in line
+    assert lines[-1].startswith("selftest stop: FAILED (a step timed out)")
+
+
+def test_the_cli_takes_timeout_and_limits(
+    fake: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(selftest, "read_host_load", lambda: HostLoad(5.0, 1, None))
+    config = fake.parent / "kelpie.toml"
+    config.write_text(f'[adapters.hermes]\ncli = "{fake}"\n[storage]\npath = ":memory:"\n')
+    assert main(["--config", str(config), "selftest", "stop", "--timeout", "30"]) == 3
+    assert "SKIP  host overloaded (load 5 (5.0 per core), swap unknown)" in capsys.readouterr().out
+    for bad in (
+        ["--timeout", "0"],
+        ["--max-swap", "90"],
+        ["--max-load", "-1"],
+        ["--max-load", "nan"],
+    ):
+        with pytest.raises(SystemExit):
+            main(["--config", str(config), "selftest", "stop", *bad])
+
+
+def test_an_agent_that_never_starts_is_a_timeout_with_the_load(tmp_path: Path) -> None:
+    db = tmp_path / "kanban.db"
+    conn = sqlite3.connect(db)
+    conn.executescript(KANBAN_SCHEMA)
+    conn.close()
+    cli = selftest.Hermes("hermes", {}, tmp_path, wait=0.2, load=lambda: CALM)
+    with pytest.raises(selftest.TimedOut, match=r"no agent started for t_1 within 0.2s; host"):
+        selftest._wait_bound(db, "t_1", cli)
+
+
+def test_host_load_readings(tmp_path: Path) -> None:
+    meminfo = tmp_path / "meminfo"
+    meminfo.write_text("MemTotal: 100 kB\nSwapTotal:  1000 kB\nSwapFree:  250 kB\n")
+    linux = read_host_load(meminfo, "linux")
+    assert linux.swap_used == pytest.approx(0.75) and linux.cores
+    meminfo.write_text("SwapTotal: 0 kB\nSwapFree: 0 kB\n")
+    assert read_host_load(meminfo, "linux").swap_used is None  # no swap: nothing to fill
+    assert read_host_load(tmp_path / "missing", "linux").swap_used is None
+    mac = "total = 2048.00M  used = 1536.00M  free = 512.00M  (encrypted)"
+    assert read_host_load(platform="darwin", sysctl=lambda: mac).swap_used == pytest.approx(0.75)
+    assert read_host_load(platform="darwin", sysctl=lambda: None).swap_used is None
+    empty = "total = 0.00M  used = 0.00M"
+    assert read_host_load(platform="darwin", sysctl=lambda: empty).swap_used is None
+    assert HostLoad(None, None, None).describe() == "load unknown, swap unknown"
+    assert HostLoad(2.0, None, None).describe() == "load 2, swap unknown"
+    assert not HostLoad(None, None, None).overloaded()

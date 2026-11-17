@@ -245,6 +245,23 @@ started for it, a runaway left by a failed step; never `hermes gateway stop`, wh
 manager could route to a real gateway), deletes the directory, and exits 0 only if every step
 passed. SIGTERM to the self-test cleans up the same way.
 
+**A busy host is not a failure** (#483). Before the first step the self-test reads this
+host's load average and swap (`os.getloadavg()` over the CPU count; `/proc/meminfo` on
+Linux, `sysctl vm.swapusage` on macOS). Above 4 load per core (`--max-load`) or 90% of swap
+used (`--max-swap 0.9`) it starts nothing and prints `SKIP  host overloaded (load 450 (45.0 per
+core), swap 98% used); rerun when the farm is quieter`, then exits **3**, so a cron rerun
+tells "not run" (3) from "failed" (1). A part that cannot be read (no swap configured) never
+makes the host overloaded. Each Hermes command and the wait for the agent to start get
+`--timeout` seconds (default 120); a step that runs out of it is a `FAIL  timeout:` line,
+apart from a failed check, with the host's load at that moment, and the run ends
+`selftest stop: FAILED (a step timed out)`, exit 1. The wait for rule 10's stop keeps
+its own 300 s (the rule needs its calls); a run not stopped by then prints the load too. Rule 10 stays gated either way: only a
+passed self-test counts.
+
+```bash
+kelpie selftest stop --adapter hermes --timeout 300     # a slow host: more time per command
+```
+
 The WAL check matters because Kelpie opens boards read-only. On a board in rollback-journal
 mode, a worker the stop kills mid-write leaves a hot journal that only a write can roll back,
 so Kelpie could not read that board after a stop until Hermes wrote it again. Such a Hermes
