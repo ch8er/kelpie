@@ -5,6 +5,7 @@ the security model and ``builds`` for the guards on the one write."""
 from kelpie.connectors.github.blocks import (
     BlockConditionPattern,
     ConditionSync,
+    check_boards,
     load_block_conditions,
 )
 from kelpie.connectors.github.builds import CiSettings, GitHubCI, load_ci
@@ -22,6 +23,7 @@ __all__ = [
     "GitHubError",
     "GitHubSettings",
     "PrRef",
+    "check_boards",
     "load_block_conditions",
     "load_ci",
     "load_github",

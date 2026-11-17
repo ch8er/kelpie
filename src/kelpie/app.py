@@ -64,6 +64,7 @@ from kelpie.connectors.github import (
     BlockConditionPattern,
     ConditionSync,
     GitHubSettings,
+    check_boards,
     load_block_conditions,
     load_github,
 )
@@ -498,7 +499,26 @@ def load_settings(path: Path | None) -> Settings:
         conditions=conditions,
     )
     _check_propose_token(settings)
+    _check_block_condition_boards(settings)
     return settings
+
+
+def farm_boards(settings: Settings) -> tuple[str, ...] | None:
+    """The board names of the farm's tasks (``Task.board``): this server's
+    ``[[adapters.hermes.boards]]``. None when agents report boards too (``[hub]``): their
+    names are in the agents' configs."""
+    if settings.hub is not None:
+        return None
+    hermes = settings.hermes
+    return tuple(b.name for b in hermes.boards) if hermes is not None else ()
+
+
+def _check_block_condition_boards(settings: Settings) -> None:
+    """``[[block_conditions]] boards`` name boards of the farm."""
+    try:
+        check_boards(settings.block_conditions, farm_boards(settings))
+    except ValueError as exc:
+        raise ConfigError(str(exc)) from exc
 
 
 def _check_propose_token(settings: Settings) -> None:

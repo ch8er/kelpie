@@ -155,6 +155,7 @@ class BlockKind:
     pattern: re.Pattern[str]
     kind: ConditionKind
     repo: str | None = None
+    boards: frozenset[str] = frozenset()  # read only tasks of these boards; empty: every task
 
 
 @dataclass(frozen=True, slots=True)
@@ -607,6 +608,8 @@ class WaitCauses:
             return None
         reason = task.block.reason[:MAX_REASON]
         for b in self._block_kinds:
+            if b.boards and task.board not in b.boards:
+                continue  # as the GitHub step: a scoped pattern reads its boards only
             m = b.pattern.search(reason)
             if m is None or not m.groupdict().get("pr"):
                 continue  # as the GitHub step: a match must name a PR
