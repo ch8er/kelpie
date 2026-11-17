@@ -539,3 +539,21 @@ def test_the_propose_token_is_not_the_issues_adapters(
     settings = load_settings(write(tmp_path, ISSUES_PROPOSING.replace("{issues}", "GH_ISSUES")))
     with pytest.raises(ConfigError, match=r"holds the same token as \$GH_ISSUES"):
         build_app(settings)
+
+
+def test_the_github_step_reads_head_ci_while_rule_4_checks_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from kelpie.app import _github_steps
+
+    monkeypatch.setenv("GITHUB_TOKEN", TOKEN)
+
+    def step(extra: str = "") -> ConditionSync:
+        settings = load_settings(write(tmp_path, CONFIG + extra))
+        steps, _ = _github_steps(settings, Metrics(), lambda: datetime.now(UTC))
+        found = dict(steps)["github"]
+        assert isinstance(found, ConditionSync)
+        return found
+
+    assert step().head_ci
+    assert not step("\n[engine.rules.stale_blocks]\nci_red_after = false\n").head_ci

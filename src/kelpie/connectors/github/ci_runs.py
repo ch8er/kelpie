@@ -67,6 +67,11 @@ class RunsVerdict:
     state: str  # success | failure | pending | none | incomplete
     completed_at: datetime | None  # latest update of a successful counted run
     missing: tuple[str, ...] = ()  # listed workflows without a run
+    # Of a ``failure``: the red runs' workflow names, whether a run is still going, and
+    # when the last completed run was updated (when the commit's CI finished red).
+    failed: tuple[str, ...] = ()
+    running: bool = False
+    done_at: datetime | None = None
 
 
 def judge(
@@ -114,7 +119,25 @@ def judge(
         if v == "success" and (t := parse_time(run.get("updated_at"))) is not None
     ]
     done = max(times, default=None) if state == "success" else None
-    return RunsVerdict(state, done, missing)
+    if state != "failure":
+        return RunsVerdict(state, done, missing)
+    every = [*zip(latest, verdicts, strict=False), *((r, _run_state(r)) for r in rest)]
+    failed = tuple(
+        dict.fromkeys(
+            str(r.get("name") or r.get("path") or "workflow run")
+            for r, v in every
+            if v == "failure"
+        )
+    )
+    ended = [t for r, v in every if v != "pending" and (t := parse_time(r.get("updated_at")))]
+    return RunsVerdict(
+        state,
+        None,
+        missing,
+        failed=failed,
+        running=any(v == "pending" for v in verdicts) or rest_rerun,
+        done_at=max(ended, default=None),
+    )
 
 
 def latest_runs(runs: Sequence[Mapping[str, Any]], by_pr: bool = False) -> list[Mapping[str, Any]]:

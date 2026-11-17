@@ -131,6 +131,9 @@ RESERVED = frozenset(
         "ci_state",
         "ci_source",
         "head_sha",
+        "head_ci",
+        "head_ci_failed",
+        "head_ci_red_since",
     }
 )
 # Statuses a registration attaches to: a task working, about to wait, or waiting. Never a

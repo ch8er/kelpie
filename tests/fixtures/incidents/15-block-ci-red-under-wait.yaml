@@ -1,0 +1,141 @@
+id: "15-block-ci-red-under-wait"
+incident: 15
+title: "A block still says it waits for CI after the PR's own CI went red"
+description: >
+  Seen on a live farm: agents block their cards with "automerge PR #63, review accepted,
+  waiting for CI", and a pattern attaches a pr_merged (or ci_green) condition. Then the
+  PR's own tests fail on its head. The block keeps saying it waits for CI while it really
+  waits for a fix, and nobody hears of it until rule 4's max_block. The GitHub step now
+  puts the head's CI outcome into the condition; rule 4 says so once the head has been red
+  past ci_red_after. Red within the grace period, a green head and a merged PR stay as before.
+rule: stale_blocks
+config:
+  unblock_grace: "5m"
+  max_condition_age: "15m"
+  max_block: "8h"
+  ci_red_after: "30m"
+  ci_red_mode: rule
+  unanswered_asks: true
+snapshot:
+  now: "2026-03-02T14:00:00+00:00"
+  owners:
+    - {id: reviewer-1, role: reviewer}
+    - {id: agent-dev-1, role: developer}
+  tasks:
+    # Waits for the merge of PR #63; its head finished red an hour ago.
+    - id: T-1501
+      title: "Review: retry budget"
+      status: blocked
+      status_since: "2026-03-02T12:00:00+00:00"
+      role: reviewer
+      owner_id: reviewer-1
+      block:
+        reason: "automerge PR #63 — review accepted, waiting for CI"
+        since: "2026-03-02T12:00:00+00:00"
+        condition_id: "block:T-1501:pr_merged:example/repo#63"
+    # Waits for exact-head CI of PR #95; red only 10 minutes ago: within the grace period.
+    - id: T-1502
+      title: "Review: voice settings"
+      status: blocked
+      status_since: "2026-03-02T12:00:00+00:00"
+      role: reviewer
+      owner_id: reviewer-1
+      block:
+        reason: "Review accepted on content for PR #95. Waiting for exact-head CI"
+        since: "2026-03-02T12:00:00+00:00"
+        condition_id: "block:T-1502:ci_green:example/repo#95"
+    # Waits for the merge of PR #64, whose head CI is green: an ordinary wait.
+    - id: T-1503
+      title: "Review: config loader"
+      status: blocked
+      status_since: "2026-03-02T12:00:00+00:00"
+      role: reviewer
+      owner_id: reviewer-1
+      block:
+        reason: "automerge PR #64 — review accepted, waiting for CI"
+        since: "2026-03-02T12:00:00+00:00"
+        condition_id: "block:T-1503:pr_merged:example/repo#64"
+    # PR #65 merged although an optional check had been red: the block is cleared as before.
+    - id: T-1504
+      title: "Review: upload limits"
+      status: blocked
+      status_since: "2026-03-02T12:00:00+00:00"
+      role: reviewer
+      owner_id: reviewer-1
+      block:
+        reason: "automerge PR #65 — review accepted, waiting for CI"
+        since: "2026-03-02T12:00:00+00:00"
+        condition_id: "block:T-1504:pr_merged:example/repo#65"
+  conditions:
+    - id: "block:T-1501:pr_merged:example/repo#63"
+      kind: pr_merged
+      task_id: T-1501
+      params:
+        repo: example/repo
+        pr: 63
+        source: block_reason
+        pr_state: open
+        head_sha: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        head_ci: failure
+        head_ci_failed: ["test (linux)", "pr-rules"]
+        head_ci_red_since: "2026-03-02T13:00:00+00:00"
+      satisfied: false
+      checked_at: "2026-03-02T13:59:00+00:00"
+      registered_at: "2026-03-02T12:00:00+00:00"
+    - id: "block:T-1502:ci_green:example/repo#95"
+      kind: ci_status
+      task_id: T-1502
+      params:
+        repo: example/repo
+        pr: 95
+        source: block_reason
+        expect: success
+        pr_state: open
+        head_sha: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        ci_state: failure
+        head_ci: failure
+        head_ci_failed: ["voice"]
+        head_ci_red_since: "2026-03-02T13:50:00+00:00"
+      satisfied: false
+      checked_at: "2026-03-02T13:59:00+00:00"
+      registered_at: "2026-03-02T12:00:00+00:00"
+    - id: "block:T-1503:pr_merged:example/repo#64"
+      kind: pr_merged
+      task_id: T-1503
+      params:
+        repo: example/repo
+        pr: 64
+        source: block_reason
+        pr_state: open
+        head_sha: "cccccccccccccccccccccccccccccccccccccccc"
+        head_ci: success
+      satisfied: false
+      checked_at: "2026-03-02T13:59:00+00:00"
+      registered_at: "2026-03-02T12:00:00+00:00"
+    - id: "block:T-1504:pr_merged:example/repo#65"
+      kind: pr_merged
+      task_id: T-1504
+      params: {repo: example/repo, pr: 65, source: block_reason, pr_state: merged}
+      satisfied: true
+      satisfied_at: "2026-03-02T13:30:00+00:00"
+      checked_at: "2026-03-02T13:59:00+00:00"
+      registered_at: "2026-03-02T12:00:00+00:00"
+expected_actions:
+  - kind: alert
+    task_id: T-1501
+    severity: warning
+    reason_contains: "PR #63 CI failed on its head (test (linux), pr-rules); the block still says it waits for CI"
+    params: {pr: 63, owner: reviewer-1, failed_checks: ["test (linux)", "pr-rules"]}
+  - kind: alert
+    task_id: T-1501
+    severity: info
+    params: {recipient: reviewer-1, source: ci_red}
+  - kind: unblock
+    task_id: T-1504
+not_expected_actions:
+  - kind: alert
+    task_id: T-1502
+  - kind: alert
+    task_id: T-1503
+  - kind: unblock
+    task_id: T-1501

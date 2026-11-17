@@ -96,6 +96,22 @@ which follows the rule's mode and folds this rule's alerts of its tasks under it
 digest then folds the person's items of its tasks into one (``block_storms``). Its
 "resolved" notice says how many of its tasks were unblocked.
 
+**CI red under a block that waits for CI** (``ci_red_after``, 30m). An agent blocks "waiting
+for CI" on a PR (a ``pr_merged`` or ``ci_status`` condition), and the PR's own CI finishes
+red: the block now waits for a fix, but its reason still says CI, and nobody hears of it
+until ``max_block``. The GitHub step puts the PR head's CI outcome into the condition
+(``head_ci``, ``head_ci_failed``, ``head_ci_red_since``); once the head's CI has been red,
+with nothing still running, for ``ci_red_after`` (counted from the block when it is
+younger), checked since the block was set, this rule alerts (``ci-red``, a state of its
+own per block, so the overdue alert is unchanged): "PR #N CI failed on its head (<check
+names>); the block still says it waits for CI", naming the task's owner (``owner``).
+While rule ``unanswered_asks`` reaches agents (``asks``), the task's assignee is also
+reminded once per head commit while it is idle (``source: ci_red``, ``recipient``). Kelpie
+never unblocks or changes the board for this. A new check: both are only logged
+(``ci_red_mode = "observe"``) until set to ``"rule"``, which follows the rule's mode.
+``ci_red_after = false`` turns it off, and with it the GitHub step's head CI lookups for
+merges.
+
 The dead-end and no-condition alerts list the tasks stuck behind the blocked one
 (``params.stuck_ids``, through dependencies and task waits, as rule 3 reads them), so rule 3
 does not raise a second alert for the same dead end.
@@ -110,13 +126,21 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
-from datetime import timedelta
+from datetime import datetime, timedelta
 from types import MappingProxyType
 from typing import Any
 
 from kelpie.core.actions import Action, ActionKind, Severity
 from kelpie.core.incidents import is_outage_state
-from kelpie.core.model import Condition, ConditionKind, KelpieMark, Snapshot, Status, Task
+from kelpie.core.model import (
+    Condition,
+    ConditionKind,
+    KelpieMark,
+    OwnerKind,
+    Snapshot,
+    Status,
+    Task,
+)
 from kelpie.core.serde import parse_duration
 from kelpie.rules import needs_you, register, unanswered_asks
 from kelpie.rules._alerts import alert_params, check_connectors
@@ -131,12 +155,15 @@ from kelpie.rules._tasks import (
     dead_end_text,
     dead_ends,
     fresh,
+    is_live,
     linked_conditions,
 )
 from kelpie.rules._toolchain import DEFAULT_WINDOW as TOOLCHAIN_WINDOW
 from kelpie.rules.unanswered_asks import UnansweredAsks
 
 NAME = "stale_blocks"
+# Red checks named in a ci-red alert: the GitHub step's own cap (it cannot be imported here).
+MAX_FAILED = 5
 
 
 @dataclass(frozen=True, slots=True)
@@ -161,6 +188,9 @@ class StaleBlocks:
     storm_mode: str = "observe"  # "observe" (a new check: logged only) or "rule": the rule's mode
     # A toolchain change on a host this long before a storm began is its likely cause.
     toolchain_window: timedelta = TOOLCHAIN_WINDOW
+    # A PR's head CI red this long under a block that waits for CI: say so; None: off.
+    ci_red_after: timedelta | None = timedelta(minutes=30)
+    ci_red_mode: str = "observe"  # "observe" (a new check: logged only) or "rule"
     name: str = NAME
 
     def evaluate(self, snapshot: Snapshot) -> Sequence[Action]:
@@ -329,6 +359,7 @@ class StaleBlocks:
         if not all(c.satisfied for c in conditions):
             if theirs or held:
                 return  # rule 13 lists it (it waits on a human task), or it is snoozed
+            yield from self._ci_red(task, conditions, snapshot, behind, snooze)
             if self.max_block is not None and age >= self.max_block:
                 unmet = [c for c in conditions if not c.satisfied]
                 pending = ", ".join(f"{c.id} ({c.kind})" for c in unmet)
@@ -371,6 +402,105 @@ class StaleBlocks:
             params={
                 "conditions": [c.id for c in conditions],
                 "outlived_minutes": int(outlived.total_seconds() // 60),
+            },
+        )
+
+    def _ci_red(
+        self,
+        task: Task,
+        conditions: Sequence[Condition],
+        snapshot: Snapshot,
+        behind: Callable[[str], list[str]],
+        snooze: SnoozeCheck | None = None,
+    ) -> Iterable[Action]:
+        """The block waits for CI (or a merge) on a PR whose head CI finished red at least
+        ``ci_red_after`` ago: an alert naming the task's owner and, while rule
+        ``unanswered_asks`` reaches agents, a reminder to the idle assignee."""
+        block = task.block
+        assert block is not None
+        if self.ci_red_after is None:
+            return
+        red = next(
+            (
+                r
+                for c in conditions
+                if (r := _red_head(c, block.since, snapshot.now, self.max_condition_age))
+                and snapshot.now - max(r.since, block.since) >= self.ci_red_after
+            ),
+            None,
+        )
+        if red is None:
+            return
+        observe = self.ci_red_mode == "observe"
+        owner = task.owner_id or task.assignee
+        checks = ", ".join(red.failed) or "checks not named"
+        what = f"PR #{red.pr}" if red.pr is not None else "The PR's"
+        said = f"{what} CI failed on its head ({checks}); the block still says it waits for CI"
+        ago = _human(snapshot.now - red.since)
+        sha = f" {red.sha[:12]}" if red.sha else ""
+        stuck = behind(task.id)
+        facts = {
+            "pr": red.pr,
+            "repo": red.repo,
+            "head_sha": red.sha,
+            "failed_checks": list(red.failed),
+            "red_since": red.since.isoformat(),
+            "condition": red.condition,
+        }
+        yield replace(
+            self._alert(
+                task,
+                "ci-red",
+                f"{said}. Task {task.id} has been blocked for "
+                f"{_human(snapshot.now - block.since)} on '{block.reason}'; the head{sha} "
+                f"finished red {ago} ago, so the block waits for a fix, not for CI."
+                + behind_text(stuck)
+                + _back(snooze),
+                {
+                    **facts,
+                    "owner": owner,
+                    "stuck_ids": stuck,
+                    **_snooze_params(snooze),
+                    "snooze_task": task.id,  # a snooze holds it (#176)
+                    **alert_params(
+                        f"{task.id}: {said}",
+                        f"{owner or 'The task owner'} to fix the failing checks, or update "
+                        "the block",
+                        len(stuck),
+                    ),
+                },
+                about_wait=True,
+            ),
+            state=f"{NAME}:ci-red:{task.id}:{block.since.isoformat()}",
+            since=red.since,
+            observe_only=observe,
+        )
+        who = task.assignee or task.owner_id
+        if self.asks is None or who is None or not _idle_agent(who, snapshot, self.asks):
+            return
+        yield Action(
+            ActionKind.ALERT,
+            NAME,
+            f"{who}: {said}. Task {task.id} is blocked on '{block.reason}', but its PR's "
+            f"head{sha} finished red {ago} ago: fix the failing checks, or update the block.",
+            task_id=task.id,
+            key=f"ci-red-remind:{task.id}:{block.since.isoformat()}:{red.sha or red.since}",
+            severity=Severity.INFO,
+            since=red.since,
+            once=True,
+            once_per_key=True,
+            own_budget=True,  # as rule unanswered_asks' reminders (#390)
+            observe_only=observe,
+            params={
+                **facts,
+                "recipient": who,
+                "recipient_state": "idle",
+                "source": "ci_red",
+                **alert_params(
+                    f"{who}: {said}",
+                    f"{who} to fix the failing checks on {task.id}, or update the block",
+                    len(stuck),
+                ),
             },
         )
 
@@ -446,7 +576,12 @@ class StaleBlocks:
             (
                 t
                 for t in snapshot.tasks
-                if t.block is not None and state_id == f"{NAME}:{t.id}:{t.block.since.isoformat()}"
+                if t.block is not None
+                and state_id
+                in (
+                    f"{NAME}:{t.id}:{t.block.since.isoformat()}",
+                    f"{NAME}:ci-red:{t.id}:{t.block.since.isoformat()}",
+                )
             ),
             None,
         )
@@ -510,6 +645,67 @@ class StaleBlocks:
             # Long or unexplained, not broken: a CI outage that explains the block folds it.
             about_wait=about_wait or kind == "overdue",
         )
+
+
+@dataclass(frozen=True, slots=True)
+class _Red:
+    """A PR whose head CI finished red, from a condition's params (the GitHub step's)."""
+
+    condition: str
+    pr: int | None
+    repo: str | None
+    sha: str | None
+    failed: tuple[str, ...]
+    since: datetime
+
+
+def _red_head(
+    c: Condition, block_since: datetime, now: datetime, max_age: timedelta
+) -> _Red | None:
+    """The red head of the PR an unmet ``pr_merged`` or ``ci_status`` (expecting success)
+    condition waits on: CI finished red (``head_ci_red_since``), checked since the block was
+    set and within ``max_age``. None otherwise."""
+    p = c.params
+    if c.satisfied is not False or p.get("head_ci") != "failure":
+        return None
+    if c.kind is ConditionKind.CI_STATUS:
+        if p.get("expect", "success") != "success":
+            return None
+    elif c.kind is not ConditionKind.PR_MERGED:
+        return None
+    if c.checked_at is None or c.checked_at < block_since or now - c.checked_at > max_age:
+        return None
+    raw = p.get("head_ci_red_since")
+    try:
+        since = datetime.fromisoformat(raw) if isinstance(raw, str) else None
+    except ValueError:
+        return None
+    if since is None or since.tzinfo is None or since > now:
+        return None
+    pr, repo, sha = p.get("pr"), p.get("repo"), p.get("head_sha")
+    failed = p.get("head_ci_failed")
+    names = tuple(str(n) for n in failed[:MAX_FAILED]) if isinstance(failed, list | tuple) else ()
+    return _Red(
+        c.id,
+        pr if isinstance(pr, int) and not isinstance(pr, bool) and pr > 0 else None,
+        repo if isinstance(repo, str) else None,
+        sha if isinstance(sha, str) else None,
+        names,
+        since,
+    )
+
+
+def _idle_agent(who: str, snapshot: Snapshot, asks: UnansweredAsks) -> bool:
+    """Whether ``who`` is an agent of the farm (not a person) with no live session: rule
+    ``unanswered_asks``' test for a reminder."""
+    owner = next((o for o in snapshot.owners if o.id == who), None)
+    if owner is None or owner.kind is not OwnerKind.AGENT:
+        return False
+    return not any(
+        s.owner_id == who
+        and is_live(s, snapshot.now, asks.session_stale_after, snapshot.host_sleeps)
+        for s in snapshot.sessions
+    )
 
 
 def _back(snooze: SnoozeCheck | None) -> str:
@@ -576,7 +772,7 @@ def build(config: dict[str, Any]) -> StaleBlocks:
         kwargs["max_condition_age"] = _duration(
             config.pop("max_condition_age"), "max_condition_age"
         )
-    for key in ("unlinked_alert_after", "max_block", "stale_evidence_after"):
+    for key in ("unlinked_alert_after", "max_block", "stale_evidence_after", "ci_red_after"):
         if key in config:
             value = config.pop(key)
             # false switches the alert off
@@ -600,6 +796,11 @@ def build(config: dict[str, Any]) -> StaleBlocks:
         if mode not in ("observe", "rule"):
             raise ValueError('storm_mode must be "observe" or "rule" (the rule\'s own mode)')
         kwargs["storm_mode"] = mode
+    if "ci_red_mode" in config:
+        mode = config.pop("ci_red_mode")
+        if mode not in ("observe", "rule"):
+            raise ValueError('ci_red_mode must be "observe" or "rule" (the rule\'s own mode)')
+        kwargs["ci_red_mode"] = mode
     if config:
         raise ValueError(f"unknown parameters: {sorted(config)}")
     return StaleBlocks(**kwargs)

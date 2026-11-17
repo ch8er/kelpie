@@ -186,7 +186,18 @@ class DispatchGate:
 # saw). ``sha`` is not a result: it stays on conditions the platform registered with one
 # (their own binding to a commit) and is dropped from those derived from text (below).
 _RESULTS = frozenset(
-    {"error", "terminal", "observed_status", "pr_state", "ci_state", "ci_source", "head_sha"}
+    {
+        "error",
+        "terminal",
+        "observed_status",
+        "pr_state",
+        "ci_state",
+        "ci_source",
+        "head_sha",
+        "head_ci",
+        "head_ci_failed",
+        "head_ci_red_since",
+    }
 )
 # Conditions the GitHub step derives from text are rebuilt every tick for the PR's current
 # head; re-registered with ``sha`` they would stay pinned to the commit seen when parked,
